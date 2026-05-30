@@ -53,6 +53,7 @@ Legend: [ ] pending, [~] in progress, [x] done.
 | # | Step | Definition of Done | Status |
 |---|------|---------------------|--------|
 | 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, branch `rfc9868-impl`, Linux Docker image (`Dockerfile` + `compose.yml`) | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and in-container); first commit present | [x] |
+| 0.5 | Spike (throwaway): raw send->recv of **arbitrary** surplus bytes over loopback in the `dev` service, to de-risk surplus-area survival before any machinery (folded into Steps 8-9) | container round-trip shows the trailing surplus bytes arrive intact; UDP Length < IP Total Length on the wire | [ ] |
 | 1 | RFC 1071 checksum primitive | unit tests vs RFC example + hand vectors (odd-length, all-zero); `sum + complement == 0` | [ ] |
 | 2 | Wire model: `IpRepr` V4+V6, IPv4+IPv6 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [ ] |
 | 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [ ] |
@@ -61,7 +62,7 @@ Legend: [ ] pending, [~] in progress, [x] done.
 | 6 | OCS compute + validate (two-pass back-patch; odd-pad zero) | validates to 0; any byte flip fails; OCS==0-with-nonzero-UDP-cksum flagged | [ ] |
 | 7 | Typed options: APC (CRC32C), MDS, MRDS, REQ, RES | each round-trips encode->parse->decode; APC vs `crc32c` + vector; wrong length -> `ParseError` | [ ] |
 | 8 | Raw send path (`IP_HDRINCL`) | root-gated loopback: serializer bytes hit the socket unchanged; UDP Length < IP Total Length on wire | [ ] |
-| 9 | Raw recv socket | root-gated loopback: **surplus bytes arrive intact**; ports filtered; no spurious ICMP | [ ] |
+| 9 | Raw recv socket | root-gated loopback: **surplus bytes arrive intact** (premise smoke-tested at Step 0.5); ports filtered; no spurious ICMP | [ ] |
 | 10 | Receive pipeline (pure) | table-driven tests cover deliver/discard, unknown SAFE/UNSAFE, cksum0 x OCS matrix, NOP flood (no root) | [ ] |
 | 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [ ] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [ ] |
@@ -73,6 +74,9 @@ Legend: [ ] pending, [~] in progress, [x] done.
 
 ## Top risks (Linux AF_INET raw) and mitigations
 
+- **Surplus area stripped by the local stack** (the FF2 premise): de-risked up front by the Step 0.5
+  loopback spike, which proves `UDP Length` < `IP Total Length` survives raw send -> raw recv before
+  any TLV/OCS/FRAG work begins; real path/middlebox survival is the separate Step 17 experiment.
 - **Raw recv duplicate/ICMP noise**: bind a dummy `SOCK_DGRAM` to absorb ICMP port-unreachable;
   filter own-source in userspace (Step 9).
 - **`IP_HDRINCL` field fill** (kernel may set Total Length if 0, computes the IP checksum, may rewrite
