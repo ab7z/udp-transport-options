@@ -18,7 +18,13 @@ Split an oversized datagram into FRAG fragments.
 
 ## Plan
 
-To be detailed when the step starts (FRAG value layout from Step 7).
+1. From a payload plus per-datagram options, size fragments against MDS, the MRDS cap, and the
+   surplus budget.
+2. Emit fragments, each with empty UDP data (Length 8): a FRAG option (non-terminal 10-byte /
+   terminal 12-byte with RDOS), correct Frag.Start and Frag.Offset, a shared 32-bit Identification,
+   and an OCS.
+3. Handle the atomic single-fragment (terminal-only) case.
+4. Tests: fragmenting N bytes reassembles to N; sizing respects the MRDS cap.
 
 ## Tasks
 

@@ -16,7 +16,11 @@ must-support, with the framing rules for each Kind.
 
 ## Plan
 
-To be detailed when the step starts.
+1. `OptionKind::from_u8` / `to_u8` backed by `model::kind`, mapping unknown bytes to `Other(u8)`.
+2. `is_safe` / `is_unsafe` via `UNSAFE_MIN`; `is_must_support` for kinds 0..=7.
+3. A `framing()` classifier (single-byte vs TLV vs extended-capable) and `fixed_len()` from
+   `model::length`.
+4. Exhaustive tests over all 256 Kind byte values.
 
 ## Tasks
 

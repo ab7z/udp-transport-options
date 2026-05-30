@@ -17,7 +17,14 @@ Serialize a set of options into a surplus area with correct ordering, alignment,
 
 ## Plan
 
-To be detailed when the step starts.
+1. `OptionsBuilder` accumulates owned `RawOption`s from typed options.
+2. `finish()` emits must-support options first (canonical order, excluding EOL/NOP), then other SAFE
+   options; inserts NOP padding only where alignment requires; appends EOL; zero-fills to an even
+   length.
+3. Reserve the leading OCS slot (Kind + Length + two zero bytes) as the first content and record its
+   offset for the Step 6 back-patch.
+4. Emit the extended length form when a value is large enough to need it.
+5. Tests: serialize -> parse round-trip; canonical ordering; even total length; a golden-byte layout.
 
 ## Tasks
 

@@ -1,2 +1,5 @@
 /target
 /.idea
+
+!CLAUDE.md
+!requirements.md

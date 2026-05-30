@@ -19,7 +19,12 @@ Provide the reproducible evaluation harness for the thesis's staged network envi
 
 ## Plan
 
-To be detailed when the step starts.
+1. Scripts: an `ip netns` plus veth setup, a tunnel-based coupling, and a helper to capture at the
+   receiver NIC.
+2. A runbook (README section) for the staged environments, with `ethtool -K` offload-disable notes
+   and the capability requirements.
+3. A soll-ist checklist tying results to FF1, plus surplus-survival and middlebox observations for
+   FF2.
 
 ## Tasks
 

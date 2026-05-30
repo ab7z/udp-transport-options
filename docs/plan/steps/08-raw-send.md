@@ -17,7 +17,14 @@ Send a datagram with a surplus area over a raw socket, building all headers and 
 
 ## Plan
 
-To be detailed when the step starts.
+1. Create an AF_INET SOCK_RAW socket via `socket2`, set `IP_HDRINCL`, and map `EPERM` to
+   `RecvError::PermissionDenied`.
+2. Assemble the IP header (explicit Total Length), the UDP header (UDP Length < Total Length to open
+   the surplus area), and the surplus (Steps 5 and 6); compute the UDP checksum and the OCS.
+3. `sendto` the destination and confirm the kernel does not overwrite Total Length on the target
+   kernel.
+4. Root-gated loopback test asserting the assembled bytes and that UDP Length < IP Total Length on
+   the wire.
 
 ## Tasks
 

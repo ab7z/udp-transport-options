@@ -5,6 +5,17 @@ commit per step on the `rfc9868-impl` branch. Each step has a detailed file unde
 **Requirements / Plan / Tasks / Definition-of-Done**. This roadmap is the index and the single place
 that tracks status.
 
+## Documents
+
+- [`requirements.md`](../requirements.md) - functional and non-functional requirements, the RFC 9868
+  conformance matrix, and the userspace/raw-socket limitations (feeds FF1).
+- [`architecture.md`](../architecture.md) - module responsibilities, the data model with type and
+  method signatures, the send/receive data flows, and the design rules.
+- [`wire-format.md`](../wire-format.md) - byte-level reference: surplus-area layout, the OCS
+  algorithm, the option TLV/extended forms, the option-kind registry, and the FRAG layouts.
+- [`steps/`](steps/) - one file per step (0-17) with Requirements / Plan / Tasks / DoD.
+- The repo-root [`CLAUDE.md`](../../CLAUDE.md) holds the working conventions and a condensed overview.
+
 ## Goal
 
 Build a userspace, RFC 9868-conformant reference library for UDP Transport Options, plus example peer

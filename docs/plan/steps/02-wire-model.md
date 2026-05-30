@@ -19,7 +19,17 @@ pseudo-header checksum, and the surplus-area location computation.
 
 ## Plan
 
-To be detailed when the step starts (reuse the Step 1 checksum accumulator for the pseudo-header).
+1. Implement `IpRepr::transport_payload_len()` (V4: `total_len - ihl*4`; V6: `payload_len -
+   ext_hdr_len`) and a pseudo-header contribution (addresses, protocol 17, UDP length) that feeds the
+   Step 1 accumulator.
+2. IPv4 parse/build: read and emit IHL, Total Length, protocol, addresses, and the header checksum
+   (20-byte header, no IP options). IPv6 parse/build: the fixed 40-byte header plus minimal
+   extension-header length accounting for the in-scope cases.
+3. `UdpHeader::parse`/`write` and `udp_checksum(ip, header, payload)` over pseudo-header + header +
+   data, applying the IPv4 zero -> 0xFFFF rule.
+4. `locate_surplus(ip, transport_payload)`: surplus = transport payload length - UDP length; derive
+   the even start offset and the odd-start pad flag; return `None` when there is no surplus.
+5. Test against a captured datagram and both even and odd surplus starts.
 
 ## Tasks
 

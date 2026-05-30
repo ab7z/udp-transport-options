@@ -1,0 +1,122 @@
+# CLAUDE.md
+
+Guidance for Claude Code (and human contributors) working in this repository.
+
+## Project overview
+
+A userspace **reference implementation of RFC 9868 (Transport Options for UDP)** in Rust.
+RFC 9868 (published October 2025) carries transport options in the **surplus area**.
+
+The contribution is twofold and equally weighted:
+
+1. an open-source, RFC 9868-conformant reference library of the core mechanisms for userspace, and
+2. an empirical study of how far the surplus area survives real network paths and middleboxes
+   (research questions FF1 and FF2 in the thesis).
+
+The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
+git commit per step on the `rfc9868-impl` branch. The authoritative plan is `docs/plan/ROADMAP.md`,
+with a per-step file under `docs/plan/steps/`.
+
+## Build and test commands
+
+The library and binaries **compile** on any platform, but the raw-socket paths only **run** on Linux.
+
+## Scope
+
+In scope: the TLV options framework; the Option Checksum (OCS, RFC 9868 Section 9); the must-support
+options EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES; a zero-copy parser and a serializer; FRAG
+fragmentation and reassembly (cache, timeout, garbage collection, DoS limits); the two-tier API;
+IPv4 and IPv6; unit tests and loopback integration tests; example sender/receiver peer CLIs.
+
+Out of scope: the TIME option; the reserved AUTH/UCMP/UENC options; the REQ/RES-for-PMTUD use case of
+RFC 9869 (DPLPMTUD); kernel modules; bidirectional/stateful protocols.
+
+## Architecture (module map)
+
+```
+src/
+  model.rs       protocol constants and limits (option kinds, fixed lengths, MRDS defaults, limits)
+  error.rs       ParseError, RecvError
+  wire/
+    checksum.rs  RFC 1071 one's-complement Internet checksum            [hand-rolled]
+    ip.rs        IpRepr { V4, V6 }: transport-payload length, pseudo-header seed; header parse/build
+    udp.rs       UdpHeader parse/build + UDP checksum
+    surplus.rs   SurplusLayout + locate_surplus()
+  options/
+    kind.rs      OptionKind + SAFE/UNSAFE + must-support classification
+    parse.rs     OptionRef<'a> / OptionsIter<'a>: zero-copy, total, never panics   [hand-rolled]
+    serialize.rs OptionsBuilder: must-support-first, NOP align, EOL + zero-fill     [hand-rolled]
+    ocs.rs       compute/validate OCS (reserved-first, two-pass back-patch)         [hand-rolled]
+    typed.rs     TypedOption trait + Copy structs: Apc, Mds, Mrds, Req, Res, Frag
+    (mod.rs)     RawOption (owned counterpart of OptionRef)
+  frag/
+    split.rs     fragmentation (send): non-terminal/terminal fragments, atomic case
+    reassembly.rs ReassemblyCache keyed by FragKey: offset-sort, overlap, timeout, GC, limits
+  recv/
+    pipeline.rs  process_datagram(): pure receive state machine (no I/O, root-free)
+  socket/
+    send.rs      raw send via IP_HDRINCL                                            [Linux, root]
+    recv.rs      raw SOCK_RAW IPPROTO_UDP receive                                   [Linux, root]
+  api/mod.rs     low-level (explicit options) + high-level (transparent OCS + FRAG)
+  bin/           udpopt-send, udpopt-recv (example peer CLIs)
+```
+
+Design rules:
+
+- **Parse borrowed, decode owned.** Only `OptionRef`/`OptionsIter` carry a lifetime; typed options
+  are fixed-length `Copy` PODs. The borrow never crosses the public API boundary.
+- **IP-version-generic from the wire layer.** `IpRepr` covers V4 and V6 so the surplus math, the UDP
+  pseudo-header, and FRAG keying are written once. Only the `AF_INET6` socket wiring is V6-specific.
+- **Pure pipeline vs privileged I/O.** `recv/pipeline.rs` is a pure function over byte buffers
+  (root-free, fully unit-testable); the socket modules are thin and root-gated.
+
+## Key RFC 9868 facts
+
+- **Surplus area** begins on a 2-byte boundary relative to the IP datagram. If its natural start is
+  odd, a single `0x00` pad byte precedes the OCS, and that pad must be zero.
+- **Option framing:** `Kind(1) [+ Length(1) + Value]`. EOL (0) and NOP (1) are single-byte (no
+  Length). `Length == 255` selects the extended 2-byte length form.
+- **Must-support kinds:** 0 EOL, 1 NOP, 2 APC (len 6, CRC32C of user data), 3 FRAG (len 10
+  non-terminal / 12 terminal), 4 MDS (len 4), 5 MRDS (len 5), 6 REQ (len 6), 7 RES (len 6).
+  SAFE = 0..=191, UNSAFE = 192..=255.
+- **OCS** uses the RFC 1071 sum over the whole surplus area (with the OCS field treated as zero) plus
+  the 16-bit surplus length; it must be the first content in the surplus area; the receiver checks
+  that the sum is zero. The UDP checksum covers only up to UDP Length (not the surplus area).
+- **FRAG** is used only with empty UDP user data (UDP Length == 8). Reassembly is keyed by
+  (src IP, src port, dst IP, dst port, Identification); overlap aborts; timeout <= 2 min; per-pair
+  limits; default MRDS 2926 (IPv4) / 2886 (IPv6).
+- **Receive order:** verify UDP checksum, locate/validate the surplus area, validate the OCS, parse
+  the options, then reassemble (FRAG) or deliver. A malformed surplus area discards the options but
+  still delivers the payload; unknown SAFE options are ignored; unknown UNSAFE options cause the
+  reassembled data to be dropped.
+
+## Coding conventions
+
+- `max_width = 120` (`rustfmt.toml`); run `cargo fmt` before committing.
+- Clippy is clean under `-D warnings`.
+- Hand-roll the checksum, the TLV parser/serializer, and the OCS (they are the pedagogical core); do
+  not add `nom`, `pnet`, `etherparse`, `smoltcp`, `bytes`, `nix`, or `zerocopy`.
+- Confine all `unsafe` to `src/socket/` behind safe wrappers; the crate denies
+  `unsafe_op_in_unsafe_fn`.
+- Dependencies: `socket2` + `libc` (raw sockets), `thiserror` (errors), `crc32c` (APC), `clap`
+  (CLIs), `log` (diagnostics, including the >7-NOP DoS log).
+
+## Platform
+
+Linux only at runtime. The raw-socket paths need `CAP_NET_RAW` (or root). There is no macOS path:
+macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`, `::1`) is used for integration tests; a
+network-namespace/veth setup is used for the staged evaluation (see `docs/plan/steps/17-*`).
+
+## Git workflow
+
+- One reviewed commit per step on the `rfc9868-impl` branch; the human reviews the diff between steps.
+- Commit messages in English: imperative subject <= 50 chars, body wrapped at 72.
+- Do not mention AI assistants or tools in commit messages.
+- Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)
+  and updates the status column in `docs/plan/ROADMAP.md`.
+
+## Literature
+
+The relevant RFC texts live in `../mcs-thesis-docs/literature/` (rfc768, rfc791, rfc1071, rfc1122,
+rfc8200, rfc9868, rfc9869, and more). RFC 9868 is the primary reference;
+<https://www.rfc-editor.org/rfc/rfc9868.txt>.

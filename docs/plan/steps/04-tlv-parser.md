@@ -20,7 +20,14 @@ Parse the options in a surplus area as a zero-copy, total, panic-free iterator o
 
 ## Plan
 
-To be detailed when the step starts.
+1. `OptionsIter::new(bytes_after_ocs)` tracking `pos`, a `done` flag, and a consecutive-NOP counter.
+2. Each `next()`: read Kind; EOL sets `done` and stops; NOP consumes one byte and increments the NOP
+   run; otherwise read Length (and the extended form when `Length == 255`), check `len >= 2` and
+   `pos + len <= end`, slice the value, and reset the NOP run.
+3. On any framing or bounds violation, yield exactly one `Err(ParseError::...)` and set `done`.
+4. Expose the maximum NOP run so the pipeline can apply the DoS policy (Step 10).
+5. Tests: valid mixed options; truncated header; overrunning length; bad extended length; a loop over
+   many random inputs asserting no panic.
 
 ## Tasks
 

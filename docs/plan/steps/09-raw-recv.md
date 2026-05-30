@@ -17,7 +17,11 @@ Receive full IP datagrams with the surplus area intact and hand them to the rece
 
 ## Plan
 
-To be detailed when the step starts.
+1. Create an AF_INET SOCK_RAW IPPROTO_UDP socket; attach a BPF destination-port filter, or filter by
+   port in userspace.
+2. Bind a dummy SOCK_DGRAM on the port to absorb ICMP port-unreachable; skip own-source datagrams.
+3. Receive full IP datagrams and hand the bytes to the pipeline (Step 10).
+4. Root-gated loopback round-trip (with Step 8) asserting the surplus area arrives intact.
 
 ## Tasks
 

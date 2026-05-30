@@ -5,7 +5,7 @@ Status: pending
 ## Goal
 
 Implement the one's-complement Internet checksum (RFC 1071) that backs both the UDP checksum and the
-RFC 9868 Option Checksum (OCS).
+OCS.
 
 ## Requirements
 
@@ -18,8 +18,13 @@ RFC 9868 Option Checksum (OCS).
 
 ## Plan
 
-To be detailed when the step starts (build on `model`; expose a small `Checksum` accumulator and a
-one-shot helper).
+1. Define a `Checksum` accumulator over a running `u32`: `add_slice(&[u8])` folds 16-bit big-endian
+   words and treats a trailing odd byte as the high byte of a final word; `add_u16(u16)` adds scalar
+   fields (the surplus length, pseudo-header parts).
+2. `fold()` performs end-around carry folding; `finish() -> u16` returns the one's complement;
+   `sum() -> u16` returns the non-complemented folded sum (OCS verification expects 0).
+3. Provide a one-shot `internet_checksum(&[u8]) -> u16` helper for tests and simple callers.
+4. Keep the module allocation-free and free of `unsafe`.
 
 ## Tasks
 

@@ -16,7 +16,13 @@ Expose the library through a low-level and a high-level API, with finalized erro
 
 ## Plan
 
-To be detailed when the step starts (composes Steps 5-12).
+1. Low-level API: build a datagram from explicit `RawOption`s and parse a received datagram into
+   payload plus options.
+2. High-level peer: wrap the sockets, the pipeline, and the cache; `send(payload, options)` applies
+   the OCS and fragments when needed; `recv()` reassembles transparently and returns the payload and
+   typed options.
+3. Consolidate the `thiserror` error types and document the public surface.
+4. Doctests plus a larger-than-MRDS auto-fragment / reassemble round-trip.
 
 ## Tasks
 

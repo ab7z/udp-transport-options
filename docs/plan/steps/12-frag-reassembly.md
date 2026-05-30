@@ -18,7 +18,14 @@ Reassemble FRAG fragments with overlap protection, timeouts, and DoS limits.
 
 ## Plan
 
-To be detailed when the step starts.
+1. `ReassemblyCache` keyed by `FragKey`, with a per-key partial holding offset-sorted segments, the
+   terminal flag, the RDOS, a byte total, and a receive timestamp.
+2. Insert with overlap detection (overlap -> `Abort(Overlap)`); enforce per-pair byte and segment
+   caps plus a global pending-partial cap.
+3. Timeout and garbage-collect partials (<= 2 minutes); on completion reconstruct the datagram
+   (`Complete(bytes)`) and reject a nested FRAG on the re-pass.
+4. Tests: in-order and out-of-order success; overlap abort; each cap firing; GC; pair isolation; no
+   re-process loop.
 
 ## Tasks
 

@@ -16,7 +16,11 @@ Exercise the full send/receive path over loopback in an automated, privilege-gat
 
 ## Plan
 
-To be detailed when the step starts.
+1. Add a `tests/` harness with a privilege preflight that skips (does not fail) without
+   `CAP_NET_RAW`.
+2. Cover each option, OCS valid/invalid, fragmentation in-order and out-of-order, and malformed
+   surplus areas.
+3. Document the `sudo -E cargo test -- --ignored` and `setcap` lanes in the README.
 
 ## Tasks
 

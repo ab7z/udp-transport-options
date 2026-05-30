@@ -15,7 +15,12 @@ Implement `TypedOption` decode/encode for the fixed-size must-support options.
 
 ## Plan
 
-To be detailed when the step starts.
+1. Implement `TypedOption` for `Apc`, `Mds`, `Mrds`, `Req`, `Res`, and the `Frag` value codec.
+2. `decode` checks the exact value length and reads big-endian fields; `encode` writes the full
+   Kind + Length + Value framing.
+3. `Apc` computes CRC32C over the UDP user data via the `crc32c` crate.
+4. Tests: encode -> parse -> decode round-trips; APC against a known vector; a wrong value length
+   yields `ParseError`.
 
 ## Tasks
 

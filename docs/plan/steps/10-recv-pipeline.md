@@ -20,7 +20,13 @@ Implement the pure, root-free receive state machine that encodes the RFC 9868 pr
 
 ## Plan
 
-To be detailed when the step starts.
+1. `process_datagram(ip, transport_payload, &mut cache)`: verify the UDP checksum, `locate_surplus`,
+   validate the OCS, and apply the cksum/OCS disposition matrix.
+2. Parse and classify options: malformed -> discard options but deliver the payload; unknown SAFE ->
+   ignore; unknown UNSAFE -> drop the (reassembled) data.
+3. Apply the receive-side must-support ordering check and the >7-NOP DoS log (via `log`).
+4. On FRAG, feed the reassembly cache (Step 12) and re-process once on completion.
+5. Table-driven unit tests over crafted byte buffers, requiring no privilege.
 
 ## Tasks
 

@@ -18,7 +18,13 @@ Compute and validate the Option Checksum (RFC 9868 Section 9) over the surplus a
 
 ## Plan
 
-To be detailed when the step starts (build on Step 1 and integrate with Step 5).
+1. `compute_ocs`: over the serialized surplus (OCS field zeroed) plus the 16-bit surplus length, run
+   the Step 1 accumulator and write `!sum` into the reserved OCS field (two-pass back-patch).
+2. `validate_ocs`: recompute and accept iff the folded sum is 0.
+3. Enforce the odd-start pad byte is zero on both write and read (`ParseError::NonZeroPad`).
+4. Encode the disposition: OCS == 0 with a non-zero UDP checksum means the options are ignored.
+5. Wire validation in as the gate before `OptionsIter` runs.
+6. Tests: a serialized surplus validates to 0; any byte flip fails; seed the cksum/OCS matrix.
 
 ## Tasks
 

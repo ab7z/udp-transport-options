@@ -17,7 +17,11 @@ evaluation traffic.
 
 ## Plan
 
-To be detailed when the step starts.
+1. `udpopt-send`: clap arguments for destination, payload, options (APC, MDS, MRDS), and a
+   fragmentation toggle, with verbose hexdump output.
+2. `udpopt-recv`: receive, decode, and print the options and payload, with verbose hexdump output.
+3. Without privilege, exit non-zero with a clear `PermissionDenied` message.
+4. Document a loopback demonstration invocation.
 
 ## Tasks
 
