@@ -1,0 +1,64 @@
+# Local Linux dev/test environment for macOS hosts (see ./Dockerfile).
+#
+#   docker compose build
+#   docker compose run --rm dev cargo test
+#   docker compose run --rm dev bash          # interactive shell
+#
+# The `dev` service is the day-to-day container. The `peers` profile adds two endpoints
+# on a shared bridge network for two-peer end-to-end runs:
+#
+#   docker compose --profile peers up -d
+#   docker compose exec peer-recv bash
+#   docker compose exec peer-send bash
+
+x-rust-build: &rust-build
+  build:
+    context: .
+    dockerfile: Dockerfile
+  working_dir: /workspace
+  # CAP_NET_RAW: AF_INET/AF_INET6 SOCK_RAW (the send/recv paths) -- the core requirement.
+  # CAP_NET_ADMIN: veth/link config and ethtool.
+  # CAP_SYS_ADMIN: `ip netns add` (mounts /run/netns) for the Step 17 netns/veth harness.
+  cap_add:
+    - NET_RAW
+    - NET_ADMIN
+    - SYS_ADMIN
+
+services:
+  dev:
+    <<: *rust-build
+    volumes:
+      - .:/workspace
+      - cargo-registry:/home/dev/.cargo/registry
+      - target-cache:/workspace/target
+    # Keep the container alive so `docker compose exec dev <cmd>` reuses one warm container.
+    command: sleep infinity
+
+  peer-recv:
+    <<: *rust-build
+    profiles: ["peers"]
+    volumes:
+      - .:/workspace
+      - cargo-registry:/home/dev/.cargo/registry
+      - target-cache:/workspace/target
+    networks:
+      - peers
+    command: sleep infinity
+
+  peer-send:
+    <<: *rust-build
+    profiles: ["peers"]
+    volumes:
+      - .:/workspace
+      - cargo-registry:/home/dev/.cargo/registry
+      - target-cache:/workspace/target
+    networks:
+      - peers
+    command: sleep infinity
+
+volumes:
+  cargo-registry:
+  target-cache:
+
+networks:
+  peers:

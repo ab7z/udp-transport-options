@@ -52,7 +52,7 @@ Legend: [ ] pending, [~] in progress, [x] done.
 
 | # | Step | Definition of Done | Status |
 |---|------|---------------------|--------|
-| 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, branch `rfc9868-impl` | `cargo build` + `fmt --check` + `clippy -D warnings` green; first commit present | [x] |
+| 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, branch `rfc9868-impl`, Linux Docker image (`Dockerfile` + `compose.yml`) | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and in-container); first commit present | [x] |
 | 1 | RFC 1071 checksum primitive | unit tests vs RFC example + hand vectors (odd-length, all-zero); `sum + complement == 0` | [ ] |
 | 2 | Wire model: `IpRepr` V4+V6, IPv4+IPv6 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [ ] |
 | 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [ ] |
@@ -91,6 +91,9 @@ Legend: [ ] pending, [~] in progress, [x] done.
   green; the step's unit tests pass.
 - Functional (root-free): `cargo test`.
 - Integration (root, Linux): `sudo -E cargo test -- --ignored`.
+- On macOS, all Linux runtime steps go through the Docker Compose `dev` service, e.g.
+  `docker compose run --rm dev sudo -E cargo test -- --ignored` (the container carries
+  `NET_RAW`/`NET_ADMIN`, effective for root, so the root-gated lane runs via `sudo -E`).
 - End-to-end: the `udpopt-send`/`udpopt-recv` CLIs over loopback, confirmed with a `tcpdump`/Wireshark
   capture showing the surplus area on the wire.
 - Empirical (Step 17): the netns/veth runbook for the thesis's staged environments.
