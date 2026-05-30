@@ -1,0 +1,25 @@
+[package]
+name = "udp-transport-options"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.96"
+description = "Reference implementation of RFC 9868 (Transport Options for UDP) in Rust"
+license = "MIT"
+publish = false
+
+[dependencies]
+thiserror = "2"
+socket2 = "0.6.4"
+libc = "0.2"
+crc32c = "0.6"
+log = "0.4"
+clap = { version = "4", features = ["derive"] }
+
+# Example peer CLIs (Step 14). Cargo auto-detects these from src/bin/, listed here for clarity.
+[[bin]]
+name = "udpopt-send"
+path = "src/bin/udpopt-send.rs"
+
+[[bin]]
+name = "udpopt-recv"
+path = "src/bin/udpopt-recv.rs"
