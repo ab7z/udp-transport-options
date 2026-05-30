@@ -107,6 +107,12 @@ Linux only at runtime. The raw-socket paths need `CAP_NET_RAW` (or root). There 
 macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`, `::1`) is used for integration tests; a
 network-namespace/veth setup is used for the staged evaluation (see `docs/plan/steps/17-*`).
 
+On macOS, develop and run the Linux paths through the Docker Compose `dev` service: `docker compose
+run --rm dev <cmd>` (the container holds `CAP_NET_RAW` for raw sockets plus `CAP_NET_ADMIN`/
+`CAP_SYS_ADMIN` for the Step 17 netns/veth harness). The service runs as a non-root user, so those
+caps are effective only for root: the root-gated lane runs as `docker compose run --rm dev sudo -E
+cargo test -- --ignored`. See the README "Local docker development" section.
+
 ## Git workflow
 
 - One reviewed commit per step on the `rfc9868-impl` branch; the human reviews the diff between steps.
