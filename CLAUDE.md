@@ -121,6 +121,18 @@ cargo test -- --ignored`. See the README "Local docker development" section.
 - Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)
   and updates the status column in `docs/plan/ROADMAP.md`.
 
+## Knowledge capture (living docs)
+
+Three self-contained HTML docs at the repo root accumulate project knowledge for the thesis and for a
+junior developer; keep them current:
+
+- `wiki.html` - durable, topical: findings, key RFC facts, caveats/gotchas, FF1/FF2 thesis hooks.
+- `journal.html` - chronological, junior-friendly diary, one entry per step (what/why/learned/commits).
+- `glossary.html` - plain-English term reference with `id` anchors; `journal.html`/`wiki.html` link to them.
+
+Every step: append a `journal.html` entry, promote any durable finding/caveat into `wiki.html`, and add
+any new term to `glossary.html`. Do not let a useful finding live only in a commit message or step file.
+
 ## Literature
 
 The relevant RFC texts live in `../mcs-thesis-docs/literature/` (rfc768, rfc791, rfc1071, rfc1122,
