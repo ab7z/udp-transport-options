@@ -69,6 +69,9 @@ Design rules:
   pseudo-header, and FRAG keying are written once. Only the `AF_INET6` socket wiring is V6-specific.
 - **Pure pipeline vs privileged I/O.** `recv/pipeline.rs` is a pure function over byte buffers
   (root-free, fully unit-testable); the socket modules are thin and root-gated.
+- **Strictly single-threaded and synchronous.** No threads, no async, no background tasks anywhere
+  (library, binaries, tests, examples). Time-based logic (the FRAG reassembly timeout and GC) is
+  caller-driven via a passed-in timestamp (`gc(&mut self, now: Instant)`), never a background thread.
 
 ## Key RFC 9868 facts
 
@@ -123,18 +126,24 @@ cargo test -- --ignored`. See the README "Local docker development" section.
 
 ## Knowledge capture (living docs)
 
-Three self-contained HTML docs at the repo root accumulate project knowledge for the thesis and for a
+Two self-contained HTML docs at the repo root accumulate project knowledge for the thesis and for a
 junior developer; keep them current:
 
-- `wiki.html` - durable, topical: findings, key RFC facts, caveats/gotchas, FF1/FF2 thesis hooks.
-- `journal.html` - chronological, junior-friendly diary, one entry per step (what/why/learned/commits).
-- `glossary.html` - plain-English term reference with `id` anchors; `journal.html`/`wiki.html` link to them.
+- `journal.html` - chronological, junior-friendly diary, one entry per step (what/why/learned/commits),
+  plus a `#reference` section at the bottom holding the durable, topical knowledge base: findings, key
+  RFC facts, caveats/gotchas, FF1/FF2 thesis hooks.
+- `glossary.html` - plain-English term reference with `id` anchors; `journal.html` links to them.
 
-Every step: append a `journal.html` entry, promote any durable finding/caveat into `wiki.html`, and add
-any new term to `glossary.html`. Do not let a useful finding live only in a commit message or step file.
+Every step: append a `journal.html` entry, promote any durable finding/caveat into the `journal.html`
+`#reference` section, and add any new term to `glossary.html`. Do not let a useful finding live only in
+a commit message or step file.
 
 ## Literature
 
 The relevant RFC texts live in `../mcs-thesis-docs/literature/` (rfc768, rfc791, rfc1071, rfc1122,
 rfc8200, rfc9868, rfc9869, and more). RFC 9868 is the primary reference;
 <https://www.rfc-editor.org/rfc/rfc9868.txt>.
+
+---
+
+Call me in EVERY RESPONSE GreenCodeDoesntSmell and answer ALWAYS in German.

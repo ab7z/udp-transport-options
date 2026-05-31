@@ -578,6 +578,18 @@ Rationale and payoff:
   exactly the line between "RFC behaviour implementable as pure logic" and "behaviour that depends on
   what the kernel's raw-socket path lets us do."
 
+### Rule 4: strictly single-threaded and synchronous
+
+The crate uses no threads, no async, and no background tasks -- in the library, the binaries, the
+tests, and the examples. All state is owned and mutated on one call stack. Time-based behaviour (the
+FRAG reassembly timeout and garbage collection) is **caller-driven**: `ReassemblyCache::gc(&mut self,
+now: Instant)` takes the current time as a parameter and the application decides when to call it, so a
+single socket pair cannot pin memory -- there is no background sweeper thread. This keeps the receive
+path deterministic and trivially testable, and it matches the staged evaluation harness (Step 0.5 /
+Step 17): each spike binary (the client and the server) is itself single-threaded and synchronous, and
+the shell harness (`scripts/spike.sh`) orchestrates them as two separate sequential processes -- there
+is no in-process threading or async.
+
 ## 5. Data flow
 
 ### 5.1 Send walkthrough
