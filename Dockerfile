@@ -13,10 +13,12 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # build-essential + pkg-config: build the crate and its native deps.
 # iproute2 + tcpdump + libcap2-bin + ethtool: netns/veth, packet capture, capability and
-#   offload inspection for the integration lane and the Step 17 harness.
+# offload inspection for the integration lane and the Step 17 harness.
 # curl + ca-certificates + git + sudo: rustup install and an interactive dev shell.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
+        net-tools \
+        netcat-openbsd \
         ca-certificates \
         curl \
         ethtool \
@@ -29,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root dev user with passwordless sudo. The container's CAP_NET_RAW/NET_ADMIN/SYS_ADMIN
-# (granted in compose.yml) are effective only for root, so the root-gated raw-socket lane runs
+# (granted in docker-compose.yml) are effective only for root, so the root-gated raw-socket lane runs
 # as `sudo -E cargo ...`. secure_path keeps rustup's cargo (under the dev HOME) on sudo's PATH;
 # without it sudo resets PATH and `cargo` is not found.
 ARG USERNAME=dev
