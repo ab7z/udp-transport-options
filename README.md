@@ -69,7 +69,7 @@ docker compose run --rm dev sudo -E cargo test -- --ignored
 docker compose run --rm dev bash        # interactive shell
 
 # Step 0.5 spike: surplus-area survival over a staged 1500-MTU veth link across two netns
-docker compose run --rm dev sudo -E scripts/spike.sh
+docker compose run --rm dev scripts/spike.sh
 ```
 
 Two-peer end-to-end runs over a shared bridge network use the `peers` profile:

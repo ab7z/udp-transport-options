@@ -57,7 +57,7 @@ RFC requirements:
   full, reassembled datagrams); per-case checks the surplus arrived intact; gates delivery.
 - `scripts/spike.sh` -- orchestrator: creates the netns + veth + MTU-1500 link, builds, runs server
   then client in their namespaces, prints the report, and tears the link down (`trap ... EXIT`).
-  Subcommands `up` / `down` / `--keep` for manual `tcpdump -i veth-h` inspection.
+  Subcommands `up` / `down` for manual `tcpdump -i veth-h` inspection.
 
 ## Cases
 
@@ -72,14 +72,15 @@ RFC requirements:
 - [x] `examples/common/mod.rs`: constants, case table, datagram builder, marker matcher, checksums.
 - [x] `examples/spike_client.rs`: raw `IP_HDRINCL` send; `EMSGSIZE` assertion for `over-mtu`.
 - [x] `examples/spike_server.rs`: raw recv, surplus extraction, per-case PASS/FAIL, Finding-A note.
-- [x] `scripts/spike.sh`: netns/veth/MTU-1500 setup, run, trap teardown; `up`/`down`/`--keep`.
+- [x] `scripts/spike.sh`: netns/veth/MTU-1500 setup, run, trap teardown; `up`/`down`.
 
 ## Definition of Done
 
-- `docker compose run --rm dev sudo -E scripts/spike.sh` prints the per-case report and exits 0:
+- `docker compose run --rm dev scripts/spike.sh` prints the per-case report and exits 0:
   `sweep-*` and `hide-attempt` PASS on the server (with the Finding-A note on `hide-attempt`),
-  `over-mtu` PASS on the client (`EMSGSIZE`, Finding B). (`-E` keeps the dev `HOME` so cargo finds its
-  cache; the link setup needs `CAP_NET_ADMIN`/`CAP_SYS_ADMIN`, effective for root via `sudo`.)
+  `over-mtu` PASS on the client (`EMSGSIZE`, Finding B). (The script re-execs itself under `sudo -E`
+  if not already root; `-E` keeps the dev `HOME` so cargo finds its cache; the link setup needs
+  `CAP_NET_ADMIN`/`CAP_SYS_ADMIN`, effective only for root.)
 - Teardown leaves no `spk` netns, `veth-h`, or readiness file behind.
 - Optional wire check: `scripts/spike.sh up`, then `tcpdump -i veth-h -n -v` shows IP Total Length
   tracking the buffer length (Finding A); `scripts/spike.sh down` to clean up.

@@ -120,10 +120,17 @@ pub const CASES: &[Case] = &[
     },
     // Finding B: a 3000-byte datagram exceeds the 1500 MTU; the IP_HDRINCL send fails EMSGSIZE.
     Case {
-        label: "over-mtu",
+        label: "over-mtu-1",
         udp_data_len: 0,
         surplus_len: 2972,
         written_ip_total_len: 3000,
+        check: Check::SendFails,
+    },
+    Case {
+        label: "over-mtu-2",
+        udp_data_len: 1000,
+        surplus_len: 501,
+        written_ip_total_len: 1500,
         check: Check::SendFails,
     },
 ];

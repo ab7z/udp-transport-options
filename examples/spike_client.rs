@@ -6,7 +6,7 @@
 //! Not run directly -- `scripts/spike.sh` builds it and runs it after the server is listening:
 //!
 //! ```text
-//! docker compose run --rm dev sudo -E scripts/spike.sh
+//! docker compose run --rm dev scripts/spike.sh
 //! ```
 //!
 //! The `unsafe` here (raw `IP_HDRINCL` setsockopt, in `common`) is deliberately inline and minimal;

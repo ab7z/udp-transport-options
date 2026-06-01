@@ -3,14 +3,22 @@
 # namespaces, runs the client (default netns) and server (netns spk), prints the per-case report,
 # and tears the link down. Prototypes the Step 17 netns/veth harness.
 #
-#   docker compose run --rm dev sudo -E scripts/spike.sh          # full run (setup -> run -> teardown)
-#   docker compose run --rm dev sudo -E scripts/spike.sh --keep   # run, but leave the link up
-#   docker compose run --rm dev sudo -E scripts/spike.sh up       # just create the link (e.g. tcpdump)
-#   docker compose run --rm dev sudo -E scripts/spike.sh down     # remove the link
+#   docker compose run --rm dev scripts/spike.sh         # full run (setup -> run -> teardown)
+#   docker compose run --rm dev scripts/spike.sh up      # just create the link (e.g. tcpdump)
+#   docker compose run --rm dev scripts/spike.sh down    # remove the link
 #
-# Needs root + CAP_NET_ADMIN/CAP_SYS_ADMIN (the dev service holds them; reach them via sudo). `-E`
-# keeps the dev HOME so cargo finds its registry cache.
+# Needs root + CAP_NET_RAW/CAP_NET_ADMIN/CAP_SYS_ADMIN (the dev service holds them). The script
+# re-execs itself under `sudo -E` if not already root; `-E` keeps the dev HOME so cargo finds its
+# registry cache.
+
 set -euo pipefail
+
+# Self-elevate: link setup + raw sockets need CAP_NET_RAW/CAP_NET_ADMIN/CAP_SYS_ADMIN, effective only
+# for root in the dev service. Re-exec under sudo (passwordless for the dev user) so callers can drop
+# the `sudo -E`.
+if [ "$(id -u)" -ne 0 ]; then
+    exec sudo -E "$0" "$@"
+fi
 
 NS=spk
 VETH_H=veth-h
@@ -75,21 +83,15 @@ case "$action" in
         link_down
         echo "link down"
         ;;
-    run | --keep)
+    run)
         link_up
-        if [ "$action" = "--keep" ]; then
-            rc=0
-            run_spike || rc=$?
-            echo "(--keep) link left up; tear down with: scripts/spike.sh down"
-            exit $rc
-        fi
         trap link_down EXIT
         rc=0
         run_spike || rc=$?
         exit $rc
         ;;
     *)
-        echo "usage: spike.sh [run|--keep|up|down]" >&2
+        echo "usage: spike.sh [run|up|down]" >&2
         exit 64
         ;;
 esac
