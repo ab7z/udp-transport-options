@@ -163,21 +163,17 @@ jobs:
       always() &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.ref != 'main'
-    permissions: {}
+    permissions:
+      pull-requests: write
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
 
     steps:
       - name: Post @codex review comment
         env:
-          # Codex only reviews when the mention author has a linked Codex account,
-          # so this must be a user PAT, never github.token (bot mentions are refused).
-          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT }}
+          # Prefer a user PAT when configured; fall back to the workflow token.
+          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT || github.token }}
         run: |
-          if [ -z "$GH_TOKEN" ]; then
-            echo "::notice::Secret CODEX_TRIGGER_PAT is not set; skipping the Codex review request."
-            exit 0
-          fi
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
           @codex review for RFC 9868 semantic and protocol conformance: wire format, option
           framing and handling, OCS, FRAG, and receive-pipeline semantics of the changes.
