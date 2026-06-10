@@ -163,8 +163,7 @@ jobs:
       always() &&
       github.event.pull_request.base.ref == 'main' &&
       github.event.pull_request.head.ref != 'main'
-    permissions:
-      pull-requests: write
+    permissions: {}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
 
