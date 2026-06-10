@@ -55,12 +55,19 @@ impl Checksum {
     }
 
     /// Returns the one's complement of the folded sum: the value stored in a checksum field.
+    ///
+    /// This is the raw RFC 1071 complement and is `0x0000` whenever the folded sum is `0xffff`.
+    /// It is not normalized for any wire format: UDP transmits `0xffff` in place of a computed
+    /// zero (RFC 768), and the OCS must be non-zero whenever the UDP checksum is non-zero
+    /// (RFC 9868 Section 9; FR-21). Those zero rules belong to the UDP/OCS writers, not here.
     pub fn finish(&self) -> u16 {
         !self.sum()
     }
 }
 
 /// One-shot convenience over [`Checksum`]: the complemented checksum of a single byte slice.
+///
+/// Returns the raw complement; the zero-normalization caveat on [`Checksum::finish`] applies.
 pub fn internet_checksum(bytes: &[u8]) -> u16 {
     let mut checksum = Checksum::new();
     checksum.add_slice(bytes);
