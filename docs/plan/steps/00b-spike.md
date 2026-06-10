@@ -25,65 +25,90 @@ packet across the wire). Because a network namespace is per-process, the sender 
 
 ## Findings (the point of the spike)
 
-Two behaviours of the Linux raw `IP_HDRINCL` path, confirmed on the wire, shape everything downstream.
-Both were checked against RFC 9868 (§5, §8, §11.4, §21) with no contradictions -- they are Linux
-host-stack behaviours that are *consistent with* (Finding A) and *motivate* (Finding B) the RFC, not
-RFC requirements:
+Three behaviours of the Linux raw-socket path, confirmed on the wire, shape everything downstream.
+All were checked against RFC 9868 (§5, §8, §11.4, §21) with no contradictions -- they are Linux
+host-stack behaviours that are *consistent with* (Finding A), *motivate* (Finding B), or *put the
+burden on the receiver exactly where the RFC's receive order expects it* (Finding C), not RFC
+requirements:
 
 - **Finding A -- IP Total Length is forced to the buffer length.** Writing a smaller IP Total Length
   than the bytes handed to the kernel does not hide the trailing bytes: the kernel rewrites IP Total
   Length to the buffer length, so every appended byte is delivered as surplus. The originally
   hypothesised "append bytes *beyond* IP Total Length so the receiver can't see them" is therefore
-  unconstructable on this path (`hide-attempt` demonstrates it). This is consistent with the RFC's
+  unconstructable on this path (the `under` variants demonstrate it). This is consistent with the RFC's
   surplus model: §21 redefines the IP payload "beyond the UDP Length but within the IP Length" as the
   surplus, and §8 has options use the *entire* surplus area, so no addressable region exists *beyond*
   IP Length -- the kernel rewrite is a host-stack detail the RFC does not speak to.
 - **Finding B -- the `IP_HDRINCL` path will not fragment.** A send larger than the link MTU fails
   with `EMSGSIZE` (even with DF clear), where a normal UDP socket would fragment. So a surplus plus
   its UDP data must fit within one MTU-sized datagram; larger logical payloads need RFC 9868's FRAG
-  option (Steps 11-12), not IP fragmentation (`over-mtu-1`/`over-mtu-2` demonstrate it). The RFC independently argues
+  option (Steps 11-12), not IP fragmentation (every over-MTU combo demonstrates it). The RFC independently argues
   against IP fragmentation for UDP Options: §5 and §11.4 introduce FRAG to carry messages "larger than
   allowed by the IP MTU/EMTU_R" while copying the transport ports into each fragment (unlike IP
   fragments). So the local-API limit (`EMSGSIZE`) and the RFC's path argument converge on "use FRAG".
+- **Finding C -- the raw receive path delivers without any UDP-level validation.** A zero UDP
+  checksum, a deliberately wrong checksum, a UDP Length field claiming more bytes than the IP
+  datagram holds, and a UDP Length below 8 all arrive at the `SOCK_RAW`/`IPPROTO_UDP` socket
+  unfiltered (the four header-anomaly cases). The kernel's UDP checksum/length checks
+  live in the `SOCK_DGRAM` delivery path, which raw sockets bypass. Consequence: the Step 10
+  receive pipeline must itself verify the UDP checksum and the UDP Length consistency before
+  trusting the surplus math -- which is precisely the first two steps of RFC 9868's receive order.
 
 ## Components
 
-- `examples/common/mod.rs` -- shared constants, the case table, `build_datagram`, `match_marker`, the
-  RFC 1071 / UDP checksums, and `IP_HDRINCL` setup (the only `unsafe`, inline and minimal).
+- `examples/common/mod.rs` -- shared constants, the case generator `cases()`, `build_datagram`,
+  `match_marker`, the RFC 1071 / UDP checksums, and `IP_HDRINCL` setup (the only `unsafe`, inline
+  and minimal).
 - `examples/spike_client.rs` -- default netns; raw `IP_HDRINCL` send of each case to 10.0.0.2; gates
-  the send-limit cases (`over-mtu-1`/`over-mtu-2` must fail `EMSGSIZE`).
+  the send-limit cases (every over-MTU combo must fail `EMSGSIZE`).
 - `examples/spike_server.rs` -- netns `spk`; raw `SOCK_RAW`/`IPPROTO_UDP` recv (the kernel delivers
-  full, reassembled datagrams); per-case checks the surplus arrived intact; gates delivery.
+  full, reassembled datagrams); per-case checks the surplus arrived intact (wire combos) or logs
+  the observed anomaly shape (`WireRaw`); gates delivery.
 - `scripts/spike.sh` -- orchestrator: creates the netns + veth + MTU-1500 link, builds, runs server
   then client in their namespaces, prints the report, and tears the link down (`trap ... EXIT`).
   Subcommands `up` / `down` for manual `tcpdump -i veth-h` inspection.
 
 ## Cases
 
-- `sweep-0/8/40/max` -- a surplus of 0/8/40/**1472** bytes inside a `<= 1500` datagram (the last is
-  the maximum surplus that fits one MTU); each must arrive byte-for-byte intact. (gating, server)
-- `hide-attempt` -- fill the UDP payload, write an IP Total Length that declares *no* surplus, append
-  40 bytes anyway; the receiver still sees all 40 (Finding A). (gating, server)
-- `over-mtu-1` -- a 3000-byte datagram; the send must fail `EMSGSIZE` (Finding B). (gating, client)
-- `over-mtu-2` -- a 1529-byte buffer whose *written* IP Total Length is 1500 (within the MTU); the
-  kernel sizes the send by the buffer, not the written field (Finding A), so it still fails
-  `EMSGSIZE`. (gating, client)
+The hand-written table became a deterministic generator (`cases()` in `examples/common/mod.rs`,
+97 cases); client and server build the identical list, and the expectation per case is *derived*
+(physical size > MTU -> `SendFails`, else `Wire`), never listed by hand.
+
+- **Cross product** (92 combos): user-data sizes `{0, 1, 13, 1392}` x surplus sizes
+  `{0, 1, 8, 39, 40, 1471, 1472, 1473}` x written-IP-Total-Length variants `honest` (= physical),
+  `under` (declares *no* surplus -- the old `hide-attempt`; only when there is one), and `over`
+  (declares 40 bytes more than the buffer). The dims cross the MTU boundary from both sides for
+  every user-data size (e.g. `d0-s1472` arrives, `d0-s1473` fails `EMSGSIZE`, `d1392-s1471`
+  fails); odd sizes are covered on both axes. The `under`/`over` variants confirm Finding A in
+  *both* directions: the kernel rewrites a lying IP Total Length to the buffer length whether it
+  understates or overstates (42 delivered cases carried a lying value; all arrived with
+  total == buffer).
+- `over-mtu-3000` -- the far-over-MTU case kept from the original table (Finding B). (gating, client)
+- **Header-anomaly cases** (4, `WireRaw`): does the kernel validate anything UDP-level before
+  handing the datagram to `SOCK_RAW`/`IPPROTO_UDP`? `cksum-zero` (checksum 0 = "no checksum"),
+  `cksum-bad` (deliberately wrong checksum), `len-overclaim` (UDP Length field 500 of 48
+  available bytes), `len-under-8` (UDP Length 4, shorter than the UDP header). Gated only on
+  *arrival*; the observed shape is logged, not judged. Result -- **Finding C: all four are
+  delivered.** The raw-socket receive path bypasses UDP-level validation entirely (no
+  checksum check, no length-consistency check), so the Step 10 receive pipeline must validate
+  the UDP checksum and the UDP Length itself, exactly as RFC 9868's receive order prescribes.
 
 ## Tasks
 
 - [x] `examples/common/mod.rs`: constants, case table, datagram builder, marker matcher, checksums.
-- [x] `examples/spike_client.rs`: raw `IP_HDRINCL` send; `EMSGSIZE` assertions for `over-mtu-1`/`over-mtu-2`.
+- [x] `examples/spike_client.rs`: raw `IP_HDRINCL` send; `EMSGSIZE` assertions for the over-MTU combos.
 - [x] `examples/spike_server.rs`: raw recv, surplus extraction, per-case PASS/FAIL, Finding-A note.
 - [x] `scripts/spike.sh`: netns/veth/MTU-1500 setup, run, trap teardown; `up`/`down`.
+- [x] Expand the table into the combinatorial generator + anomaly cases (Finding C).
 
 ## Definition of Done
 
-- `scripts/vm-ubuntu-server.sh spike` prints the per-case report and exits 0:
-  `sweep-*` and `hide-attempt` PASS on the server (with the Finding-A note on `hide-attempt`),
-  `over-mtu-1`/`over-mtu-2` PASS on the client (`EMSGSIZE`, Finding B). (The lane cross-builds the examples on the
-  Mac, syncs the static musl binaries to `achim`, and runs `scripts/spike.sh` there with
-  `SPIKE_SKIP_BUILD=1` and `SPIKE_BIN_DIR=bin`; spike.sh re-execs itself under `sudo env ...` for
-  link setup and raw sockets.)
+- `scripts/vm-ubuntu-server.sh spike` prints the per-case report and exits 0: all 69 deliverable
+  cases (65 wire combos + 4 anomaly cases) PASS on the server (with Finding-A notes on the
+  lying-Total-Length variants), all 28 over-MTU combos PASS on the client (`EMSGSIZE`, Finding B).
+  (The lane cross-builds the examples on the Mac, syncs the static musl binaries to `achim`, and
+  runs `scripts/spike.sh` there with `SPIKE_SKIP_BUILD=1` and `SPIKE_BIN_DIR=bin`; spike.sh
+  re-execs itself under `sudo env ...` for link setup and raw sockets.)
 - Teardown leaves no `spk` netns, `veth-h`, or readiness file behind.
 - Optional wire check: `scripts/spike.sh up`, then `tcpdump -i veth-h -n -v` shows IP Total Length
   tracking the buffer length (Finding A); `scripts/spike.sh down` to clean up.

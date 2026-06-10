@@ -2,7 +2,7 @@
 //! case's hand-built IPv4+UDP datagram across the staged 1500-MTU veth link to the server
 //! (10.0.0.2, netns `spk`). Throwaway; see `scripts/spike.sh` and `docs/plan/steps/00b-spike.md`.
 //!
-//! It gates the send-limit finding (`over-mtu` must fail `EMSGSIZE`); the server gates delivery.
+//! It gates the send-limit cases (every over-MTU combo must fail `EMSGSIZE`); the server gates delivery.
 //! Not run directly -- `scripts/spike.sh` builds it and runs it after the server is listening:
 //!
 //! ```text
@@ -21,7 +21,7 @@ use std::time::Duration;
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use common::{CASES, CLIENT_IP, Check, SERVER_IP, SRC_PORT, SpikeError, build_datagram, marker_port};
+use common::{CLIENT_IP, Check, SERVER_IP, SRC_PORT, SpikeError, build_datagram, cases, marker_port};
 
 fn main() {
     let sock = match open_send_socket() {
@@ -36,53 +36,54 @@ fn main() {
         }
     };
 
+    let all = cases();
     println!(
         "spike_client: {CLIENT_IP} -> {SERVER_IP} (src port {SRC_PORT}), {} cases",
-        CASES.len()
+        all.len()
     );
     // The destination IP comes from our IP header for an IP_HDRINCL socket; the sockaddr port is
     // ignored, so any port is fine here.
     let dest = SockAddr::from(SocketAddrV4::new(SERVER_IP, 0));
 
-    let mut client_ok = true;
-    for (i, case) in CASES.iter().enumerate() {
+    let mut sent = 0usize;
+    let mut emsgsize = 0usize;
+    let mut failed = 0usize;
+    for (i, case) in all.iter().enumerate() {
         let port = marker_port(i);
         let pkt = build_datagram(case, port);
-        let label = case.label;
+        let label = &case.label;
         let phys = case.physical_len();
         let result = sock.send_to(&pkt, &dest);
 
         match case.check {
-            Check::Wire => match result {
-                Ok(n) => println!("  {label:<13} port {port} physical={phys} -> sent {n}B"),
+            // Wire and WireRaw cases must leave the host; the server scores them.
+            Check::Wire | Check::WireRaw => match result {
+                Ok(_) => sent += 1,
                 Err(e) => {
-                    println!("  {label:<13} port {port} physical={phys} -> FAIL unexpected send error: {e}");
-                    client_ok = false;
+                    println!("  {label:<18} port {port} physical={phys} -> FAIL unexpected send error: {e}");
+                    failed += 1;
                 }
             },
             Check::SendFails => match result {
-                Err(ref e) if e.raw_os_error() == Some(libc::EMSGSIZE) => {
-                    println!(
-                        "  {label:<13} port {port} physical={phys} -> PASS got EMSGSIZE (Finding B: IP_HDRINCL won't fragment)"
-                    );
-                }
+                Err(ref e) if e.raw_os_error() == Some(libc::EMSGSIZE) => emsgsize += 1,
                 Ok(n) => {
-                    println!("  {label:<13} port {port} physical={phys} -> FAIL expected EMSGSIZE but sent {n}B");
-                    client_ok = false;
+                    println!("  {label:<18} port {port} physical={phys} -> FAIL expected EMSGSIZE but sent {n}B");
+                    failed += 1;
                 }
                 Err(e) => {
-                    println!("  {label:<13} port {port} physical={phys} -> FAIL expected EMSGSIZE, got: {e}");
-                    client_ok = false;
+                    println!("  {label:<18} port {port} physical={phys} -> FAIL expected EMSGSIZE, got: {e}");
+                    failed += 1;
                 }
             },
         }
 
         // Small gap so each case drains before the next (clean tcpdump, less reorder).
-        thread::sleep(Duration::from_millis(30));
+        thread::sleep(Duration::from_millis(10));
     }
 
+    let client_ok = failed == 0;
     println!(
-        "spike_client: {}",
+        "spike_client: {} ({sent} sent, {emsgsize} EMSGSIZE as expected (Finding B), {failed} failed)",
         if client_ok {
             "PASS (send-side)"
         } else {

@@ -17,17 +17,19 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use common::{CASES, Check, MARKER_BASE, SpikeError, hex, marker_port, match_marker, pattern};
+use common::{Case, Check, MARKER_BASE, SpikeError, cases, hex, marker_port, match_marker, pattern};
 
 /// Touched once the recv socket is live, so `scripts/spike.sh` only starts the client when we listen.
 const READY_FILE: &str = "/tmp/spike-server-ready";
 const RECV_TIMEOUT: Duration = Duration::from_secs(2);
 /// Overall budget to collect all wire cases before giving up on the stragglers.
-const DEADLINE: Duration = Duration::from_secs(8);
+const DEADLINE: Duration = Duration::from_secs(30);
 
 struct Observation {
     total_len: usize,
-    surplus: Vec<u8>,
+    udp_len_field: usize,
+    /// `None` when the delivered UDP Length field was inconsistent (anomaly cases).
+    surplus: Option<Vec<u8>>,
 }
 
 fn main() {
@@ -54,9 +56,10 @@ fn run() -> Result<bool, SpikeError> {
     sock.set_read_timeout(Some(RECV_TIMEOUT))?;
     let _ = fs::write(READY_FILE, b"ready");
 
-    // We only expect the wire cases; the send-limit case never reaches us.
-    let mut seen: Vec<Option<Observation>> = (0..CASES.len()).map(|_| None).collect();
-    let expected = |i: usize| CASES[i].check == Check::Wire;
+    // We expect every wire and anomaly case; the send-limit cases never reach us.
+    let all = cases();
+    let mut seen: Vec<Option<Observation>> = (0..all.len()).map(|_| None).collect();
+    let expected = |i: usize| all[i].check != Check::SendFails;
     let all_wire_seen =
         |seen: &[Option<Observation>]| seen.iter().enumerate().all(|(i, o)| !expected(i) || o.is_some());
 
@@ -70,70 +73,98 @@ fn run() -> Result<bool, SpikeError> {
         };
         // SAFETY: the kernel initialized the first `n` bytes of `buf`.
         let data = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, n) };
-        if let Some(m) = match_marker(data) {
+        if let Some(m) = match_marker(data, all.len()) {
             let idx = (m.dst_port - MARKER_BASE) as usize;
             if idx < seen.len() && seen[idx].is_none() {
                 seen[idx] = Some(Observation {
                     total_len: m.total_len,
-                    surplus: m.surplus.to_vec(),
+                    udp_len_field: m.udp_len_field,
+                    surplus: m.surplus.map(<[u8]>::to_vec),
                 });
             }
         }
     }
 
-    Ok(report(&seen))
+    Ok(report(&all, &seen))
 }
 
-/// Print the per-case report and return whether every gating (wire) case passed.
-fn report(seen: &[Option<Observation>]) -> bool {
+/// Print the per-case report and return whether every gating (wire/anomaly) case passed.
+fn report(all: &[Case], seen: &[Option<Observation>]) -> bool {
     println!("spike_server: results");
-    let mut all_pass = true;
+    let mut pass = 0usize;
+    let mut fail = 0usize;
+    let mut skip = 0usize;
+    let mut rewritten = 0usize;
 
-    for (i, case) in CASES.iter().enumerate() {
+    for (i, case) in all.iter().enumerate() {
         let port = marker_port(i);
-        let label = case.label;
+        let label = &case.label;
 
         if case.check == Check::SendFails {
-            println!("  {label:<13} port {port}  SKIP  client-side send-limit case (not expected on the wire)");
+            skip += 1;
             continue;
         }
 
         let Some(obs) = &seen[i] else {
             println!(
-                "  {label:<13} port {port}  MISS  no datagram within {}s",
+                "  {label:<18} port {port}  MISS  no datagram within {}s",
                 DEADLINE.as_secs()
             );
-            all_pass = false;
+            fail += 1;
             continue;
         };
 
-        let want = pattern(case.surplus_len);
-        let got = obs.surplus.as_slice();
-        let ok = got == want.as_slice();
-        let tag = if ok { "PASS" } else { "FAIL" };
-        println!(
-            "  {label:<13} port {port}  {tag}  surplus={}B [{}] (expected {}B)",
-            got.len(),
-            hex(got, 16),
-            case.surplus_len,
-        );
-        if case.written_ip_total_len != obs.total_len {
-            println!(
-                "                 Finding A: wrote IP Total Length={}, kernel delivered {} (= buffer); the appended bytes could not be hidden",
-                case.written_ip_total_len, obs.total_len,
-            );
-        }
-        if !ok {
-            all_pass = false;
+        // The kernel delivers IP Total Length == buffer regardless of what was written (Finding A).
+        let note = if case.written_ip_total_len != obs.total_len {
+            rewritten += 1;
+            format!(" (wrote {}; kernel rewrote -- Finding A)", case.written_ip_total_len)
+        } else {
+            String::new()
+        };
+
+        match case.check {
+            Check::Wire => {
+                let want = pattern(case.surplus_len);
+                let got = obs.surplus.as_deref().unwrap_or(&[]);
+                let ok = got == want.as_slice() && obs.total_len == case.physical_len();
+                let tag = if ok { "PASS" } else { "FAIL" };
+                println!(
+                    "  {label:<18} port {port}  {tag}  surplus={}B [{}] (expected {}B) total={}{note}",
+                    got.len(),
+                    hex(got, 8),
+                    case.surplus_len,
+                    obs.total_len,
+                );
+                if ok {
+                    pass += 1
+                } else {
+                    fail += 1
+                };
+            }
+            Check::WireRaw => {
+                // Anomaly case: arriving at all is the result; the shape is logged, not judged.
+                let surplus_desc = match &obs.surplus {
+                    Some(s) => format!("surplus={}B [{}]", s.len(), hex(s, 8)),
+                    None => "surplus=<no well-defined surplus: UDP Length field inconsistent>".to_string(),
+                };
+                println!(
+                    "  {label:<18} port {port}  PASS  delivered despite anomaly: total={} udp-len-field={} {surplus_desc}",
+                    obs.total_len, obs.udp_len_field,
+                );
+                pass += 1;
+            }
+            Check::SendFails => unreachable!("skipped above"),
         }
     }
 
+    let all_pass = fail == 0;
     println!(
-        "spike_server: {}",
+        "spike_server: {} ({pass} delivered+passed, {skip} skipped send-limit cases, {fail} failed; \
+         Finding A confirmed on {rewritten} lying-Total-Length cases)",
         if all_pass {
-            "PASS (all wire cases)"
+            "PASS (all deliverable cases)"
         } else {
-            "FAIL (a wire case did not match)"
+            "FAIL (a deliverable case did not match)"
         }
     );
     all_pass
