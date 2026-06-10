@@ -52,13 +52,12 @@ transit (RFC 9868 Sec. 9). Options are interpreted only after the surplus area p
 
 ## 2. OCS Placement and Alignment
 
-The Options Checksum (OCS) is positional, not a TLV option: it occupies a fixed two-byte slot at the
-very start of the surplus area and carries no `Kind` or `Length` octet (`model::length::OCS` = 2).
-The OCS MUST be the first option in the surplus area, and it MUST be aligned to the first 2-byte
-boundary of the area relative to the start of the IP datagram (RFC 9868 Sec. 8). The surplus area is
-interpreted as UDP options only when it is at least 2 bytes long, the OCS comes first on that 2-byte
-boundary, and the OCS validates; otherwise the entire surplus area is ignored as though no options
-were present (RFC 9868 Sec. 8).
+The Options Checksum (OCS) is positional, not a TLV option: it occupies a fixed two-byte slot after
+any required pre-OCS alignment pad and carries no `Kind` or `Length` octet (`model::length::OCS` =
+2). The OCS MUST be aligned to the first 2-byte boundary of the area relative to the start of the IP
+datagram (RFC 9868 Sec. 8). The surplus area is interpreted as UDP options only when there is enough
+space for the optional pad byte and OCS, all pre-OCS pad bytes are zero, and the OCS validates;
+otherwise the entire surplus area is ignored as though no options were present (RFC 9868 Sec. 8).
 
 When the surplus area would otherwise begin at an odd offset relative to the start of the IP
 datagram, a single pad byte is inserted before the OCS so that the OCS itself starts on an even
@@ -280,7 +279,7 @@ Putting the pieces together, the surplus area is laid out as:
 
 - `surplus_area = ip_transport_payload_length - udp_length` (RFC 9868 Sec. 7); options are present
   only when this is greater than zero.
-- The pad byte is present iff the surplus area's natural start offset relative to the UDP header is
+- The pad byte is present iff the surplus area's natural start offset relative to the IP datagram is
   odd; it MUST be zero and is covered by the OCS (RFC 9868 Sec. 8).
 - The OCS is computed over the whole surplus area (pad byte included) with the OCS field taken as
   zero, plus `surplus_len` added as a 16-bit one's-complement addend, stored as the one's-complement
