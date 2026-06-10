@@ -44,8 +44,8 @@ jobs:
       - name: Run ${{ matrix.check }}
         run: ${{ matrix.command }}
 
-  claude-review:
-    name: Request Claude review
+  agent-reviews:
+    name: Request agent reviews
     runs-on: ubuntu-latest
     if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
     permissions:
@@ -54,36 +54,18 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
 
     steps:
-      - name: Post @claude review comment
+      - name: Post review request comment
         env:
+          # Prefer a user PAT when configured; fall back to the workflow token.
+          # The @claude half only triggers from a user-authored comment (PAT):
+          # GitHub never fires workflow events for workflow-token comments.
           GH_TOKEN: ${{ secrets.AGENT_TRIGGER_PAT || github.token }}
         run: |
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
           @claude Review this pull request focusing on code best practices, code security,
           and safety. RFC 9868 semantic and protocol conformance is reviewed separately by
           Codex; raise such points only when they are security- or safety-relevant.
-          EOF
 
-  codex-review:
-    name: Request Codex review
-    runs-on: ubuntu-latest
-    needs: [claude-review]
-    if: >-
-      always() &&
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.head.ref != 'main'
-    permissions:
-      pull-requests: write
-    env:
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-
-    steps:
-      - name: Post @codex review comment
-        env:
-          # Prefer a user PAT when configured; fall back to the workflow token.
-          GH_TOKEN: ${{ secrets.AGENT_TRIGGER_PAT || github.token }}
-        run: |
-          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
           @codex review for RFC 9868 semantic and protocol conformance: wire format, option
           framing and handling, OCS, FRAG, and receive-pipeline semantics of the changes.
           Code style, best practices, and security are covered by a separate check; skip them.
