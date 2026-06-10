@@ -160,8 +160,9 @@ sends, so the crate computes it. Inputs: header bytes or fields plus an `IpRepr`
 ### `wire/surplus` (pure)
 
 `SurplusLayout` and `locate_surplus`: given the IP and UDP lengths, compute where the surplus area
-starts (on a 2-byte boundary measured from the IP payload), whether a single zero pad byte precedes
-the OCS (when the UDP Length is odd), and the surplus length (RFC 9868 Sec. 7, Sec. 8). Inputs: an
+starts (any byte offset, RFC 9868 Sec. 7), where the OCS sits (aligned to the first 2-byte boundary
+of the area, relative to the start of the IP datagram), whether a single zero pad byte precedes
+the OCS (when the natural start is odd), and the surplus length (RFC 9868 Sec. 7, Sec. 8). Inputs: an
 `IpRepr` and a `UdpHeader` (or their lengths). Output: a `SurplusLayout` (or "no surplus area").
 Root-free.
 
@@ -191,7 +192,7 @@ byte buffer (with a zero placeholder where the OCS goes). Root-free.
 
 OCS computation and validation (RFC 9868 Sec. 9). Computation is a two-pass back-patch: serialize the
 surplus area with the OCS field zero, run the RFC 1071 sum over the whole surplus area plus the 16-bit
-surplus length, then write the result into the OCS field. Validation recomputes the sum over the same
+surplus length, then write the one's complement of the folded sum into the OCS field. Validation recomputes the sum over the same
 bytes (including the stored OCS) and requires the result to be zero. Built on `wire/checksum`. Input:
 the surplus-area bytes (and length). Output: the OCS value, or a pass/fail verdict. Root-free.
 
@@ -610,7 +611,7 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         v
  (2) options::ocs  (back-patch)
         - RFC 1071 sum over the whole surplus area (OCS field zero) + the 16-bit surplus length
-        - write the folded result into the OCS field
+        - write the one's complement of the folded sum into the OCS field
         |   produces: surplus-area bytes with a valid OCS
         v
  (3) wire/surplus + wire/udp
@@ -688,7 +689,7 @@ be dropped (RFC 9868 Sec. 10).
         | any InvalidLength / Overrun -> halt
         |        -------------------------------> Delivery::Payload { data, options: [] }
         | unknown SAFE option   -> ignore it, keep going
-        | unknown UNSAFE option -> mark "drop reassembled data" (see G)
+        | unknown UNSAFE option -> drop the user data (Sec. 12; with FRAG via G, without FRAG directly)
         v parsed options
  +-------------------------------------------------------------------------------+
  | (F) FRAG present?                                                              |
@@ -722,7 +723,7 @@ Disposition summary:
 | OCS != 0 and validation fails              | delivered    | discarded  | `Payload { options: [] }`        |
 | Malformed TLV (length/overrun)             | delivered    | discarded  | `Payload { options: [] }`        |
 | Unknown SAFE option                        | delivered    | rest kept  | option ignored                   |
-| Unknown UNSAFE option (no FRAG)            | delivered    | discarded  | options dropped                  |
+| Unknown UNSAFE option (no FRAG)            | dropped      | discarded  | user data silently dropped (Sec. 12) |
 | Unknown UNSAFE option (with FRAG)          | -            | -          | reassembled datagram dropped     |
 | FRAG, more fragments needed                | -            | -          | `Buffered`                       |
 | FRAG, overlap / cap / timeout              | -            | -          | partial discarded, `Buffered`    |
