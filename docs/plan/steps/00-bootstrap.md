@@ -12,7 +12,8 @@ focused, reviewable commit on top.
 
 - Convert the binary-only crate to a **library** (`src/lib.rs`) plus two example binaries
   (`src/bin/udpopt-send.rs`, `src/bin/udpopt-recv.rs`).
-- Add dependencies: `thiserror`, `socket2`, `libc`, `crc32c`, `log`, `clap` (derive).
+- Add dependencies: `thiserror`, `socket2`, `libc` (`crc32c`, `log`, and `clap` arrive with their
+  steps 7, 10, and 14).
 - Create the **stub module tree** matching the approved architecture; all public types are declared,
   behavior is deferred to later steps; the tree compiles cleanly.
 - Centralize protocol constants in `src/model.rs`.
