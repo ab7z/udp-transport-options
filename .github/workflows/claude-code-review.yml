@@ -44,136 +44,27 @@ jobs:
       - name: Run ${{ matrix.check }}
         run: ${{ matrix.command }}
 
-  claude-security:
-    name: Claude weaknesses and security
+  agent-reviews:
+    name: Request agent reviews
     runs-on: ubuntu-latest
     if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
-    permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
-    env:
-      AGENT_NAME: claude
-      AGENT_CHECK: weaknesses-security
-      PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      RFC9868_PATH: target/ci/rfc9868.txt
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Prepare PR context
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin "$PR_BASE_REF"
-          mkdir -p target/ci target/agent-reports
-          curl --fail --location --silent --show-error \
-            https://www.rfc-editor.org/rfc/rfc9868.txt \
-            --output "$RFC9868_PATH"
-
-      - name: Detect workflow change
-        id: workflow-change
-        run: |
-          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml .github/agent-checks/; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Check Claude token
-        if: steps.workflow-change.outputs.changed == 'false'
-        env:
-          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-        run: |
-          test -n "$CLAUDE_CODE_OAUTH_TOKEN" || {
-            echo "Missing repository secret CLAUDE_CODE_OAUTH_TOKEN." >&2
-            exit 1
-          }
-
-      - name: Run Claude weaknesses and security
-        if: steps.workflow-change.outputs.changed == 'false'
-        id: claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          prompt: |
-            Read `.github/agent-checks/instructions.md`.
-
-            Run the `${{ env.AGENT_CHECK }}` check as `${{ env.AGENT_NAME }}` for PR #${{ env.PR_NUMBER }}
-            against `${{ env.PR_BASE_REF }}`. Use `${{ env.RFC9868_PATH }}` for RFC 9868.
-
-            Return only JSON matching `.github/agent-checks/schema.json`.
-          claude_args: >-
-            --max-turns 10
-            --json-schema '{"type":"object","properties":{"agent":{"type":"string","enum":["claude"]},"check":{"type":"string","enum":["weaknesses-security"]},"status":{"type":"string","enum":["PASS","FAIL"]},"summary":{"type":"string"},"commands":{"type":"array","items":{"type":"string"}},"blocking_issues":{"type":"array","items":{"type":"string"}},"security_notes":{"type":"array","items":{"type":"string"}}},"required":["agent","check","status","summary","commands","blocking_issues","security_notes"],"additionalProperties":false}'
-
-      - name: Save Claude report
-        if: steps.workflow-change.outputs.changed == 'false' && steps.claude.outputs.structured_output != ''
-        env:
-          CLAUDE_OUTPUT: ${{ steps.claude.outputs.structured_output }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$CLAUDE_OUTPUT" > "target/agent-reports/claude-security.json"
-          jq . "target/agent-reports/claude-security.json"
-
-      - name: Validate Claude result
-        if: steps.workflow-change.outputs.changed == 'false' && steps.claude.outputs.structured_output != ''
-        run: |
-          set -euo pipefail
-          status="$(jq -r '.status' "target/agent-reports/claude-security.json")"
-          test "$status" = PASS
-
-      - name: Require Claude output
-        if: steps.workflow-change.outputs.changed == 'false' && steps.claude.outputs.structured_output == ''
-        run: |
-          echo "Claude produced no structured output." >&2
-          exit 1
-
-      - name: Note Claude workflow validation skip
-        if: steps.workflow-change.outputs.changed == 'true'
-        run: |
-          {
-            echo "Claude security check skipped."
-            echo
-            echo "This is expected while this workflow is introduced or changed in a pull request:"
-            echo "the Claude action validates that the workflow file already exists with identical"
-            echo "content on the repository default branch before it runs on pull_request events."
-            echo "The check will run normally after this workflow is merged."
-          } >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload Claude report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: claude-security-report
-          path: target/agent-reports/claude-security.json
-          if-no-files-found: ignore
-
-  codex-review:
-    name: Request Codex review
-    runs-on: ubuntu-latest
-    needs: [claude-security]
-    if: >-
-      always() &&
-      github.event.pull_request.base.ref == 'main' &&
-      github.event.pull_request.head.ref != 'main'
     permissions:
       pull-requests: write
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
 
     steps:
-      - name: Post @codex review comment
+      - name: Post review request comments
         env:
-          # Prefer a user PAT when configured; fall back to the workflow token.
-          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT || github.token }}
+          # The @claude mention only triggers claude.yml when posted with a user
+          # PAT: GitHub never fires workflow events for workflow-token comments.
+          GH_TOKEN: ${{ secrets.AGENT_TRIGGER_PAT || github.token }}
         run: |
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
+          @claude Review this pull request focusing on code best practices, code security,
+          and safety. RFC 9868 semantic and protocol conformance is reviewed separately by
+          Codex; raise such points only when they are security- or safety-relevant.
+          EOF
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
           @codex review for RFC 9868 semantic and protocol conformance: wire format, option
           framing and handling, OCS, FRAG, and receive-pipeline semantics of the changes.
