@@ -12,7 +12,7 @@ Exercise the full send/receive path over loopback in an automated, privilege-gat
   (in-order and out-of-order), and malformed surplus areas.
 - Tests are `#[ignore]`-gated and skip (do not fail) when the process lacks `CAP_NET_RAW`, so the
   default `cargo test` stays runnable unprivileged.
-- A documented privileged lane (`sudo -E cargo test -- --ignored` or `setcap`).
+- A documented privileged lane (`scripts/vm-ubuntu-server.sh ignored` or `setcap`).
 
 ## Plan
 
@@ -20,7 +20,7 @@ Exercise the full send/receive path over loopback in an automated, privilege-gat
    `CAP_NET_RAW`.
 2. Cover each option, OCS valid/invalid, fragmentation in-order and out-of-order, and malformed
    surplus areas.
-3. Document the `sudo -E cargo test -- --ignored` and `setcap` lanes in the README.
+3. Document the `scripts/vm-ubuntu-server.sh ignored` and `setcap` lanes in the README.
 
 ## Tasks
 
@@ -32,5 +32,5 @@ Exercise the full send/receive path over loopback in an automated, privilege-gat
 
 ## Definition of Done
 
-- The suite passes under `sudo -E cargo test -- --ignored` (or `setcap cap_net_raw+ep`), and is
+- The suite passes under `scripts/vm-ubuntu-server.sh ignored` (or `setcap cap_net_raw+ep`), and is
   skipped (not failed) without privilege; the README documents how to run it.

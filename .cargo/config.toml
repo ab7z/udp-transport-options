@@ -1,0 +1,6 @@
+# Cross-compile target for the achim Linux test host (see scripts/vm-ubuntu-server.sh).
+# rust-lld links the self-contained musl target, so no host GCC cross toolchain is needed;
+# the runner ships every built binary to achim over SSH and executes it there.
+[target.aarch64-unknown-linux-musl]
+linker = "rust-lld"
+runner = ["scripts/achim-runner.sh"]

@@ -47,40 +47,41 @@ paths are Linux-only and require `CAP_NET_RAW` or root.
 cargo build
 cargo test
 cargo fmt --check
-cargo clippy -- -D warnings
+cargo clippy --all-targets -- -D warnings
 ```
 
-## Local docker development
+On a Linux host everything runs natively and self-contained: `cargo test`,
+`sudo cargo test -- --ignored` (root-gated raw-socket lane), and
+`scripts/spike.sh` need nothing beyond the pinned Rust toolchain and `iproute2`.
 
-The raw-socket paths only run on Linux, and macOS cannot receive raw UDP at all.
-To build and run them locally, use the bundled Linux Docker image via the `dev`
-service. It is granted `CAP_NET_RAW` (raw sockets) plus
-`CAP_NET_ADMIN`/`CAP_SYS_ADMIN` (netns/veth for the Step 17 harness). The service
-runs as a non-root user, and those capabilities are effective only for root, so
-the root-gated lane goes through the preconfigured passwordless `sudo`:
+## Cross-compiling and the achim Linux test host
+
+The raw-socket paths only run on Linux, and macOS cannot receive raw UDP at all,
+so everything is **cross-compiled on the Mac** for `aarch64-unknown-linux-musl`
+(statically linked via Rust's bundled `rust-lld`, no extra toolchain needed) and
+only **executed** on the `achim` SSH host. Test binaries are shipped and run there
+transparently by the cargo runner `scripts/achim-runner.sh` (wired up in
+`.cargo/config.toml`); achim itself stays a bare network testbed without any Rust
+toolchain.
 
 ```sh
-docker compose build
-docker compose run --rm dev cargo build
-docker compose run --rm dev cargo test
+scripts/vm-ubuntu-server.sh bootstrap      # one-time: add the local musl target; check ssh/sudo/rsync on achim
+scripts/vm-ubuntu-server.sh build          # cargo build --target aarch64-unknown-linux-musl (local)
+scripts/vm-ubuntu-server.sh test           # cargo test --target ...; test binaries execute on achim
+scripts/vm-ubuntu-server.sh fmt
+scripts/vm-ubuntu-server.sh clippy         # lints the Linux cfg paths via --target
+scripts/vm-ubuntu-server.sh verify         # build + test + fmt + clippy
 
 # root-gated loopback lane (raw sockets need effective CAP_NET_RAW):
-docker compose run --rm dev sudo -E cargo test -- --ignored
-docker compose run --rm dev bash        # interactive shell
+# the runner executes the test binaries under sudo on achim
+scripts/vm-ubuntu-server.sh ignored
+scripts/vm-ubuntu-server.sh shell
 
-# Step 0.5 spike: surplus-area survival over a staged 1500-MTU veth link across two netns
-docker compose run --rm dev scripts/spike.sh
+# Step 0.5 spike: surplus-area survival over a staged 1500-MTU veth link across two netns;
+# cross-builds the spike examples, syncs the binaries, and runs scripts/spike.sh on achim
+scripts/vm-ubuntu-server.sh spike
 ```
 
-Two-peer end-to-end runs over a shared bridge network use the `peers` profile:
-
-```sh
-docker compose --profile peers up -d
-docker compose exec peer-recv bash
-docker compose exec peer-send bash
-```
-
-The repository is bind-mounted into the container, while the build-heavy paths
-(`target/` and the cargo registry) live on named volumes, so most of Rust's file
-I/O stays native to the Linux VM. For the best bind-mount performance on macOS,
-enable **VirtioFS** in Docker Desktop.
+Set `VM_UBUNTU_SERVER_HOST` to use a different SSH alias, or `VM_UBUNTU_SERVER_DIR` to use another
+remote run directory (binaries land in its `bin/`). The host needs passwordless `sudo` and `rsync`,
+nothing else.

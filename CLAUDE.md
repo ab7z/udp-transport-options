@@ -14,7 +14,7 @@ The contribution is twofold and equally weighted:
    (research questions FF1 and FF2 in the thesis).
 
 The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
-git commit per step on the `rfc9868-impl` branch. The authoritative plan is `docs/plan/ROADMAP.md`,
+git commit per step on `main`. The authoritative plan is `docs/plan/ROADMAP.md`,
 with a per-step file under `docs/plan/steps/`.
 
 ## Build and test commands
@@ -110,15 +110,16 @@ Linux only at runtime. The raw-socket paths need `CAP_NET_RAW` (or root). There 
 macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`, `::1`) is used for integration tests; a
 network-namespace/veth setup is used for the staged evaluation (see `docs/plan/steps/17-*`).
 
-On macOS, develop and run the Linux paths through the Docker Compose `dev` service: `docker compose
-run --rm dev <cmd>` (the container holds `CAP_NET_RAW` for raw sockets plus `CAP_NET_ADMIN`/
-`CAP_SYS_ADMIN` for the Step 17 netns/veth harness). The service runs as a non-root user, so those
-caps are effective only for root: the root-gated lane runs as `docker compose run --rm dev sudo -E
-cargo test -- --ignored`. See the README "Local docker development" section.
+On macOS, develop locally and **cross-compile** for `aarch64-unknown-linux-musl` (statically linked
+via `rust-lld`, see `.cargo/config.toml`); binaries only *run* on the `achim` SSH host, driven by
+`scripts/vm-ubuntu-server.sh <cmd>`. `cargo test --target ...` executes every test binary on `achim`
+through the cargo runner `scripts/achim-runner.sh`; the root-gated lanes run them under sudo there
+(`scripts/vm-ubuntu-server.sh ignored`, `scripts/vm-ubuntu-server.sh spike`). achim carries no Rust
+toolchain. See the README "Cross-compiling and the achim Linux test host" section.
 
 ## Git workflow
 
-- One reviewed commit per step on the `rfc9868-impl` branch; the human reviews the diff between steps.
+- One reviewed commit per step on `main`; the human reviews the diff between steps.
 - Commit messages in English: imperative subject <= 50 chars, body wrapped at 72.
 - Do not mention AI assistants or tools in commit messages.
 - Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)
