@@ -19,7 +19,7 @@ focused, reviewable commit on top.
 - Add `CLAUDE.md`, `docs/plan/ROADMAP.md`, and the per-step files under `docs/plan/steps/`.
 - Add `rustfmt.toml` (`max_width = 120`) and `rust-toolchain.toml` (channel 1.96, rustfmt + clippy).
 - Ignore `/.idea`; keep `Cargo.lock` tracked.
-- Work on the `rfc9868-impl` branch.
+- Work on `main`.
 - Provide a **cross-compile + remote-run environment** so the Linux-only raw-socket paths can be
   exercised from a macOS host: binaries are built locally for `aarch64-unknown-linux-musl`
   (`rust-lld`, `.cargo/config.toml`) and only executed on the `achim` SSH host; test binaries travel
@@ -27,7 +27,7 @@ focused, reviewable commit on top.
 
 ## Plan
 
-1. Rename the unborn `main` branch to `rfc9868-impl`; remove `src/main.rs`.
+1. Remove `src/main.rs`.
 2. Write `Cargo.toml`, `rustfmt.toml`, `rust-toolchain.toml`, `.gitignore`.
 3. Write `src/lib.rs` and the module tree with documented public types only.
 4. Write `CLAUDE.md`, `docs/plan/ROADMAP.md`, and the step files.
@@ -35,7 +35,7 @@ focused, reviewable commit on top.
 
 ## Tasks
 
-- [x] Branch `rfc9868-impl`; delete `src/main.rs`.
+- [x] Delete `src/main.rs`.
 - [x] `Cargo.toml` (lib + 2 bins + deps); `rustfmt.toml`; `rust-toolchain.toml`; `.gitignore`.
 - [x] `src/lib.rs`, `src/model.rs`, `src/error.rs`.
 - [x] `src/wire/{mod,checksum,ip,udp,surplus}.rs`.
@@ -44,14 +44,14 @@ focused, reviewable commit on top.
   `src/socket/{mod,send,recv}.rs`, `src/api/mod.rs`.
 - [x] `src/bin/udpopt-send.rs`, `src/bin/udpopt-recv.rs`.
 - [x] `CLAUDE.md`, `docs/plan/ROADMAP.md`, `docs/plan/steps/*.md`.
-- [x] Commit on `rfc9868-impl`.
+- [x] Commit on `main`.
 - [x] `.cargo/config.toml` (musl target: `rust-lld` + runner), `scripts/achim-runner.sh`,
   `scripts/vm-ubuntu-server.sh`; README "Cross-compiling and the achim Linux test host" section.
 
 ## Definition of Done
 
 - `cargo build`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings` all succeed.
-- The repository has its first commit on `rfc9868-impl`, and the module tree mirrors the roadmap.
+- The repository has its first commit on `main`, and the module tree mirrors the roadmap.
 - `scripts/vm-ubuntu-server.sh verify` succeeds (cross-build local, test binaries execute on
   `achim`); an `AF_INET`/`AF_INET6` `SOCK_RAW` socket and an `ip netns`+`veth` round-trip both
   succeed on `achim` through the root-gated lanes.

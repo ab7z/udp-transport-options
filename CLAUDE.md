@@ -14,7 +14,7 @@ The contribution is twofold and equally weighted:
    (research questions FF1 and FF2 in the thesis).
 
 The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
-git commit per step on the `rfc9868-impl` branch. The authoritative plan is `docs/plan/ROADMAP.md`,
+git commit per step on `main`. The authoritative plan is `docs/plan/ROADMAP.md`,
 with a per-step file under `docs/plan/steps/`.
 
 ## Build and test commands
@@ -119,7 +119,7 @@ toolchain. See the README "Cross-compiling and the achim Linux test host" sectio
 
 ## Git workflow
 
-- One reviewed commit per step on the `rfc9868-impl` branch; the human reviews the diff between steps.
+- One reviewed commit per step on `main`; the human reviews the diff between steps.
 - Commit messages in English: imperative subject <= 50 chars, body wrapped at 72.
 - Do not mention AI assistants or tools in commit messages.
 - Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)

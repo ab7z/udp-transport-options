@@ -1,6 +1,6 @@
 # Step 0.5: Surplus-area spike over a staged MTU-limited link (throwaway)
 
-Status: implemented; verified green on `achim` (awaiting review/commit)
+Status: done; verified on `achim` (spike lane exit 0 plus a tcpdump wire check on `veth-h`)
 
 ## Goal
 
@@ -41,7 +41,7 @@ RFC requirements:
 - **Finding B -- the `IP_HDRINCL` path will not fragment.** A send larger than the link MTU fails
   with `EMSGSIZE` (even with DF clear), where a normal UDP socket would fragment. So a surplus plus
   its UDP data must fit within one MTU-sized datagram; larger logical payloads need RFC 9868's FRAG
-  option (Steps 11-12), not IP fragmentation (`over-mtu` demonstrates it). The RFC independently argues
+  option (Steps 11-12), not IP fragmentation (`over-mtu-1`/`over-mtu-2` demonstrate it). The RFC independently argues
   against IP fragmentation for UDP Options: §5 and §11.4 introduce FRAG to carry messages "larger than
   allowed by the IP MTU/EMTU_R" while copying the transport ports into each fragment (unlike IP
   fragments). So the local-API limit (`EMSGSIZE`) and the RFC's path argument converge on "use FRAG".
@@ -51,7 +51,7 @@ RFC requirements:
 - `examples/common/mod.rs` -- shared constants, the case table, `build_datagram`, `match_marker`, the
   RFC 1071 / UDP checksums, and `IP_HDRINCL` setup (the only `unsafe`, inline and minimal).
 - `examples/spike_client.rs` -- default netns; raw `IP_HDRINCL` send of each case to 10.0.0.2; gates
-  the send-limit case (`over-mtu` must fail `EMSGSIZE`).
+  the send-limit cases (`over-mtu-1`/`over-mtu-2` must fail `EMSGSIZE`).
 - `examples/spike_server.rs` -- netns `spk`; raw `SOCK_RAW`/`IPPROTO_UDP` recv (the kernel delivers
   full, reassembled datagrams); per-case checks the surplus arrived intact; gates delivery.
 - `scripts/spike.sh` -- orchestrator: creates the netns + veth + MTU-1500 link, builds, runs server
@@ -64,12 +64,15 @@ RFC requirements:
   the maximum surplus that fits one MTU); each must arrive byte-for-byte intact. (gating, server)
 - `hide-attempt` -- fill the UDP payload, write an IP Total Length that declares *no* surplus, append
   40 bytes anyway; the receiver still sees all 40 (Finding A). (gating, server)
-- `over-mtu` -- a 3000-byte datagram; the send must fail `EMSGSIZE` (Finding B). (gating, client)
+- `over-mtu-1` -- a 3000-byte datagram; the send must fail `EMSGSIZE` (Finding B). (gating, client)
+- `over-mtu-2` -- a 1529-byte buffer whose *written* IP Total Length is 1500 (within the MTU); the
+  kernel sizes the send by the buffer, not the written field (Finding A), so it still fails
+  `EMSGSIZE`. (gating, client)
 
 ## Tasks
 
 - [x] `examples/common/mod.rs`: constants, case table, datagram builder, marker matcher, checksums.
-- [x] `examples/spike_client.rs`: raw `IP_HDRINCL` send; `EMSGSIZE` assertion for `over-mtu`.
+- [x] `examples/spike_client.rs`: raw `IP_HDRINCL` send; `EMSGSIZE` assertions for `over-mtu-1`/`over-mtu-2`.
 - [x] `examples/spike_server.rs`: raw recv, surplus extraction, per-case PASS/FAIL, Finding-A note.
 - [x] `scripts/spike.sh`: netns/veth/MTU-1500 setup, run, trap teardown; `up`/`down`.
 
@@ -77,7 +80,7 @@ RFC requirements:
 
 - `scripts/vm-ubuntu-server.sh spike` prints the per-case report and exits 0:
   `sweep-*` and `hide-attempt` PASS on the server (with the Finding-A note on `hide-attempt`),
-  `over-mtu` PASS on the client (`EMSGSIZE`, Finding B). (The lane cross-builds the examples on the
+  `over-mtu-1`/`over-mtu-2` PASS on the client (`EMSGSIZE`, Finding B). (The lane cross-builds the examples on the
   Mac, syncs the static musl binaries to `achim`, and runs `scripts/spike.sh` there with
   `SPIKE_SKIP_BUILD=1` and `SPIKE_BIN_DIR=bin`; spike.sh re-execs itself under `sudo env ...` for
   link setup and raw sockets.)

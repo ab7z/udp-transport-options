@@ -1,7 +1,7 @@
 # Roadmap: RFC 9868 (UDP Transport Options) in Rust
 
 This is the master plan. It is executed **step by step** with a human in the loop: one reviewed git
-commit per step on the `rfc9868-impl` branch. Each step has a detailed file under `steps/` holding its
+commit per step on `main`. Each step has a detailed file under `steps/` holding its
 **Requirements / Plan / Tasks / Definition-of-Done**. This roadmap is the index and the single place
 that tracks status.
 
@@ -52,8 +52,8 @@ Legend: [ ] pending, [~] in progress, [x] done.
 
 | # | Step | Definition of Done | Status |
 |---|------|---------------------|--------|
-| 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, branch `rfc9868-impl`, musl cross target + `achim` remote run setup | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and `--target aarch64-unknown-linux-musl`); first commit present | [x] |
-| 0.5 | Spike (throwaway): client/server raw send->recv of **arbitrary** surplus bytes over a staged **1500-MTU veth link across two netns**, to de-risk surplus-area survival and the raw-socket send/recv limits before any machinery (folded into Steps 8-9; prototypes the Step 17 harness) | `scripts/spike.sh` exits 0: surplus survives intact up to the MTU; documents Finding A (`IP_HDRINCL` forces IP Total Length = buffer) and Finding B (`IP_HDRINCL` won't fragment, >MTU send -> `EMSGSIZE`) | [~] |
+| 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, musl cross target + `achim` remote run setup | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and `--target aarch64-unknown-linux-musl`); first commit present | [x] |
+| 0.5 | Spike (throwaway): client/server raw send->recv of **arbitrary** surplus bytes over a staged **1500-MTU veth link across two netns**, to de-risk surplus-area survival and the raw-socket send/recv limits before any machinery (folded into Steps 8-9; prototypes the Step 17 harness) | `scripts/spike.sh` exits 0: surplus survives intact up to the MTU; documents Finding A (`IP_HDRINCL` forces IP Total Length = buffer) and Finding B (`IP_HDRINCL` won't fragment, >MTU send -> `EMSGSIZE`) | [x] |
 | 1 | RFC 1071 checksum primitive | unit tests vs RFC example + hand vectors (odd-length, all-zero); `sum + complement == 0` | [ ] |
 | 2 | Wire model: `IpRepr` V4+V6, IPv4+IPv6 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [ ] |
 | 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [ ] |
