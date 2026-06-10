@@ -84,3 +84,6 @@ The repository is bind-mounted into the container, while the build-heavy paths
 (`target/` and the cargo registry) live on named volumes, so most of Rust's file
 I/O stays native to the Linux VM. For the best bind-mount performance on macOS,
 enable **VirtioFS** in Docker Desktop.
+
+The surplus area is invisible to classic UDP sockets; only raw-socket
+receivers (or instrumented kernels) can observe it.
