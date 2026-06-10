@@ -22,9 +22,11 @@ Deterministic checks are handled by normal CI, not by agents:
 Agent check:
 
 - `weaknesses-security`: review the PR for concrete weaknesses, security issues,
-  unsafe privilege expansion, raw-socket misuse, unchecked parsing hazards,
-  denial-of-service risks, secret exposure, GitHub Actions secret-handling
-  mistakes, and test gaps that matter for security. Fail only for blocking,
-  concrete issues introduced or exposed by this PR.
+  code best-practice violations, unsafe privilege expansion, raw-socket misuse,
+  unchecked parsing hazards, denial-of-service risks, secret exposure, GitHub
+  Actions secret-handling mistakes, and test gaps that matter for security. Fail
+  only for blocking, concrete issues introduced or exposed by this PR. RFC 9868
+  semantic and protocol conformance is reviewed separately by Codex; raise such
+  points only when they are security- or safety-relevant.
 
 Return only JSON matching `.github/agent-checks/schema.json`.
