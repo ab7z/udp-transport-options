@@ -100,9 +100,10 @@ jobs:
             Return only JSON matching `.github/agent-checks/schema.json`.
           claude_args: >-
             --max-turns 10
-            --json-schema '{"type":"object","properties":{"agent":{"type":"string","enum":["claude","codex"]},"check":{"type":"string","enum":["weaknesses-security","rfc9868-semantic"]},"status":{"type":"string","enum":["PASS","FAIL"]},"summary":{"type":"string"},"commands":{"type":"array","items":{"type":"string"}},"blocking_issues":{"type":"array","items":{"type":"string"}},"security_notes":{"type":"array","items":{"type":"string"}},"rfc9868_notes":{"type":"array","items":{"type":"string"}},"semantic_notes":{"type":"array","items":{"type":"string"}}},"required":["agent","check","status","summary","commands","blocking_issues","security_notes","rfc9868_notes","semantic_notes"],"additionalProperties":false}'
+            --json-schema '{"type":"object","properties":{"agent":{"type":"string","enum":["claude"]},"check":{"type":"string","enum":["weaknesses-security"]},"status":{"type":"string","enum":["PASS","FAIL"]},"summary":{"type":"string"},"commands":{"type":"array","items":{"type":"string"}},"blocking_issues":{"type":"array","items":{"type":"string"}},"security_notes":{"type":"array","items":{"type":"string"}}},"required":["agent","check","status","summary","commands","blocking_issues","security_notes"],"additionalProperties":false}'
 
       - name: Save Claude report
+        if: steps.claude.outputs.structured_output != ''
         env:
           CLAUDE_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         run: |
@@ -111,10 +112,27 @@ jobs:
           jq . "target/agent-reports/claude-security.json"
 
       - name: Validate Claude result
+        if: steps.claude.outputs.structured_output != ''
         run: |
           set -euo pipefail
           status="$(jq -r '.status' "target/agent-reports/claude-security.json")"
           test "$status" = PASS
+
+      - name: Note Claude workflow validation skip
+        if: steps.claude.outputs.structured_output == ''
+        run: |
+          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
+            echo "Claude produced no structured output, and this PR did not change the Claude workflow." >&2
+            exit 1
+          fi
+
+          {
+            echo "Claude did not produce structured output."
+            echo
+            echo "This is expected while this workflow is introduced or changed in a pull request:"
+            echo "the Claude action validates that the workflow file already exists with identical"
+            echo "content on the repository default branch before it runs on pull_request events."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Claude report
         if: always()
@@ -122,80 +140,4 @@ jobs:
         with:
           name: claude-security-report
           path: target/agent-reports/claude-security.json
-          if-no-files-found: ignore
-
-  codex-semantic:
-    name: Codex RFC and semantic correctness
-    runs-on: ubuntu-latest
-    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
-    permissions:
-      contents: read
-      pull-requests: read
-    env:
-      AGENT_NAME: codex
-      AGENT_CHECK: rfc9868-semantic
-      PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
-      RFC9868_PATH: target/ci/rfc9868.txt
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Prepare PR context
-        run: |
-          set -euo pipefail
-          git fetch --no-tags origin "$PR_BASE_REF"
-          mkdir -p target/ci target/agent-reports
-          curl --fail --location --silent --show-error \
-            https://www.rfc-editor.org/rfc/rfc9868.txt \
-            --output "$RFC9868_PATH"
-
-      - name: Check Codex credential
-        env:
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
-        run: |
-          test -n "$OPENAI_API_KEY" || test -n "$CODEX_ACCESS_TOKEN" || {
-            echo "Missing repository secret OPENAI_API_KEY or CODEX_ACCESS_TOKEN for Codex CI." >&2
-            echo "Codex GitHub app reviews can run outside Actions, but this blocking workflow needs a CI credential." >&2
-            exit 1
-          }
-
-      - name: Run Codex RFC and semantic correctness
-        id: codex
-        uses: openai/codex-action@v1
-        env:
-          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          sandbox: workspace-write
-          safety-strategy: drop-sudo
-          output-schema-file: .github/agent-checks/schema.json
-          output-file: target/agent-reports/codex-semantic.json
-          prompt: |
-            Read `.github/agent-checks/instructions.md`.
-
-            Run the `${{ env.AGENT_CHECK }}` check as `${{ env.AGENT_NAME }}` for PR #${{ env.PR_NUMBER }}
-            against `${{ env.PR_BASE_REF }}`. Use `${{ env.RFC9868_PATH }}` for RFC 9868.
-
-            Return only JSON matching `.github/agent-checks/schema.json`.
-
-      - name: Validate Codex result
-        run: |
-          set -euo pipefail
-          jq . "target/agent-reports/codex-semantic.json"
-          status="$(jq -r '.status' "target/agent-reports/codex-semantic.json")"
-          test "$status" = PASS
-
-      - name: Upload Codex report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: codex-semantic-report
-          path: target/agent-reports/codex-semantic.json
           if-no-files-found: ignore

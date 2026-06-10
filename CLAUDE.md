@@ -124,6 +124,19 @@ cargo test -- --ignored`. See the README "Local docker development" section.
 - Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)
   and updates the status column in `docs/plan/ROADMAP.md`.
 
+## Review guidelines
+
+- For Codex Cloud PR review, focus on RFC 9868 conformance and semantic correctness rather than
+  formatting, linting, security review, or test execution; GitHub Actions and the Claude security
+  gate handle those separately.
+- Check changed code, tests, and docs against the endpoint-relevant RFC 9868 behavior: surplus-area
+  layout, OCS placement and checksum semantics, option framing, must-support option lengths,
+  SAFE/UNSAFE handling, UDP checksum scope, FRAG constraints, receive order, and consistency with
+  `docs/requirements.md`, `docs/wire-format.md`, and `docs/architecture.md`.
+- Flag only concrete contradictions, semantic regressions, missing tests for changed protocol
+  behavior, or documentation changes that misstate RFC 9868. Do not fail planned future scope that
+  the PR does not touch.
+
 ## Knowledge capture (living docs)
 
 Two self-contained HTML docs at the repo root accumulate project knowledge for the thesis and for a
