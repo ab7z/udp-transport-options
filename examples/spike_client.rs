@@ -6,7 +6,7 @@
 //! Not run directly -- `scripts/spike.sh` builds it and runs it after the server is listening:
 //!
 //! ```text
-//! docker compose run --rm dev scripts/spike.sh
+//! scripts/vm-ubuntu-server.sh spike
 //! ```
 //!
 //! The `unsafe` here (raw `IP_HDRINCL` setsockopt, in `common`) is deliberately inline and minimal;
@@ -51,6 +51,7 @@ fn main() {
         let label = case.label;
         let phys = case.physical_len();
         let result = sock.send_to(&pkt, &dest);
+
         match case.check {
             Check::Wire => match result {
                 Ok(n) => println!("  {label:<13} port {port} physical={phys} -> sent {n}B"),
@@ -75,6 +76,7 @@ fn main() {
                 }
             },
         }
+
         // Small gap so each case drains before the next (clean tcpdump, less reorder).
         thread::sleep(Duration::from_millis(30));
     }

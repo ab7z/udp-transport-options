@@ -1,6 +1,6 @@
 # Step 0.5: Surplus-area spike over a staged MTU-limited link (throwaway)
 
-Status: implemented; verified green in the `dev` service (awaiting review/commit)
+Status: implemented; verified green on `achim` (awaiting review/commit)
 
 ## Goal
 
@@ -16,13 +16,12 @@ netns/veth harness**.
 
 ## Why a staged link, not loopback
 
-The `dev` container's loopback MTU is 65536, so loopback never fragments and never constrains a
-datagram -- a surplus of any size "just fits", which proves nothing about a real path. So the spike
-stages a **veth pair split across two network namespaces**, both ends at **MTU 1500**: the only way
-to make the MTU actually bite (a veth with both ends in one namespace short-circuits via local
-delivery and never clocks the packet across the wire). Because a network namespace is per-process,
-the sender and receiver are **separate processes** -- a client (default netns, 10.0.0.1) and a server
-(netns `spk`, 10.0.0.2).
+Loopback has a large MTU, so it never fragments and never constrains a datagram -- a surplus of any
+size "just fits", which proves nothing about a real path. So the spike stages a **veth pair split
+across two network namespaces**, both ends at **MTU 1500**: the only way to make the MTU actually
+bite (a veth with both ends in one namespace short-circuits via local delivery and never clocks the
+packet across the wire). Because a network namespace is per-process, the sender and receiver are
+**separate processes** -- a client (default netns, 10.0.0.1) and a server (netns `spk`, 10.0.0.2).
 
 ## Findings (the point of the spike)
 
@@ -76,11 +75,12 @@ RFC requirements:
 
 ## Definition of Done
 
-- `docker compose run --rm dev scripts/spike.sh` prints the per-case report and exits 0:
+- `scripts/vm-ubuntu-server.sh spike` prints the per-case report and exits 0:
   `sweep-*` and `hide-attempt` PASS on the server (with the Finding-A note on `hide-attempt`),
-  `over-mtu` PASS on the client (`EMSGSIZE`, Finding B). (The script re-execs itself under `sudo -E`
-  if not already root; `-E` keeps the dev `HOME` so cargo finds its cache; the link setup needs
-  `CAP_NET_ADMIN`/`CAP_SYS_ADMIN`, effective only for root.)
+  `over-mtu` PASS on the client (`EMSGSIZE`, Finding B). (The lane cross-builds the examples on the
+  Mac, syncs the static musl binaries to `achim`, and runs `scripts/spike.sh` there with
+  `SPIKE_SKIP_BUILD=1` and `SPIKE_BIN_DIR=bin`; spike.sh re-execs itself under `sudo env ...` for
+  link setup and raw sockets.)
 - Teardown leaves no `spk` netns, `veth-h`, or readiness file behind.
 - Optional wire check: `scripts/spike.sh up`, then `tcpdump -i veth-h -n -v` shows IP Total Length
   tracking the buffer length (Finding A); `scripts/spike.sh down` to clean up.

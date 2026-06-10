@@ -20,11 +20,10 @@ focused, reviewable commit on top.
 - Add `rustfmt.toml` (`max_width = 120`) and `rust-toolchain.toml` (channel 1.96, rustfmt + clippy).
 - Ignore `/.idea`; keep `Cargo.lock` tracked.
 - Work on the `rfc9868-impl` branch.
-- Provide a **local Linux dev/test environment** so the Linux-only raw-socket paths can be built
-  and run from a macOS host: an `ubuntu:24.04` + `rustup` image (toolchain pinned to the
-  `rust-toolchain.toml` channel) built from a root `Dockerfile` and wired through
-  `compose.yml` with `CAP_NET_RAW` (raw sockets) + `CAP_NET_ADMIN`/`CAP_SYS_ADMIN`
-  (netns/veth for Step 17).
+- Provide a **cross-compile + remote-run environment** so the Linux-only raw-socket paths can be
+  exercised from a macOS host: binaries are built locally for `aarch64-unknown-linux-musl`
+  (`rust-lld`, `.cargo/config.toml`) and only executed on the `achim` SSH host; test binaries travel
+  through the cargo runner `scripts/achim-runner.sh`, the lanes through `scripts/vm-ubuntu-server.sh`.
 
 ## Plan
 
@@ -46,15 +45,13 @@ focused, reviewable commit on top.
 - [x] `src/bin/udpopt-send.rs`, `src/bin/udpopt-recv.rs`.
 - [x] `CLAUDE.md`, `docs/plan/ROADMAP.md`, `docs/plan/steps/*.md`.
 - [x] Commit on `rfc9868-impl`.
-- [x] `Dockerfile` (ubuntu + rustup), `compose.yml` (`dev` service +
-  `peers` profile, `NET_RAW`/`NET_ADMIN`/`SYS_ADMIN`), `.dockerignore`; README
-  "Local docker development" section.
+- [x] `.cargo/config.toml` (musl target: `rust-lld` + runner), `scripts/achim-runner.sh`,
+  `scripts/vm-ubuntu-server.sh`; README "Cross-compiling and the achim Linux test host" section.
 
 ## Definition of Done
 
 - `cargo build`, `cargo fmt --check`, and `cargo clippy --all-targets -- -D warnings` all succeed.
 - The repository has its first commit on `rfc9868-impl`, and the module tree mirrors the roadmap.
-- `docker compose build` succeeds and the same `build`/`fmt --check`/`clippy -D warnings` lane is
-  green inside `docker compose run --rm dev`; an `AF_INET`/`AF_INET6` `SOCK_RAW` socket
-  (confirming `NET_RAW`) and an `ip netns`+`veth` round-trip (confirming `NET_ADMIN`/`SYS_ADMIN`)
-  both succeed in the container.
+- `scripts/vm-ubuntu-server.sh verify` succeeds (cross-build local, test binaries execute on
+  `achim`); an `AF_INET`/`AF_INET6` `SOCK_RAW` socket and an `ip netns`+`veth` round-trip both
+  succeed on `achim` through the root-gated lanes.

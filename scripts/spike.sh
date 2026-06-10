@@ -3,21 +3,47 @@
 # namespaces, runs the client (default netns) and server (netns spk), prints the per-case report,
 # and tears the link down. Prototypes the Step 17 netns/veth harness.
 #
-#   docker compose run --rm dev scripts/spike.sh         # full run (setup -> run -> teardown)
-#   docker compose run --rm dev scripts/spike.sh up      # just create the link (e.g. tcpdump)
-#   docker compose run --rm dev scripts/spike.sh down    # remove the link
+#   scripts/vm-ubuntu-server.sh spike       # cross-build on the Mac, sync + run on achim
+#   scripts/spike.sh             # full local Linux run (setup -> run -> teardown)
+#   scripts/spike.sh up          # just create the link (e.g. tcpdump)
+#   scripts/spike.sh down        # remove the link
 #
-# Needs root + CAP_NET_RAW/CAP_NET_ADMIN/CAP_SYS_ADMIN (the dev service holds them). The script
-# re-execs itself under `sudo -E` if not already root; `-E` keeps the dev HOME so cargo finds its
-# registry cache.
+# Needs root + CAP_NET_RAW/CAP_NET_ADMIN/CAP_SYS_ADMIN. If called as a normal user, the script builds
+# the examples first (unless SPIKE_SKIP_BUILD=1, e.g. for prebuilt cross-compiled binaries in
+# SPIKE_BIN_DIR) and then re-execs itself under sudo for the namespace/raw-socket work.
 
 set -euo pipefail
 
-# Self-elevate: link setup + raw sockets need CAP_NET_RAW/CAP_NET_ADMIN/CAP_SYS_ADMIN, effective only
-# for root in the dev service. Re-exec under sudo (passwordless for the dev user) so callers can drop
-# the `sudo -E`.
+action="${1:-run}"
+case "$action" in
+    run|up|down) ;;
+    *)
+        echo "usage: spike.sh [run|up|down]" >&2
+        exit 64
+        ;;
+esac
+
+BIN_DIR="${SPIKE_BIN_DIR:-target/debug/examples}"
+SRV_BIN="$BIN_DIR/spike_server"
+CLI_BIN="$BIN_DIR/spike_client"
+
+# Self-elevate: link setup + raw sockets need CAP_NET_RAW/CAP_NET_ADMIN/CAP_SYS_ADMIN. Build before
+# sudo so root never runs cargo and does not create files in the Cargo target directory.
 if [ "$(id -u)" -ne 0 ]; then
-    exec sudo -E "$0" "$@"
+    if [ "$action" = "run" ]; then
+        if [ "${SPIKE_SKIP_BUILD:-0}" != "1" ]; then
+            echo "building examples..."
+            cargo build --examples
+        fi
+        if [ ! -x "$SRV_BIN" ] || [ ! -x "$CLI_BIN" ]; then
+            echo "error: spike binaries not found under $BIN_DIR (set SPIKE_BIN_DIR?)" >&2
+            exit 66
+        fi
+    fi
+    exec sudo env \
+        "PATH=$PATH" \
+        "SPIKE_BIN_DIR=$BIN_DIR" \
+        "$0" "$@"
 fi
 
 NS=spk
@@ -28,8 +54,6 @@ SERVER_IP=10.0.0.2
 PREFIX=24
 MTU=1500
 READY=/tmp/spike-server-ready
-SRV_BIN=target/debug/examples/spike_server
-CLI_BIN=target/debug/examples/spike_client
 
 link_up() {
     link_down >/dev/null 2>&1 || true
@@ -52,8 +76,11 @@ link_down() {
 
 run_spike() {
     rm -f "$READY"
-    echo "building examples..."
-    cargo build --examples
+    # Built (or synced) before the sudo re-exec; root never runs cargo.
+    if [ ! -x "$SRV_BIN" ] || [ ! -x "$CLI_BIN" ]; then
+        echo "error: spike binaries not found under $BIN_DIR; run via scripts/spike.sh as a normal user" >&2
+        return 66
+    fi
 
     # Server in netns spk (background); wait until it has opened its recv socket.
     ip netns exec "$NS" "$SRV_BIN" &
@@ -74,7 +101,6 @@ run_spike() {
     [ "$cli_rc" -eq 0 ] && [ "$srv_rc" -eq 0 ]
 }
 
-action="${1:-run}"
 case "$action" in
     up)
         link_up
@@ -89,9 +115,5 @@ case "$action" in
         rc=0
         run_spike || rc=$?
         exit $rc
-        ;;
-    *)
-        echo "usage: spike.sh [run|up|down]" >&2
-        exit 64
         ;;
 esac

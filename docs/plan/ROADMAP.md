@@ -52,7 +52,7 @@ Legend: [ ] pending, [~] in progress, [x] done.
 
 | # | Step | Definition of Done | Status |
 |---|------|---------------------|--------|
-| 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, branch `rfc9868-impl`, Linux Docker image (`Dockerfile` + `compose.yml`) | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and in-container); first commit present | [x] |
+| 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, branch `rfc9868-impl`, musl cross target + `achim` remote run setup | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and `--target aarch64-unknown-linux-musl`); first commit present | [x] |
 | 0.5 | Spike (throwaway): client/server raw send->recv of **arbitrary** surplus bytes over a staged **1500-MTU veth link across two netns**, to de-risk surplus-area survival and the raw-socket send/recv limits before any machinery (folded into Steps 8-9; prototypes the Step 17 harness) | `scripts/spike.sh` exits 0: surplus survives intact up to the MTU; documents Finding A (`IP_HDRINCL` forces IP Total Length = buffer) and Finding B (`IP_HDRINCL` won't fragment, >MTU send -> `EMSGSIZE`) | [~] |
 | 1 | RFC 1071 checksum primitive | unit tests vs RFC example + hand vectors (odd-length, all-zero); `sum + complement == 0` | [ ] |
 | 2 | Wire model: `IpRepr` V4+V6, IPv4+IPv6 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [ ] |
@@ -68,7 +68,7 @@ Legend: [ ] pending, [~] in progress, [x] done.
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [ ] |
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level >MRDS send auto-fragments and recv reassembles transparently | [ ] |
 | 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [ ] |
-| 15 | Loopback integration suite (root-gated `--ignored` lane) | passes under `sudo -E cargo test -- --ignored`; skipped (not failed) without privilege | [ ] |
+| 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [ ] |
 | 16 | IPv6 socket wiring (`AF_INET6`, `IPV6_HDRINCL`) | `::1` loopback round-trip with surplus + options + FRAG; pipeline path shared with v4 | [ ] |
 | 17 | Evaluation runbook + netns/veth/tunnel scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the staged env on Linux; runbook reproduces integration results; quick-start verified | [ ] |
 
@@ -97,13 +97,15 @@ Legend: [ ] pending, [~] in progress, [x] done.
 
 ## Verification
 
-- Per step: the DoD above; `cargo build` + `cargo fmt --check` + `cargo clippy -- -D warnings` stay
-  green; the step's unit tests pass.
-- Functional (root-free): `cargo test`.
-- Integration (root, Linux): `sudo -E cargo test -- --ignored`.
-- On macOS, all Linux runtime steps go through the Docker Compose `dev` service, e.g.
-  `docker compose run --rm dev sudo -E cargo test -- --ignored` (the container carries
-  `NET_RAW`/`NET_ADMIN`, effective for root, so the root-gated lane runs via `sudo -E`).
+- Per step: the DoD above; `cargo build` + `cargo fmt --check` + `cargo clippy --all-targets -- -D
+  warnings` stay green; the step's unit tests pass.
+- Functional (root-free): `cargo test` locally, plus `scripts/vm-ubuntu-server.sh test`
+  (cross-compiled test binaries execute on `achim` via the cargo runner).
+- Integration (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh ignored` (the runner executes
+  the test binaries under sudo on `achim`).
+- On macOS, all Linux runtime steps are cross-compiled for `aarch64-unknown-linux-musl` and only
+  *executed* on `achim` via `scripts/vm-ubuntu-server.sh`, e.g. `verify` for the normal lane and
+  `ignored` for root-gated tests; `achim` carries no Rust toolchain.
 - End-to-end: the `udpopt-send`/`udpopt-recv` CLIs over loopback, confirmed with a `tcpdump`/Wireshark
   capture showing the surplus area on the wire.
 - Empirical (Step 17): the netns/veth runbook for the thesis's staged environments.
