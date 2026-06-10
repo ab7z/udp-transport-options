@@ -64,21 +64,26 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Note Claude workflow validation skip
+      - name: Detect workflow change
+        id: workflow-change
         run: |
           git fetch --no-tags origin "$PR_BASE_REF"
-          if ! git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
+          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
             {
-              echo "The Claude review will be skipped on this pull request."
+              echo "Claude review skipped."
               echo
               echo "This is expected while this workflow is introduced or changed in a pull request:"
-              echo "the Claude action validates that the workflow file already exists with identical"
-              echo "content on the repository default branch before it runs on pull_request events."
+              echo "the Claude action only runs when the workflow file exists with identical content"
+              echo "on the repository default branch (it fails the job otherwise)."
               echo "The review will run normally after this workflow is merged."
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Run Claude code review
+        if: steps.workflow-change.outputs.changed == 'false'
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
