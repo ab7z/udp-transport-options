@@ -75,8 +75,9 @@ Design rules:
 
 ## Key RFC 9868 facts
 
-- **Surplus area** begins on a 2-byte boundary relative to the IP datagram. If its natural start is
-  odd, a single `0x00` pad byte precedes the OCS, and that pad must be zero.
+- The **surplus area** can begin at any byte offset; its leading **OCS** is aligned to the first
+  2-byte boundary of the area relative to the IP datagram start. If the natural start is odd, a
+  single `0x00` pad byte precedes the OCS, and that pad must be zero.
 - **Option framing:** `Kind(1) [+ Length(1) + Value]`. EOL (0) and NOP (1) are single-byte (no
   Length). `Length == 255` selects the extended 2-byte length form.
 - **Must-support kinds:** 0 EOL, 1 NOP, 2 APC (len 6, CRC32C of user data), 3 FRAG (len 10

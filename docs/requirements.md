@@ -26,9 +26,9 @@ comparisons `<=` / `>=`.
 ## Reference: wire facts used below
 
 The surplus area is the IP-payload tail after the UDP-Length-bounded user data, up to the end of the IP transport
-payload (RFC 9868 Sec. 7). It starts on a 2-byte boundary relative to the IP datagram; an odd natural start is
-preceded by one zero pad byte (Sec. 8). Its first content is the 2-byte OCS (Sec. 8); the OCS algorithm is defined
-in Sec. 9. Options are TLV with a 1-byte Kind, a 1-byte Length (total, including Kind and Length), and a value;
+payload (RFC 9868 Sec. 7). It can begin at any byte offset (Sec. 7); its first content, the 2-byte OCS, is aligned
+to the first 2-byte boundary of the area relative to the start of the IP datagram, an odd natural start being
+preceded by one zero pad byte (Sec. 8). The OCS algorithm is defined in Sec. 9. Options are TLV with a 1-byte Kind, a 1-byte Length (total, including Kind and Length), and a value;
 `Length == 255` selects the 2-byte Extended Length form; EOL (Kind 0) and NOP (Kind 1) are single bytes with no
 Length (Sec. 10). Must-support Kinds are 0..7; SAFE is 0..191, UNSAFE is 192..255 (Sec. 10).
 
@@ -59,7 +59,7 @@ The surplus area itself (RFC 9868 Sec. 8, 9, 10):
 | FR-01 | Compute the RFC 1071 one's-complement Internet checksum, including the odd-length (final-byte) and all-zero cases, such that `sum + complement == 0`. | Sec. 9; RFC 1071 | MUST | in | 1 | Planned | Hand-rolled in `wire::checksum`; pedagogical core. Basis for UDP checksum and OCS. |
 | FR-02 | Represent IPv4 and IPv6 headers in an IP-version-generic `IpRepr` (V4/V6) exposing addresses, transport-payload length, and the pseudo-header seed. | Sec. 7 | MUST | in | 2 | Planned | `wire::ip::IpRepr`. IPv4 bound `UDP_Length <= Total_Length - IHL*4`; IPv6 bound `UDP_Length <= Payload_Length - ext-hdr len`. |
 | FR-03 | Parse and build the 8-byte `UdpHeader`; compute the UDP checksum over pseudo-header + UDP header + user data only (not the surplus area). | Sec. 7, 9; RFC 768 | MUST | in | 2 | Planned | `wire::udp::UdpHeader`. Kernel does not checksum raw datagrams, so this is done by hand. |
-| FR-04 | Locate the surplus area: the bytes from UDP Length to the end of the IP transport payload (Sec. 7), with a 2-byte-aligned start (Sec. 8). | Sec. 7, 8 | MUST | in | 2 | Planned | `wire::surplus::locate_surplus` -> `SurplusLayout { starts_at, needs_pad, len }`. Area existence/location is Sec. 7; the 2-byte alignment is Sec. 8. |
+| FR-04 | Locate the surplus area: the bytes from UDP Length to the end of the IP transport payload (Sec. 7), with the OCS aligned to the first 2-byte boundary of the area relative to the IP datagram start (Sec. 8). | Sec. 7, 8 | MUST | in | 2 | Planned | `wire::surplus::locate_surplus` -> `SurplusLayout { starts_at, needs_pad, len }`. Area existence/location is Sec. 7; the OCS 2-byte alignment is Sec. 8. |
 | FR-05 | Honor the odd-pad rule: a surplus area whose natural start is odd is preceded by exactly one byte that MUST be zero; on transmit emit a zero pad, on receipt reject a non-zero pad. | Sec. 8 | MUST | in | 2,6 | Planned | `SurplusLayout::needs_pad`; non-zero pad -> `ParseError::NonZeroPad` -> discard all options, deliver payload. |
 | FR-06 | Classify any Kind byte into `OptionKind` (Eol/Nop/Apc/Frag/Mds/Mrds/Req/Res/Other) with correct SAFE/UNSAFE and must-support predicates. | Sec. 10 | MUST | in | 3 | Planned | `options::kind::OptionKind`; `is_must_support` true for 0..7; UNSAFE for `kind >= model::kind::UNSAFE_MIN` (192). |
 | FR-07 | Parse the TLV stream zero-copy via `OptionsIter`/`OptionRef`, in surplus order, without panicking on any input. | Sec. 10, 14 | MUST | in | 4 | Planned | `options::parse`. Borrowed view; total function over arbitrary bytes. |

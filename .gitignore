@@ -6,3 +6,4 @@
 !requirements.md
 
 *.html
+.env
