@@ -1,44 +1,201 @@
-name: Claude Code Review
+name: Agent PR Checks
 
 on:
   pull_request:
-    types: [opened, synchronize, ready_for_review, reopened]
-    # Optional: Only run on specific file changes
-    # paths:
-    #   - "src/**/*.ts"
-    #   - "src/**/*.tsx"
-    #   - "src/**/*.js"
-    #   - "src/**/*.jsx"
+    branches: [main]
+    types: [opened, synchronize, ready_for_review, reopened, edited]
+
+concurrency:
+  group: agent-pr-checks-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
-  claude-review:
-    # Optional: Filter by PR author
-    # if: |
-    #   github.event.pull_request.user.login == 'external-contributor' ||
-    #   github.event.pull_request.user.login == 'new-developer' ||
-    #   github.event.pull_request.author_association == 'FIRST_TIME_CONTRIBUTOR'
-
+  rust:
+    name: Rust ${{ matrix.check }}
     runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
     permissions:
       contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - check: format
+            command: cargo fmt --check
+          - check: lint
+            command: cargo clippy --all-targets -- -D warnings -D clippy::all -D clippy::correctness -D clippy::suspicious -D clippy::complexity -D clippy::perf -D clippy::style
+          - check: test
+            command: cargo test --all-targets
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 1
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
 
-      - name: Run Claude Code Review
-        id: claude-review
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Fetch Cargo dependencies
+        run: cargo fetch --locked
+
+      - name: Run ${{ matrix.check }}
+        run: ${{ matrix.command }}
+
+  claude-security:
+    name: Claude weaknesses and security
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      id-token: write
+    env:
+      AGENT_NAME: claude
+      AGENT_CHECK: weaknesses-security
+      PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      RFC9868_PATH: target/ci/rfc9868.txt
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare PR context
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$PR_BASE_REF"
+          mkdir -p target/ci target/agent-reports
+          curl --fail --location --silent --show-error \
+            https://www.rfc-editor.org/rfc/rfc9868.txt \
+            --output "$RFC9868_PATH"
+
+      - name: Check Claude token
+        env:
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          test -n "$CLAUDE_CODE_OAUTH_TOKEN" || {
+            echo "Missing repository secret CLAUDE_CODE_OAUTH_TOKEN." >&2
+            exit 1
+          }
+
+      - name: Run Claude weaknesses and security
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
-          # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
-          # or https://code.claude.com/docs/en/cli-reference for available options
+          prompt: |
+            Read `.github/agent-checks/instructions.md`.
 
+            Run the `${{ env.AGENT_CHECK }}` check as `${{ env.AGENT_NAME }}` for PR #${{ env.PR_NUMBER }}
+            against `${{ env.PR_BASE_REF }}`. Use `${{ env.RFC9868_PATH }}` for RFC 9868.
+
+            Return only JSON matching `.github/agent-checks/schema.json`.
+          claude_args: >-
+            --max-turns 10
+            --json-schema '{"type":"object","properties":{"agent":{"type":"string","enum":["claude","codex"]},"check":{"type":"string","enum":["weaknesses-security","rfc9868-semantic"]},"status":{"type":"string","enum":["PASS","FAIL"]},"summary":{"type":"string"},"commands":{"type":"array","items":{"type":"string"}},"blocking_issues":{"type":"array","items":{"type":"string"}},"security_notes":{"type":"array","items":{"type":"string"}},"rfc9868_notes":{"type":"array","items":{"type":"string"}},"semantic_notes":{"type":"array","items":{"type":"string"}}},"required":["agent","check","status","summary","commands","blocking_issues","security_notes","rfc9868_notes","semantic_notes"],"additionalProperties":false}'
+
+      - name: Save Claude report
+        env:
+          CLAUDE_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$CLAUDE_OUTPUT" > "target/agent-reports/claude-security.json"
+          jq . "target/agent-reports/claude-security.json"
+
+      - name: Validate Claude result
+        run: |
+          set -euo pipefail
+          status="$(jq -r '.status' "target/agent-reports/claude-security.json")"
+          test "$status" = PASS
+
+      - name: Upload Claude report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: claude-security-report
+          path: target/agent-reports/claude-security.json
+          if-no-files-found: ignore
+
+  codex-semantic:
+    name: Codex RFC and semantic correctness
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
+    permissions:
+      contents: read
+      pull-requests: read
+    env:
+      AGENT_NAME: codex
+      AGENT_CHECK: rfc9868-semantic
+      PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      RFC9868_PATH: target/ci/rfc9868.txt
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prepare PR context
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "$PR_BASE_REF"
+          mkdir -p target/ci target/agent-reports
+          curl --fail --location --silent --show-error \
+            https://www.rfc-editor.org/rfc/rfc9868.txt \
+            --output "$RFC9868_PATH"
+
+      - name: Check Codex credential
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        run: |
+          test -n "$OPENAI_API_KEY" || test -n "$CODEX_ACCESS_TOKEN" || {
+            echo "Missing repository secret OPENAI_API_KEY or CODEX_ACCESS_TOKEN for Codex CI." >&2
+            echo "Codex GitHub app reviews can run outside Actions, but this blocking workflow needs a CI credential." >&2
+            exit 1
+          }
+
+      - name: Run Codex RFC and semantic correctness
+        id: codex
+        uses: openai/codex-action@v1
+        env:
+          CODEX_ACCESS_TOKEN: ${{ secrets.CODEX_ACCESS_TOKEN }}
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          sandbox: workspace-write
+          safety-strategy: drop-sudo
+          output-schema-file: .github/agent-checks/schema.json
+          output-file: target/agent-reports/codex-semantic.json
+          prompt: |
+            Read `.github/agent-checks/instructions.md`.
+
+            Run the `${{ env.AGENT_CHECK }}` check as `${{ env.AGENT_NAME }}` for PR #${{ env.PR_NUMBER }}
+            against `${{ env.PR_BASE_REF }}`. Use `${{ env.RFC9868_PATH }}` for RFC 9868.
+
+            Return only JSON matching `.github/agent-checks/schema.json`.
+
+      - name: Validate Codex result
+        run: |
+          set -euo pipefail
+          jq . "target/agent-reports/codex-semantic.json"
+          status="$(jq -r '.status' "target/agent-reports/codex-semantic.json")"
+          test "$status" = PASS
+
+      - name: Upload Codex report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-semantic-report
+          path: target/agent-reports/codex-semantic.json
+          if-no-files-found: ignore

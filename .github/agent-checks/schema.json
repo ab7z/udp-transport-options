@@ -1,0 +1,62 @@
+{
+  "type": "object",
+  "properties": {
+    "agent": {
+      "type": "string",
+      "enum": ["claude", "codex"]
+    },
+    "check": {
+      "type": "string",
+      "enum": ["weaknesses-security", "rfc9868-semantic"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["PASS", "FAIL"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "commands": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "blocking_issues": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "security_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rfc9868_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "semantic_notes": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  },
+  "required": [
+    "agent",
+    "check",
+    "status",
+    "summary",
+    "commands",
+    "blocking_issues",
+    "security_notes",
+    "rfc9868_notes",
+    "semantic_notes"
+  ],
+  "additionalProperties": false
+}
