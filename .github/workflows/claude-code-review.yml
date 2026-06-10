@@ -45,55 +45,24 @@ jobs:
         run: ${{ matrix.command }}
 
   claude-review:
-    name: Claude code review
+    name: Request Claude review
     runs-on: ubuntu-latest
     if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
     permissions:
-      contents: read
-      pull-requests: read
-      issues: read
-      id-token: write
+      pull-requests: write
     env:
-      PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
 
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: refs/pull/${{ github.event.pull_request.number }}/merge
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Detect workflow change
-        id: workflow-change
+      - name: Post @claude review comment
+        env:
+          GH_TOKEN: ${{ secrets.AGENT_TRIGGER_PAT || github.token }}
         run: |
-          git fetch --no-tags origin "$PR_BASE_REF"
-          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-            {
-              echo "Claude review skipped."
-              echo
-              echo "This is expected while this workflow is introduced or changed in a pull request:"
-              echo "the Claude action only runs when the workflow file exists with identical content"
-              echo "on the repository default branch (it fails the job otherwise)."
-              echo "The review will run normally after this workflow is merged."
-            } >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Run Claude code review
-        if: steps.workflow-change.outputs.changed == 'false'
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
-          plugins: 'code-review@claude-code-plugins'
-          prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }} --comment'
-          claude_args: >-
-            --append-system-prompt "Focus the review on code best practices, code security, and
-            safety. RFC 9868 semantic and protocol conformance is reviewed separately by Codex;
-            raise such points only when they are security- or safety-relevant."
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
+          @claude Review this pull request focusing on code best practices, code security,
+          and safety. RFC 9868 semantic and protocol conformance is reviewed separately by
+          Codex; raise such points only when they are security- or safety-relevant.
+          EOF
 
   codex-review:
     name: Request Codex review
@@ -112,7 +81,7 @@ jobs:
       - name: Post @codex review comment
         env:
           # Prefer a user PAT when configured; fall back to the workflow token.
-          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT || github.token }}
+          GH_TOKEN: ${{ secrets.AGENT_TRIGGER_PAT || github.token }}
         run: |
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
           @codex review for RFC 9868 semantic and protocol conformance: wire format, option
