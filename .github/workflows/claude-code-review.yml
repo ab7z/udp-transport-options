@@ -62,11 +62,11 @@ jobs:
           GH_TOKEN: ${{ secrets.AGENT_TRIGGER_PAT || github.token }}
         run: |
           gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
-          @claude Review this pull request focusing on code best practices, code security,
-          and safety. RFC 9868 semantic and protocol conformance is reviewed separately by
-          Codex; raise such points only when they are security- or safety-relevant.
-
           @codex review for RFC 9868 semantic and protocol conformance: wire format, option
           framing and handling, OCS, FRAG, and receive-pipeline semantics of the changes.
           Code style, best practices, and security are covered by a separate check; skip them.
+
+          @claude Review this pull request focusing on code best practices, code security,
+          and safety. RFC 9868 semantic and protocol conformance is reviewed separately by
+          Codex; raise such points only when they are security- or safety-relevant.
           EOF
