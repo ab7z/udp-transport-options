@@ -3,7 +3,7 @@
 You are running the Claude security CI check for this Rust RFC 9868 reference implementation.
 
 Do not edit files, commit, push, or post GitHub comments. Inspect the repository
-instructions in `AGENTS.md` and `CLAUDE.md` before judging behavior.
+instructions in `CLAUDE.md` (and `AGENTS.md` if present) before judging behavior.
 
 Workflow inputs:
 

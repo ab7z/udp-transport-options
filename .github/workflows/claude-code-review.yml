@@ -3,7 +3,7 @@ name: Agent PR Checks
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, ready_for_review, reopened, edited]
+    types: [opened, synchronize, ready_for_review, reopened]
 
 concurrency:
   group: agent-pr-checks-${{ github.event.pull_request.number }}
@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
@@ -62,7 +62,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
@@ -80,7 +80,7 @@ jobs:
       - name: Detect workflow change
         id: workflow-change
         run: |
-          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
+          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml .github/agent-checks/; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload Claude report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: claude-security-report
           path: target/agent-reports/claude-security.json
