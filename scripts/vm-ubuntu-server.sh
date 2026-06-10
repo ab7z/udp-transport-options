@@ -43,7 +43,7 @@ remote_dir_q() {
     printf "%q" "$REMOTE_DIR"
 }
 
-bootstrap() {
+    bootstrap() {
     # The toolchain itself is pinned by rust-toolchain.toml; this only adds the cross target.
     rustup target add "$TARGET"
     ssh "$HOST" 'set -eu
