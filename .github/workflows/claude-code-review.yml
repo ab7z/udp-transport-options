@@ -77,7 +77,17 @@ jobs:
             https://www.rfc-editor.org/rfc/rfc9868.txt \
             --output "$RFC9868_PATH"
 
+      - name: Detect workflow change
+        id: workflow-change
+        run: |
+          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Check Claude token
+        if: steps.workflow-change.outputs.changed == 'false'
         env:
           CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
@@ -87,6 +97,7 @@ jobs:
           }
 
       - name: Run Claude weaknesses and security
+        if: steps.workflow-change.outputs.changed == 'false'
         id: claude
         uses: anthropics/claude-code-action@v1
         with:
@@ -103,7 +114,7 @@ jobs:
             --json-schema '{"type":"object","properties":{"agent":{"type":"string","enum":["claude"]},"check":{"type":"string","enum":["weaknesses-security"]},"status":{"type":"string","enum":["PASS","FAIL"]},"summary":{"type":"string"},"commands":{"type":"array","items":{"type":"string"}},"blocking_issues":{"type":"array","items":{"type":"string"}},"security_notes":{"type":"array","items":{"type":"string"}}},"required":["agent","check","status","summary","commands","blocking_issues","security_notes"],"additionalProperties":false}'
 
       - name: Save Claude report
-        if: steps.claude.outputs.structured_output != ''
+        if: steps.workflow-change.outputs.changed == 'false' && steps.claude.outputs.structured_output != ''
         env:
           CLAUDE_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         run: |
@@ -112,26 +123,28 @@ jobs:
           jq . "target/agent-reports/claude-security.json"
 
       - name: Validate Claude result
-        if: steps.claude.outputs.structured_output != ''
+        if: steps.workflow-change.outputs.changed == 'false' && steps.claude.outputs.structured_output != ''
         run: |
           set -euo pipefail
           status="$(jq -r '.status' "target/agent-reports/claude-security.json")"
           test "$status" = PASS
 
-      - name: Note Claude workflow validation skip
-        if: steps.claude.outputs.structured_output == ''
+      - name: Require Claude output
+        if: steps.workflow-change.outputs.changed == 'false' && steps.claude.outputs.structured_output == ''
         run: |
-          if git diff --quiet "origin/$PR_BASE_REF"...HEAD -- .github/workflows/claude-code-review.yml; then
-            echo "Claude produced no structured output, and this PR did not change the Claude workflow." >&2
-            exit 1
-          fi
+          echo "Claude produced no structured output." >&2
+          exit 1
 
+      - name: Note Claude workflow validation skip
+        if: steps.workflow-change.outputs.changed == 'true'
+        run: |
           {
-            echo "Claude did not produce structured output."
+            echo "Claude security check skipped."
             echo
             echo "This is expected while this workflow is introduced or changed in a pull request:"
             echo "the Claude action validates that the workflow file already exists with identical"
             echo "content on the repository default branch before it runs on pull_request events."
+            echo "The check will run normally after this workflow is merged."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload Claude report
