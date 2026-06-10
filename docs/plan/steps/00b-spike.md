@@ -56,7 +56,7 @@ requirements:
 
 ## Components
 
-- `examples/common/mod.rs` -- shared constants, the case generator `cases()`, `build_datagram`,
+- `examples/support/common.rs` -- shared constants, the case generator `cases()`, `build_datagram`,
   `match_marker`, the RFC 1071 / UDP checksums, and `IP_HDRINCL` setup (the only `unsafe`, inline
   and minimal).
 - `examples/spike_client.rs` -- default netns; raw `IP_HDRINCL` send of each case to 10.0.0.2; gates
@@ -70,7 +70,7 @@ requirements:
 
 ## Cases
 
-The hand-written table became a deterministic generator (`cases()` in `examples/common/mod.rs`,
+The hand-written table became a deterministic generator (`cases()` in `examples/support/common.rs`,
 97 cases); client and server build the identical list, and the expectation per case is *derived*
 (physical size > MTU -> `SendFails`, else `Wire`), never listed by hand.
 
@@ -95,7 +95,7 @@ The hand-written table became a deterministic generator (`cases()` in `examples/
 
 ## Tasks
 
-- [x] `examples/common/mod.rs`: constants, case table, datagram builder, marker matcher, checksums.
+- [x] `examples/support/common.rs`: constants, case table, datagram builder, marker matcher, checksums.
 - [x] `examples/spike_client.rs`: raw `IP_HDRINCL` send; `EMSGSIZE` assertions for the over-MTU combos.
 - [x] `examples/spike_server.rs`: raw recv, surplus extraction, per-case PASS/FAIL, Finding-A note.
 - [x] `scripts/spike.sh`: netns/veth/MTU-1500 setup, run, trap teardown; `up`/`down`.

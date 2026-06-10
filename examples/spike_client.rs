@@ -9,7 +9,7 @@
 //! scripts/vm-ubuntu-server.sh spike
 //! ```
 //!
-//! The `unsafe` here (raw `IP_HDRINCL` setsockopt, in `common`) is deliberately inline and minimal;
+//! The `unsafe` here (raw `IP_HDRINCL` setsockopt) is deliberately inline and minimal;
 //! the production path confines all `unsafe` behind safe wrappers in `src/socket/`.
 
 #[path = "support/common.rs"]
