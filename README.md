@@ -1,7 +1,8 @@
 # udp-transport-options
 
 A userspace Rust reference implementation of
-[RFC 9868: Transport Options for UDP](https://www.rfc-editor.org/rfc/rfc9868.txt).
+[RFC 9868: Transport Options for UDP](https://www.rfc-editor.org/rfc/rfc9868.txt)
+(published October 2025).
 
 RFC 9868 stores UDP transport options in the surplus area: bytes after the UDP
 Length field but before the end of the IP transport payload. This crate is
