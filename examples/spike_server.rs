@@ -7,6 +7,7 @@
 //! local kernel is NOT evidence a real middlebox preserves it -- that is the Step 17 / real-path
 //! question.
 
+#[path = "support/common.rs"]
 mod common;
 
 use std::fs;
@@ -17,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use socket2::{Domain, Protocol, Socket, Type};
 
-use common::{Case, Check, MARKER_BASE, SpikeError, cases, hex, marker_port, match_marker, pattern};
+use common::{CaseParts, Check, IP_HDR_LEN, MARKER_BASE, SpikeError, UDP_HDR_LEN, case_parts, marker_port, pattern};
 
 /// Touched once the recv socket is live, so `scripts/spike.sh` only starts the client when we listen.
 const READY_FILE: &str = "/tmp/spike-server-ready";
@@ -30,6 +31,97 @@ struct Observation {
     udp_len_field: usize,
     /// `None` when the delivered UDP Length field was inconsistent (anomaly cases).
     surplus: Option<Vec<u8>>,
+}
+
+struct Case {
+    label: String,
+    surplus_len: usize,
+    written_ip_total_len: usize,
+    check: Check,
+    physical_len: usize,
+}
+
+fn cases() -> Vec<Case> {
+    case_parts()
+        .into_iter()
+        .map(
+            |CaseParts {
+                 label,
+                 udp_data_len,
+                 surplus_len,
+                 written_ip_total_len,
+                 udp_len_override: _udp_len_override,
+                 cksum: _cksum,
+                 check,
+             }| Case {
+                label,
+                surplus_len,
+                written_ip_total_len,
+                check,
+                physical_len: IP_HDR_LEN + UDP_HDR_LEN + udp_data_len + surplus_len,
+            },
+        )
+        .collect()
+}
+
+/// A matched marker datagram as the server observed it (after any kernel reassembly).
+struct Marker<'a> {
+    dst_port: u16,
+    /// IP Total Length as delivered -- the kernel sets this to the buffer length (Finding A).
+    total_len: usize,
+    /// The UDP Length *field* as delivered (the anomaly cases write a lying value).
+    udp_len_field: usize,
+    /// Surplus = bytes from the end of the UDP datagram up to the observed IP Total Length.
+    /// `None` when the UDP Length field is inconsistent (under 8 or past the IP Total Length),
+    /// because then no well-defined surplus exists.
+    surplus: Option<&'a [u8]>,
+}
+
+/// If `data` is one of our marker datagrams (matched by destination port out of `n_cases` marker
+/// ports), return what the receiver sees bounded by IP Total Length. A lying UDP Length field
+/// does not disqualify the match -- the anomaly cases need to be observed, not filtered out.
+/// Total over the wire; never panics on malformed input.
+fn match_marker(data: &[u8], n_cases: usize) -> Option<Marker<'_>> {
+    if data.len() < IP_HDR_LEN {
+        return None;
+    }
+    let ihl = ((data[0] & 0x0f) as usize) * 4;
+    if ihl < IP_HDR_LEN || data.len() < ihl || data[9] != libc::IPPROTO_UDP as u8 {
+        return None;
+    }
+    let total_len = u16::from_be_bytes([data[2], data[3]]) as usize;
+    if total_len > data.len() || total_len < ihl + UDP_HDR_LEN {
+        return None;
+    }
+    let udp = &data[ihl..];
+    let dst_port = u16::from_be_bytes([udp[2], udp[3]]);
+    let udp_len = u16::from_be_bytes([udp[4], udp[5]]) as usize;
+    if !(MARKER_BASE..MARKER_BASE + n_cases as u16).contains(&dst_port) {
+        return None;
+    }
+    let surplus = if udp_len >= UDP_HDR_LEN && ihl + udp_len <= total_len {
+        Some(&data[ihl + udp_len..total_len])
+    } else {
+        None
+    };
+    Some(Marker {
+        dst_port,
+        total_len,
+        udp_len_field: udp_len,
+        surplus,
+    })
+}
+
+/// Space-separated hex of up to `max` bytes, with an ellipsis marker when truncated.
+fn hex(bytes: &[u8], max: usize) -> String {
+    let mut s = String::new();
+    for b in bytes.iter().take(max) {
+        s.push_str(&format!("{b:02x} "));
+    }
+    if bytes.len() > max {
+        s.push_str("...");
+    }
+    s.trim_end().to_string()
 }
 
 fn main() {
@@ -126,7 +218,7 @@ fn report(all: &[Case], seen: &[Option<Observation>]) -> bool {
             Check::Wire => {
                 let want = pattern(case.surplus_len);
                 let got = obs.surplus.as_deref().unwrap_or(&[]);
-                let ok = got == want.as_slice() && obs.total_len == case.physical_len();
+                let ok = got == want.as_slice() && obs.total_len == case.physical_len;
                 let tag = if ok { "PASS" } else { "FAIL" };
                 println!(
                     "  {label:<18} port {port}  {tag}  surplus={}B [{}] (expected {}B) total={}{note}",
