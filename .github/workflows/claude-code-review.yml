@@ -154,3 +154,28 @@ jobs:
           name: claude-security-report
           path: target/agent-reports/claude-security.json
           if-no-files-found: ignore
+
+  codex-review:
+    name: Request Codex review
+    runs-on: ubuntu-latest
+    needs: [claude-security]
+    if: >-
+      always() &&
+      github.event.pull_request.base.ref == 'main' &&
+      github.event.pull_request.head.ref != 'main'
+    permissions:
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+
+    steps:
+      - name: Post @codex review comment
+        env:
+          # Prefer a user PAT when configured; fall back to the workflow token.
+          GH_TOKEN: ${{ secrets.CODEX_TRIGGER_PAT || github.token }}
+        run: |
+          gh pr comment "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --body-file - <<'EOF'
+          @codex review for RFC 9868 semantic and protocol conformance: wire format, option
+          framing and handling, OCS, FRAG, and receive-pipeline semantics of the changes.
+          Code style, best practices, and security are covered by a separate check; skip them.
+          EOF
