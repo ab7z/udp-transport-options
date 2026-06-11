@@ -131,9 +131,10 @@ Inputs: none (compile-time constants). Outputs: constants consumed by every high
 
 ### `error` (pure)
 
-Defines `ParseError` (why the surplus area or its options were rejected) and `RecvError` (the
-pipeline and socket error type, which wraps `ParseError`, `std::io::Error`, and a permission error).
-Inputs: none. Outputs: the two error enums used across the crate.
+Defines `ParseError` (why the surplus area or its options were rejected), `HeaderError` (why an IP
+or UDP header invalidates the whole datagram), and `RecvError` (the pipeline and socket error type,
+which wraps `ParseError`, `std::io::Error`, and a permission error).
+Inputs: none. Outputs: the error enums used across the crate.
 
 ### `wire/checksum` (pure, hand-rolled)
 
@@ -313,15 +314,23 @@ pub enum IpRepr {
 }
 
 impl IpRepr {
-    // Parse the leading IP header; return the repr and the offset of the transport payload. (planned)
-    pub fn parse(bytes: &[u8]) -> Result<(IpRepr, usize), ParseError>;
+    // Parse the leading IP header; return the repr and the offset of the transport payload.
+    // IPv4 options are skipped (never decoded) and the header checksum is verified; IPv6
+    // Hop-by-Hop (only directly after the base header) and Destination Options are skipped by
+    // length, Routing/Fragment/AH/ESP and other chains are rejected.
+    pub fn parse(bytes: &[u8]) -> Result<(IpRepr, usize), HeaderError>;
+    // Emit the header bytes (V4: 20 bytes incl. back-patched header checksum, requires ihl == 5;
+    // V6: 40 bytes, requires ext_hdr_len == 0 — building options/extension headers is out of scope).
+    pub fn write(&self, out: &mut [u8]);
+    // Offset of the transport payload from IP datagram start (ihl * 4, or 40 + ext_hdr_len).
+    pub fn header_len(&self) -> usize;
     // Length of the IP transport payload in bytes (Total Length - IHL, or Payload Length
-    // - ext_hdr_len). (planned)
+    // - ext_hdr_len).
     pub fn transport_payload_len(&self) -> usize;
-    // Fold the UDP pseudo-header (addresses, protocol, UDP length) into a running RFC 1071 sum,
-    // identically for V4 and V6. (planned)
-    pub fn pseudo_header_sum(&self, udp_len: u16) -> u32;
-    // The source / destination IpAddr, used to build a FragKey. (planned)
+    // Fold the UDP pseudo-header (addresses, protocol 17, UDP length) into a fresh RFC 1071
+    // accumulator, identically for V4 and V6; callers continue with header + data and finish().
+    pub fn pseudo_header_sum(&self, udp_len: u16) -> Checksum;
+    // The source / destination IpAddr, used to build a FragKey.
     pub fn src_addr(&self) -> IpAddr;
     pub fn dst_addr(&self) -> IpAddr;
 }
@@ -338,10 +347,12 @@ pub struct UdpHeader {
 }
 
 impl UdpHeader {
-    pub fn parse(bytes: &[u8]) -> Result<UdpHeader, ParseError>;          // (planned)
-    pub fn write(&self, out: &mut [u8]);                                  // (planned)
-    // Compute the UDP checksum over pseudo-header + header + data (RFC 9868 Sec. 9). (planned)
-    pub fn compute_checksum(&self, ip: &IpRepr, data: &[u8]) -> u16;      // (planned)
+    // Rejects UDP Length < 8; the stored checksum is not verified here (pipeline policy).
+    pub fn parse(bytes: &[u8]) -> Result<UdpHeader, HeaderError>;
+    pub fn write(&self, out: &mut [u8]);
+    // Compute the UDP checksum over pseudo-header + header + data (RFC 9868 Sec. 9);
+    // a computed zero is returned as 0xFFFF (RFC 768), so this never returns 0.
+    pub fn compute_checksum(&self, ip: &IpRepr, data: &[u8]) -> u16;
 }
 ```
 
@@ -349,14 +360,21 @@ impl UdpHeader {
 
 ```rust
 pub struct SurplusLayout {
-    pub starts_at: usize, // even offset of the surplus area (after any pad), from IP datagram start
-    pub needs_pad: bool,  // true when the natural start was odd (a single zero pad precedes the OCS)
+    pub starts_at: usize, // offset of the surplus area from IP datagram start; odd exactly when needs_pad
+    pub needs_pad: bool,  // true when starts_at is odd (a single zero pad byte precedes the OCS)
     pub len: usize,       // length of the surplus area in bytes, including any pad and the OCS
 }
 
-// Compute where the surplus area lives, or None when there is no surplus area
-// (RFC 9868 Sec. 7, Sec. 8). (planned)
-pub fn locate_surplus(ip: &IpRepr, udp: &UdpHeader) -> Option<SurplusLayout>; // (planned)
+impl SurplusLayout {
+    pub fn ocs_at(&self) -> usize;       // OCS offset: starts_at plus the pad byte when present
+    pub fn range(&self) -> Range<usize>; // the surplus area: starts_at..starts_at + len
+}
+// range() is exactly the surplus area; the pad byte, when present, is the area's first byte.
+
+// Compute where the surplus area lives, or None when there is no usable surplus area: no surplus,
+// too small for any required pad byte plus the aligned OCS, or (defensively) UDP Length larger
+// than the transport payload (RFC 9868 Sec. 7, Sec. 8).
+pub fn locate_surplus(ip: &IpRepr, udp: &UdpHeader) -> Option<SurplusLayout>;
 ```
 
 ### `options::kind::OptionKind`
@@ -498,7 +516,7 @@ pub fn process_datagram(
 ) -> Result<Delivery, RecvError>;                                      // (planned)
 ```
 
-### `error::ParseError` and `error::RecvError`
+### `error::ParseError`, `error::HeaderError`, and `error::RecvError`
 
 ```rust
 pub enum ParseError {
@@ -506,6 +524,17 @@ pub enum ParseError {
     Overrun { offset: usize },              // option claims to extend past the surplus area
     NonZeroPad,                             // the single odd-offset alignment pad byte was non-zero
     OcsMismatch,                            // OCS did not validate to zero over the surplus area
+}
+
+pub enum HeaderError {                      // IP/UDP header invalidates the whole datagram (drop)
+    IpTruncated { need: usize, have: usize },
+    UnsupportedVersion(u8),
+    BadIhl(u8),
+    BadIpLength { length: u16 },
+    IpChecksumMismatch,
+    UnexpectedProtocol(u8),
+    UdpTruncated { have: usize },
+    UdpLengthInvalid { length: u16 },
 }
 
 pub enum RecvError {
@@ -735,7 +764,8 @@ Disposition summary:
 
 ### Error model
 
-Two enums separate "the options were bad" from "the receive operation failed":
+Three enums separate "the options were bad" from "the datagram was bad" from "the receive operation
+failed":
 
 - `ParseError` says *why* the surplus area or its options were rejected: `InvalidLength { kind, len }`
   (a Length wrong for its Kind), `Overrun { offset }` (an option claims to extend past the surplus
@@ -743,6 +773,12 @@ Two enums separate "the options were bad" from "the receive operation failed":
   OCS did not validate to zero). Per RFC 9868 (Sec. 14), a `ParseError` over the surplus area does not
   fail the receive: the options are discarded but the UDP payload is still delivered. This is exactly
   why `ParseError` is a distinct, recoverable type and not merged into `RecvError`.
+- `HeaderError` says *why* the IP or UDP header invalidates the whole datagram: truncated headers,
+  an unsupported IP version, a bad IHL, an inconsistent IP length field, an IPv4 header-checksum
+  mismatch, a non-UDP protocol, or a UDP Length below 8. Unlike a `ParseError`, a `HeaderError`
+  means the datagram itself cannot be trusted and is dropped (the first row of the disposition
+  table), never "payload delivered, options discarded". Produced by `IpRepr::parse` and
+  `UdpHeader::parse`; how a drop is reported (and logged) is the Step-10 pipeline's decision.
 - `RecvError` is the pipeline/socket result type: `Parse(ParseError)` (carried for diagnostics),
   `Io(std::io::Error)` (a raw-socket failure), and `PermissionDenied` (the operation needs
   `CAP_NET_RAW` or root). `RecvError` implements `From<ParseError>` and `From<std::io::Error>`.

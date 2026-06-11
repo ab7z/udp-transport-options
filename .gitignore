@@ -2,6 +2,12 @@
 /.idea
 /.zed
 
+# cargo-fuzz working state; curated seeds live in fuzz/seeds/ and stay tracked.
+/fuzz/target
+/fuzz/corpus
+/fuzz/artifacts
+/fuzz/coverage
+
 !CLAUDE.md
 !requirements.md
 

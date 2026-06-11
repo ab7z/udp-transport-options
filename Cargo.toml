@@ -12,6 +12,10 @@ thiserror = "2"
 socket2 = "0.6.4"
 libc = "0.2"
 
+[dev-dependencies]
+proptest = "1"
+# Fuzzing lives in the standalone fuzz/ crate (cargo-fuzz, nightly); see scripts/pre-pr.sh.
+
 # Example peer CLIs (Step 14). Cargo auto-detects these from src/bin/, listed here for clarity.
 [[bin]]
 name = "udpopt-send"

@@ -38,8 +38,9 @@ following the UDP user data (as delimited by `udp_length`) and runs to the end o
 The surplus area is present only when `surplus_area > 0`; when `udp_length` equals the IP transport
 payload length there is no surplus area and therefore no options (RFC 9868 Sec. 7). This computation
 is the job of `wire::surplus`, whose `SurplusLayout { starts_at, needs_pad, len }` records the
-(post-pad, 2-byte-aligned) OCS start offset, whether a pad byte is required, and the total surplus
-length.
+surplus-area start offset (the pad byte, when required, is the area's first byte), whether a pad
+byte is required, and the total surplus length; the 2-byte-aligned OCS field sits at
+`starts_at + needs_pad`.
 
 The IP-version-generic inputs come from `wire::ip::IpRepr`: for IPv4 the transport payload length is
 `total_len` minus the IHL, and for IPv6 it is `payload_len` minus `ext_hdr_len`. The UDP boundary is
