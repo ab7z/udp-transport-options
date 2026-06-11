@@ -99,6 +99,9 @@ Legend: [ ] pending, [~] in progress, [x] done.
 
 - Per step: the DoD above; `cargo build` + `cargo fmt --check` + `cargo clippy --all-targets -- -D
   warnings` stay green; the step's unit tests pass.
+- Before every PR (opening and updating): the mandatory local gate `scripts/pre-pr.sh` (host
+  fmt/clippy/test with 1024 proptest cases, achim cross verify, time-boxed libFuzzer smoke). Every
+  step that adds a parsing surface extends the property tests and fuzz targets in the same commit.
 - Functional (root-free): `cargo test` locally, plus `scripts/vm-ubuntu-server.sh test`
   (cross-compiled test binaries execute on `achim` via the cargo runner).
 - Integration (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh ignored` (the runner executes

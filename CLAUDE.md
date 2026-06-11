@@ -21,6 +21,14 @@ with a per-step file under `docs/plan/steps/`.
 
 The library and binaries **compile** on any platform, but the raw-socket paths only **run** on Linux.
 
+**`scripts/pre-pr.sh` is mandatory before opening or updating any PR.** Its lanes, fail-fast in
+order: `cargo fmt --check`, host clippy (`-D warnings`), host `cargo test` with `PROPTEST_CASES`
+(default 1024), `scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy), and
+a time-boxed libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host.
+One-time prerequisites: `rustup toolchain install nightly` and `cargo install cargo-fuzz`. The
+achim ssh runner forwards no environment, so the cross-target property tests always run the
+proptest default of 256 cases.
+
 ## Scope
 
 In scope: the TLV options framework; the Option Checksum (OCS, RFC 9868 Section 9); the must-support
@@ -103,7 +111,16 @@ Design rules:
 - Confine all `unsafe` to `src/socket/` behind safe wrappers; the crate denies
   `unsafe_op_in_unsafe_fn`.
 - Dependencies: `socket2` + `libc` (raw sockets), `thiserror` (errors), `crc32c` (APC), `clap`
-  (CLIs), `log` (diagnostics, including the >7-NOP DoS log).
+  (CLIs), `log` (diagnostics, including the >7-NOP DoS log). Dev/tooling only: `proptest`
+  (property tests), `libfuzzer-sys` via `cargo-fuzz` (confined to the standalone `fuzz/` crate,
+  nightly). The hand-roll rule above applies to production code, not to test harnesses.
+- Every step that adds or changes a parsing surface (TLV parser, OCS, receive pipeline, FRAG)
+  ships, in the same step commit, a new or extended fuzz target under `fuzz/fuzz_targets/` plus a
+  property-test module asserting the joint invariants (see `tests/common/mod.rs` for the pattern:
+  re-derive every offset from the buffer, index every claimed range). Fuzz crashes are minimized,
+  checked in under `tests/data/`, and replayed forever via `tests/fuzz_regressions.rs`
+  (`include_bytes!` — the achim runner ships only the test binary, so tests must not read files at
+  runtime).
 
 ## Platform
 

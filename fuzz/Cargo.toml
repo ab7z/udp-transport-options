@@ -1,0 +1,22 @@
+[package]
+name = "udp-transport-options-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+udp-transport-options = { path = ".." }
+
+[[bin]]
+name = "wire_datagram"
+path = "fuzz_targets/wire_datagram.rs"
+test = false
+doc = false
+bench = false
+
+# Standalone workspace root: keeps the nightly-only fuzz build out of the parent crate.
+[workspace]

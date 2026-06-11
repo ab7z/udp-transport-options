@@ -76,3 +76,16 @@ pseudo-header checksum, and the surplus-area location computation.
   `starts_at + needs_pad` (the pad is part of the area, RFC 9868 Sec. 8). `compute_checksum`
   enforces its length invariant with a release-mode `assert_eq!`, and the IPv6 `ext_hdr_len` cast
   uses an explicit `u16::try_from(...).expect(...)`.
+- Hardening (consequence of the triage): the off-by-one survived 23 hand-written unit tests because
+  they checked fields against expected numbers from the same mental model, never the joint
+  invariant. Added `tests/properties_wire.rs` (proptest: header round-trips, length consistency,
+  UDP checksum verifies-to-zero and ignores-surplus, and the surplus-layout joint invariants — the
+  area ends exactly at the IP datagram end, pad parity, OCS alignment, minimal-size iff),
+  `tests/common/mod.rs` (the shared oracle that re-derives every offset from the buffer and indexes
+  every claimed range), the `fuzz/` cargo-fuzz crate with the `wire_datagram` target (same oracle
+  via `include!`) and five curated seeds, `tests/fuzz_regressions.rs` (`include_bytes!` replays plus
+  hand-derived layout/checksum expectations), and the mandatory `scripts/pre-pr.sh` gate (host
+  fmt/clippy/test at 1024 proptest cases, achim cross verify, 60-second libFuzzer smoke). Mutation
+  test: re-introducing the `starts_at` bug fails three properties (shrunk counterexamples persisted
+  in `tests/properties_wire.proptest-regressions`) and crashes the fuzzer within a second on the
+  `v4_hello_surplus_odd` seed.
