@@ -1,6 +1,6 @@
 # Step 2: Wire model (IpRepr, IP/UDP headers, surplus)
 
-Status: pending
+Status: done
 
 ## Goal
 
@@ -33,13 +33,40 @@ pseudo-header checksum, and the surplus-area location computation.
 
 ## Tasks
 
-- [ ] `IpRepr` methods (transport payload length, pseudo-header seed) for V4 and V6.
-- [ ] IPv4 + IPv6 header parse/build with round-trip tests.
-- [ ] `UdpHeader` parse/build + UDP checksum.
-- [ ] `locate_surplus` with even/odd cases.
+- [x] `IpRepr` methods (transport payload length, pseudo-header seed) for V4 and V6.
+- [x] IPv4 + IPv6 header parse/build with round-trip tests.
+- [x] `UdpHeader` parse/build + UDP checksum.
+- [x] `locate_surplus` with even/odd cases.
 
 ## Definition of Done
 
 - Round-trip parse->build equality for IPv4, IPv6, and UDP headers; the UDP checksum matches a
   known-good captured datagram; `locate_surplus` returns the correct offset and pad flag for even and
   odd starts.
+
+## Outcome
+
+- `IpRepr::{parse, write, header_len, transport_payload_len, pseudo_header_sum, src_addr, dst_addr}`
+  in `src/wire/ip.rs`; `UdpHeader::{parse, write, compute_checksum}` plus `HEADER_LEN` in
+  `src/wire/udp.rs`; `locate_surplus` in `src/wire/surplus.rs`.
+- Two deviations from the plan sketch, both reflected in `docs/architecture.md`:
+  `pseudo_header_sum` returns the Step-1 `Checksum` accumulator instead of a raw `u32` (every
+  pseudo-header field flows through the existing `add_slice`/`add_u16` API, keeping `Checksum`
+  closed), and header-level failures got their own datagram-drop error enum `HeaderError` in
+  `src/error.rs` instead of reusing `ParseError`, whose contract is "options discarded, payload
+  still delivered".
+- Parse rules: IPv4 accepts IHL 5..=15 (options skipped undecoded) and verifies the header checksum;
+  IPv6 skips Hop-by-Hop (legal only directly after the base header, RFC 8200 Sec. 4.1) and
+  Destination Options by length and rejects Routing (its final-destination pseudo-header semantics,
+  RFC 8200 Sec. 8.1, are out of scope), Fragment, AH, and ESP chains; `write` emits only the
+  20-/40-byte base headers (building IP options or extension headers is out of scope).
+  `locate_surplus` additionally returns `None` when the surplus cannot hold the aligned OCS plus any
+  required pad byte (RFC 9868 Sec. 8 "enough space for the aligned OCS"); the FR-49 UDP-Length drop
+  check stays a pipeline (Step 10) responsibility, `locate_surplus` is only defensive there.
+- 23 unit tests over hand-verified vectors (a 33-byte IPv4 and a 53-byte IPv6 "hello" datagram whose
+  checksums were independently computed and receiver-side verified, a computed-zero -> 0xFFFF
+  vector, even/odd/minimal/no-room surplus layouts including IHL-6 and extension-header shifts, and
+  a corrupt-input matrix covering every `HeaderError` variant plus misplaced/unsupported IPv6
+  extension headers). An adversarial RFC review (second model) drove the Routing-header rejection,
+  the Hop-by-Hop placement rule, and the minimal-surplus tests.
+- Verified on the host and cross-compiled on `achim` (`scripts/vm-ubuntu-server.sh verify`).
