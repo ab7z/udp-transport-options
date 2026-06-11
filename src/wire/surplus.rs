@@ -10,11 +10,16 @@ use crate::wire::ip::IpRepr;
 use crate::wire::udp::UdpHeader;
 
 /// The computed layout of the surplus area relative to the start of the IP datagram.
+///
+/// `starts_at..starts_at + len` is exactly the surplus area: the alignment pad byte, when present,
+/// is the area's first byte (RFC 9868 Section 8 — "option area bytes used for alignment before the
+/// OCS MUST be zero"), and the OCS field sits at `starts_at + usize::from(needs_pad)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurplusLayout {
-    /// Byte offset of the surplus area (after any pad), from the start of the IP datagram. Even.
+    /// Byte offset of the surplus area from the start of the IP datagram. Odd exactly when
+    /// `needs_pad` (the single zero pad byte that precedes the OCS lives at this offset).
     pub starts_at: usize,
-    /// Whether a single zero pad byte precedes the OCS (true when the natural start was odd).
+    /// Whether a single zero pad byte precedes the OCS (true when `starts_at` is odd).
     pub needs_pad: bool,
     /// Length of the surplus area in bytes, including any pad byte and the OCS.
     pub len: usize,
@@ -40,7 +45,7 @@ pub fn locate_surplus(ip: &IpRepr, udp: &UdpHeader) -> Option<SurplusLayout> {
         return None;
     }
     Some(SurplusLayout {
-        starts_at: natural_start + usize::from(needs_pad),
+        starts_at: natural_start,
         needs_pad,
         len: surplus,
     })
@@ -84,12 +89,12 @@ mod tests {
 
     #[test]
     fn odd_natural_start_pads_one_byte() {
-        // Header 20 + UDP Length 13 = natural start 33 (odd): one pad byte, OCS at 34.
+        // Header 20 + UDP Length 13 = surplus starts at 33 (odd): pad byte at 33, OCS at 34.
         let layout = locate_surplus(&v4(38), &udp(13)).unwrap();
         assert_eq!(
             layout,
             SurplusLayout {
-                starts_at: 34,
+                starts_at: 33,
                 needs_pad: true,
                 len: 5
             }
@@ -118,7 +123,7 @@ mod tests {
         assert_eq!(
             layout,
             SurplusLayout {
-                starts_at: 34,
+                starts_at: 33,
                 needs_pad: true,
                 len: 3
             }
@@ -162,7 +167,8 @@ mod tests {
 
     #[test]
     fn v6_ext_header_shifts_natural_start() {
-        // Base header 40 + extension headers 8 + UDP Length 13 = natural start 61 (odd).
+        // Base header 40 + extension headers 8 + UDP Length 13 = surplus starts at 61 (odd):
+        // pad byte at 61, OCS at 62.
         let ip = IpRepr::V6 {
             src: "2001:db8::1".parse().unwrap(),
             dst: "2001:db8::2".parse().unwrap(),
@@ -173,7 +179,7 @@ mod tests {
         assert_eq!(
             layout,
             SurplusLayout {
-                starts_at: 62,
+                starts_at: 61,
                 needs_pad: true,
                 len: 4
             }

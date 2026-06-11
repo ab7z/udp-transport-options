@@ -70,3 +70,9 @@ pseudo-header checksum, and the surplus-area location computation.
   extension headers). An adversarial RFC review (second model) drove the Routing-header rejection,
   the Hop-by-Hop placement rule, and the minimal-surplus tests.
 - Verified on the host and cross-compiled on `achim` (`scripts/vm-ubuntu-server.sh verify`).
+- PR-review triage (all three findings adopted): `SurplusLayout.starts_at` now names the surplus
+  area's natural start — previously it pointed past the pad while `len` still included it, so
+  `starts_at..starts_at + len` overran the datagram by one byte on odd starts; the OCS field sits at
+  `starts_at + needs_pad` (the pad is part of the area, RFC 9868 Sec. 8). `compute_checksum`
+  enforces its length invariant with a release-mode `assert_eq!`, and the IPv6 `ext_hdr_len` cast
+  uses an explicit `u16::try_from(...).expect(...)`.

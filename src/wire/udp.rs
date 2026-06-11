@@ -60,8 +60,11 @@ impl UdpHeader {
     /// A computed zero is transmitted as `0xFFFF` (RFC 768), so this never returns 0; the
     /// receive-side acceptance of a stored zero checksum ("no checksum", RFC 9868 Section 14) is
     /// the pipeline's policy, not handled here.
+    ///
+    /// Panics if `self.length` does not equal `HEADER_LEN + data.len()` — a mismatch would
+    /// silently yield a checksum over the wrong byte range.
     pub fn compute_checksum(&self, ip: &IpRepr, data: &[u8]) -> u16 {
-        debug_assert_eq!(
+        assert_eq!(
             usize::from(self.length),
             HEADER_LEN + data.len(),
             "UDP Length must cover the user data"

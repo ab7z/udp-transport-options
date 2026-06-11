@@ -360,10 +360,12 @@ impl UdpHeader {
 
 ```rust
 pub struct SurplusLayout {
-    pub starts_at: usize, // even offset of the surplus area (after any pad), from IP datagram start
-    pub needs_pad: bool,  // true when the natural start was odd (a single zero pad precedes the OCS)
+    pub starts_at: usize, // offset of the surplus area from IP datagram start; odd exactly when needs_pad
+    pub needs_pad: bool,  // true when starts_at is odd (a single zero pad byte precedes the OCS)
     pub len: usize,       // length of the surplus area in bytes, including any pad and the OCS
 }
+// starts_at..starts_at + len is exactly the surplus area; the pad byte, when present, is the
+// area's first byte, and the OCS field sits at starts_at + usize::from(needs_pad).
 
 // Compute where the surplus area lives, or None when there is no usable surplus area: no surplus,
 // too small for any required pad byte plus the aligned OCS, or (defensively) UDP Length larger

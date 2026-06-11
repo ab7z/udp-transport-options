@@ -147,7 +147,7 @@ impl IpRepr {
         if next_header != IPPROTO_UDP {
             return Err(HeaderError::UnexpectedProtocol(next_header));
         }
-        let ext_hdr_len = (offset - IPV6_HEADER_LEN) as u16;
+        let ext_hdr_len = u16::try_from(offset - IPV6_HEADER_LEN).expect("bounded by payload_len, a u16");
         let src = Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[8..24]).expect("16-byte slice"));
         let dst = Ipv6Addr::from(<[u8; 16]>::try_from(&bytes[24..40]).expect("16-byte slice"));
         Ok((
