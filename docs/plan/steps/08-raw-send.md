@@ -21,8 +21,9 @@ Send a datagram with a surplus area over a raw socket, building all headers and 
    `RecvError::PermissionDenied`.
 2. Assemble the IP header (explicit Total Length), the UDP header (UDP Length < Total Length to open
    the surplus area), and the surplus (Steps 5 and 6); compute the UDP checksum and the OCS.
-3. `sendto` the destination and confirm the kernel does not overwrite Total Length on the target
-   kernel.
+3. `sendto` the destination and assert the on-wire Total Length equals the buffer length (Step 0.5
+   Finding A: with `IP_HDRINCL` the kernel forces Total Length to the buffer length and recomputes
+   the IP checksum, so the explicit value must match the buffer for nothing to change on the wire).
 4. Root-gated loopback test asserting the assembled bytes and that UDP Length < IP Total Length on
    the wire.
 

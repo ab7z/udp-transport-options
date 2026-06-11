@@ -11,9 +11,11 @@ Serialize a set of options into a surplus area with correct ordering, alignment,
 - `OptionsBuilder` accepting typed options and emitting their wire bytes.
 - Must-support options emitted before other SAFE options (canonical order).
 - NOP used for inter-option alignment; EOL terminates; the remainder is zero-filled to a 2-byte
-  boundary so the total surplus length is even.
+  boundary so the total surplus length is even (a builder canonicalization -- the RFC only requires
+  EOL plus zero-fill to the end of the chosen area, RFC 9868 Sec. 11.1).
 - The extended length form emitted when a value is large enough to need it.
-- The OCS is reserved as the first option here and back-patched in Step 6.
+- The leading two-byte OCS field is reserved here and back-patched in Step 6. The OCS is positional,
+  not a TLV: a bare two-byte slot with no Kind and no Length octet (RFC 9868 Sec. 8).
 
 ## Plan
 
@@ -21,8 +23,8 @@ Serialize a set of options into a surplus area with correct ordering, alignment,
 2. `finish()` emits must-support options first (canonical order, excluding EOL/NOP), then other SAFE
    options; inserts NOP padding only where alignment requires; appends EOL; zero-fills to an even
    length.
-3. Reserve the leading OCS slot (Kind + Length + two zero bytes) as the first content and record its
-   offset for the Step 6 back-patch.
+3. Reserve the leading OCS slot (a bare two-byte field, zeroed; no Kind/Length framing) as the first
+   content and record its offset for the Step 6 back-patch.
 4. Emit the extended length form when a value is large enough to need it.
 5. Tests: serialize -> parse round-trip; canonical ordering; even total length; a golden-byte layout.
 

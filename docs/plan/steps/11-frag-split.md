@@ -8,18 +8,23 @@ Split an oversized datagram into FRAG fragments.
 
 ## Requirements
 
-- Each fragment carries empty UDP user data (UDP Length == 8); the data lives in the surplus area
-  after the FRAG option.
+- Each fragment carries empty UDP user data (UDP Length == 8); the fragment data lives in the
+  surplus area after all of the fragment's options (located by Frag.Start, running to the end of the
+  IP datagram).
 - Non-terminal fragments use the 10-byte FRAG form; the terminal fragment uses the 12-byte form with
   the Reassembled-Datagram-Option-Start (RDOS).
 - Correct `Frag.Start`, `Identification` (unique per 5-tuple), and `Frag.Offset` across fragments.
 - The single-fragment (atomic) case is supported.
-- Sizing respects MDS (per-link) and the MRDS reassembly cap (2926 IPv4 / 2886 IPv6).
+- The fragment size S derives from the path MTU, with MDS as a hint (Sec. 11.5) -- never from MRDS;
+  chunks are <= S-12 (non-terminal) / S-14 (terminal). The reassembled size (UDP header + data +
+  per-datagram options) must not exceed the peer's MRDS; assume 2926 (IPv4) / 2886 (IPv6) and
+  2 segments when no MRDS was received (Sec. 11.6); a payload over that cap is rejected with an
+  error, not fragmented.
 
 ## Plan
 
-1. From a payload plus per-datagram options, size fragments against MDS, the MRDS cap, and the
-   surplus budget.
+1. From a payload plus per-datagram options, size fragments against S (path MTU, MDS hint) and the
+   surplus budget; reject payloads whose reassembled size exceeds the MRDS cap.
 2. Emit fragments, each with empty UDP data (Length 8): a FRAG option (non-terminal 10-byte /
    terminal 12-byte with RDOS), correct Frag.Start and Frag.Offset, a shared 32-bit Identification,
    and an OCS.

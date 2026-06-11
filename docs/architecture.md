@@ -22,7 +22,8 @@ The companion thesis asks two research questions, and the architecture is shaped
 
 RFC 9868 carries transport options in the **surplus area**: the bytes between the end of the UDP
 payload (delimited by the UDP Length field) and the end of the IP transport payload (IPv4 Total
-Length minus the IHL, or IPv6 Payload Length minus any extension headers) (RFC 9868 Sec. 4, Sec. 7).
+Length minus the IHL x 4 header bytes, or IPv6 Payload Length minus any extension headers)
+(RFC 9868 Sec. 4, Sec. 7).
 A normal operating-system UDP stack delivers only the UDP-length-bounded payload and never exposes
 the surplus area, so this crate reaches it with raw sockets on Linux.
 
@@ -32,7 +33,7 @@ the surplus area, so this crate reaches it with raw sockets on Linux.
  | IP header      | UDP header (8 B)   | UDP user data | surplus area         |
  +----------------+--------------------+---------------+----------------------+
                   |<------ UDP Length ---------------->|
- |<------------------------ IP payload (Total Length - IHL) ------------------>|
+ |<---------------------- IP payload (Total Length - IHL*4) ------------------>|
                                                        |<-- surplus area ----->|
                                                        (OCS, then UDP options)
 ```
@@ -193,8 +194,10 @@ byte buffer (with a zero placeholder where the OCS goes). Root-free.
 
 OCS computation and validation (RFC 9868 Sec. 9). Computation is a two-pass back-patch: serialize the
 surplus area with the OCS field zero, run the RFC 1071 sum over the whole surplus area plus the 16-bit
-surplus length, then write the one's complement of the folded sum into the OCS field. Validation recomputes the sum over the same
-bytes (including the stored OCS) and requires the result to be zero. Built on `wire/checksum`. Input:
+surplus length, then write the one's complement of the folded sum into the OCS field (a would-be
+`0x0000` is written as its one's-complement equivalent `0xFFFF`, keeping a used OCS non-zero as
+Sec. 9 requires when the UDP checksum is non-zero). Validation recomputes the sum over the same
+bytes (including the stored OCS) and requires the result to be the one's-complement zero. Built on `wire/checksum`. Input:
 the surplus-area bytes (and length). Output: the OCS value, or a pass/fail verdict. Root-free.
 
 ### `options/typed` (pure)
@@ -223,7 +226,9 @@ Root-free.
 Reassembly on the receive side (RFC 9868 Sec. 11.4). `ReassemblyCache` keyed by `FragKey`, with
 offset-sorted insertion, overlap detection (overlap aborts), a timeout (<= 2 minutes), garbage
 collection, and per-pair plus global DoS limits. A completed datagram is returned for one re-feed
-into the pipeline (a reassembled datagram must not itself carry FRAG). Input: one fragment's
+into the pipeline; a FRAG reappearing there with non-empty reassembled data follows the RFC 9868
+Sec. 11.4 rule (all options ignored, data delivered), and a nested FRAG with empty data is rejected
+as a local anti-loop policy (the RFC does not define nested fragmentation). Input: one fragment's
 `FragKey`, `Frag` fields, and data. Output: a `ReassemblyOutcome` (`Incomplete`, `Complete(bytes)`,
 or `Abort(reason)`). Root-free.
 
@@ -257,8 +262,10 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 
 - **low-level:** set and read explicit options on individual datagrams.
 - **high-level:** a peer that sends and receives payloads with typed options, applying the OCS and
-  fragmentation/reassembly transparently (a send larger than MRDS auto-fragments; the receiver
-  reassembles transparently).
+  fragmentation/reassembly transparently. A send too large for a single datagram (the fragment size
+  derives from the path MTU, with MDS as a hint) auto-fragments; the reassembled size -- UDP header,
+  data, and per-datagram options -- must stay within the peer's MRDS (defaults 2926/2886 when none
+  received), otherwise the send fails with an error; the receiver reassembles transparently.
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
 
@@ -520,10 +527,10 @@ pub fn process_datagram(
 
 ```rust
 pub enum ParseError {
-    InvalidLength { kind: u8, len: usize }, // Length wrong for this Kind
+    InvalidLength { kind: u8, len: usize }, // Length below the Kind minimum (malformed surplus)
     Overrun { offset: usize },              // option claims to extend past the surplus area
     NonZeroPad,                             // the single odd-offset alignment pad byte was non-zero
-    OcsMismatch,                            // OCS did not validate to zero over the surplus area
+    OcsMismatch,                            // OCS sum did not fold to the one's-complement zero
 }
 
 pub enum HeaderError {                      // IP/UDP header invalidates the whole datagram (drop)
@@ -630,7 +637,7 @@ the UDP checksum or the OCS for a raw send, so the crate computes both. With `IP
 builds the IP header itself, which is what lets UDP Length be smaller than IP Total Length.
 
 ```
- caller: addresses, ports, payload, typed options [, fragment if > MRDS]
+ caller: addresses, ports, payload, typed options [, fragment if > single-datagram capacity]
         |
         v
  (1) options::serialize::OptionsBuilder
@@ -651,7 +658,8 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         |   produces: UDP header bytes + checksum
         v
  (4) wire/ip  (build, via IpRepr)
-        - IP Total Length (v4) / Payload Length (v6) = headers + UDP Length + surplus-area length
+        - IP Total Length (v4) = IHL*4 + UDP Length + surplus-area length
+        - IPv6 Payload Length = ext-header length + UDP Length + surplus-area length
         - assemble: IP header | UDP header | user data | [pad] | OCS | options
         |   produces: a full IP datagram on the stack
         v
@@ -663,19 +671,23 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
  datagram on the wire
 ```
 
-For a payload larger than the peer's MRDS, step (1) is preceded by `frag/split`, which produces one
-FRAG fragment per output datagram: each fragment has empty UDP user data (UDP Length 8) and carries
-its data in the surplus area after the FRAG option; non-terminal fragments use the 10-byte FRAG form
-and the terminal fragment the 12-byte form with the RDOS (RFC 9868 Sec. 11.4). Steps (2) through (5)
-then run per fragment.
+For a payload too large for a single datagram (the fragment size S derives from the path MTU, with
+MDS as a hint -- never from MRDS), step (1) is preceded by `frag/split`, which produces one FRAG
+fragment per output datagram: each fragment has empty UDP user data (UDP Length 8) and carries its
+data in the surplus area after all of the fragment's options; non-terminal fragments use the 10-byte
+FRAG form and the terminal fragment the 12-byte form with the RDOS (RFC 9868 Sec. 11.4). The
+reassembled size (UDP header + data + per-datagram options) is capped by the peer's MRDS (defaults
+2926/2886 when none received); a payload over that cap is rejected, not fragmented. Steps (2)
+through (5) then run per fragment.
 
 ### 5.2 Receive walkthrough (ASCII state machine)
 
 `recv::pipeline::process_datagram` implements the RFC 9868 processing order: verify the UDP checksum,
 locate and validate the surplus area, validate the OCS, parse the options, then reassemble (FRAG) or
 deliver (RFC 9868 Sec. 14). A malformed surplus area discards the options but still delivers the
-payload; an unknown SAFE option is ignored; an unknown UNSAFE option causes the reassembled data to
-be dropped (RFC 9868 Sec. 10).
+payload; an unknown SAFE option is ignored; an unknown UNSAFE option causes the (reassembled) user
+data to be dropped, with a zero-length datagram still delivered to the user (RFC 9868 Sec. 10,
+Sec. 12, Sec. 14).
 
 ```
  socket/recv (privileged) -> raw IP datagram bytes
@@ -696,7 +708,7 @@ be dropped (RFC 9868 Sec. 10).
  +-------------------------------------------------------------------------------+
  | (C) wire/surplus::locate_surplus                                              |
  +-------------------------------------------------------------------------------+
-        | no surplus area OR surplus < 2 bytes (no room for OCS)
+        | no surplus area OR too small for the aligned OCS (2 bytes, or 3 with the odd-start pad)
         |        -------------------------------> Delivery::Payload { data, options: [] }
         | needs_pad and the pad byte != 0 -> ParseError::NonZeroPad
         |        -------------------------------> Delivery::Payload { data, options: [] }
@@ -705,7 +717,8 @@ be dropped (RFC 9868 Sec. 10).
  | (D) OCS gate (the RFC 9868 Sec. 14 matrix over OCS value x UDP-checksum value) |
  |       OCS == 0: "unused", valid ONLY if the UDP checksum was also zero         |
  |       OCS != 0: validate via options::ocs (RFC 1071 sum over the whole surplus |
- |                 area incl. the stored OCS + the 16-bit surplus length == 0)    |
+ |                 area incl. the stored OCS + the 16-bit surplus length folds to |
+ |                 the one's-complement zero, 0xFFFF)                             |
  +-------------------------------------------------------------------------------+
         | (OCS == 0 and UDP cksum != 0) -> options ignored (legacy emulation)
         |        -------------------------------> Delivery::Payload { data, options: [] }
@@ -715,15 +728,21 @@ be dropped (RFC 9868 Sec. 10).
  +-------------------------------------------------------------------------------+
  | (E) options::parse (OptionsIter): walk the TLVs after the OCS                  |
  +-------------------------------------------------------------------------------+
-        | any InvalidLength / Overrun -> halt
+        | Length under the Kind minimum, option underrun, or surplus overrun -> halt
         |        -------------------------------> Delivery::Payload { data, options: [] }
+        | other unexpected length of a known SAFE option -> ignore that option only
+        |        (Sec. 10; exception: a malformed FRAG counts as unsupported UNSAFE)
         | unknown SAFE option   -> ignore it, keep going
-        | unknown UNSAFE option -> drop the user data (Sec. 12; with FRAG via G, without FRAG directly)
+        | unknown UNSAFE option -> flag it; resolved after (F): the FRAG-with-non-empty-data
+        |        rule takes precedence (options ignored, data delivered); otherwise drop the
+        |        user data, deliver a zero-length datagram (Sec. 11.4, 12, 14; with FRAG via G)
         v parsed options
  +-------------------------------------------------------------------------------+
  | (F) FRAG present?                                                              |
  +-------------------------------------------------------------------------------+
         | no  -> Delivery::Payload { data, options: parsed }
+        | yes but UDP Length != 8 (user data non-empty) -> ignore ALL options
+        |        -------------------------------> Delivery::Payload { data, options: [] } (Sec. 11.4)
         | yes (UDP Length == 8, data in surplus) -> go to (G)
         v
  +-------------------------------------------------------------------------------+
@@ -732,28 +751,32 @@ be dropped (RFC 9868 Sec. 10).
  +-------------------------------------------------------------------------------+
         | Incomplete                 -> Delivery::Buffered
         | Abort(Overlap|LimitExceeded|Timeout) -> drop partial -> Delivery::Buffered
-        | unknown-UNSAFE seen in (E) -> drop the reassembled datagram -> Delivery::Buffered
+        | unknown-UNSAFE seen in (E) -> drop the reassembled user data
+        |        -> Delivery::Payload { data: [], options: [] } (zero-length delivery, Sec. 12, 14)
         | Complete(bytes)            -> re-feed ONCE into process_datagram
-        |                               (reassembled datagram MUST NOT carry FRAG)
         v
- second pass over the reassembled datagram lands at (F) with no FRAG ->
-        Delivery::Payload { data, options }
+ second pass over the reassembled datagram: no FRAG lands at (F) -> Delivery::Payload
+        { data, options }; a FRAG with non-empty data hits the (F) non-empty branch (options
+        ignored, data delivered, Sec. 11.4); a nested FRAG with empty data is rejected -- local
+        anti-loop policy, never a second re-feed (the RFC does not define nested fragmentation)
 ```
 
 Disposition summary:
 
 | Condition                                  | Payload      | Options    | Outcome                          |
 |--------------------------------------------|--------------|------------|----------------------------------|
-| UDP Length out of range                    | dropped      | -          | datagram dropped (RFC Sec. 14)   |
+| UDP Length out of range                    | dropped      | -          | datagram dropped (RFC Sec. 10)   |
 | UDP checksum present and wrong             | dropped      | -          | datagram dropped                 |
-| No surplus area, or surplus < 2 bytes      | delivered    | none       | `Payload { options: [] }`        |
+| No surplus area, or too small for pad+OCS  | delivered    | none       | `Payload { options: [] }`        |
 | Odd-offset pad byte non-zero               | delivered    | discarded  | `Payload { options: [] }`        |
 | OCS == 0 but UDP checksum non-zero         | delivered    | discarded  | `Payload { options: [] }`        |
 | OCS != 0 and validation fails              | delivered    | discarded  | `Payload { options: [] }`        |
-| Malformed TLV (length/overrun)             | delivered    | discarded  | `Payload { options: [] }`        |
+| Malformed TLV (sub-minimum/under/overrun)  | delivered    | discarded  | `Payload { options: [] }`        |
+| Unexpected length, known SAFE option       | delivered    | rest kept  | that option ignored (Sec. 10)    |
+| FRAG present, user data non-empty          | delivered    | discarded  | `Payload { options: [] }` (Sec. 11.4) |
 | Unknown SAFE option                        | delivered    | rest kept  | option ignored                   |
-| Unknown UNSAFE option (no FRAG)            | dropped      | discarded  | user data silently dropped (Sec. 12) |
-| Unknown UNSAFE option (with FRAG)          | -            | -          | reassembled datagram dropped     |
+| Unknown UNSAFE option (no FRAG)            | zero-length  | discarded  | user data dropped; zero-length delivery (Sec. 12, 14) |
+| Unknown UNSAFE option (with FRAG)          | zero-length  | discarded  | reassembled data dropped; zero-length delivery |
 | FRAG, more fragments needed                | -            | -          | `Buffered`                       |
 | FRAG, overlap / cap / timeout              | -            | -          | partial discarded, `Buffered`    |
 | FRAG complete                              | delivered*   | parsed*    | re-fed once, then `Payload`      |
@@ -838,7 +861,7 @@ Hand-rolled on purpose (no crate):
   extended-length form, the canonical ordering, the NOP alignment, and the EOL/zero-fill are the core
   mechanism of RFC 9868 Sec. 10.
 - **The OCS** (`options/ocs`): the two-pass back-patch, the "OCS field zero during computation," the
-  inclusion of the 16-bit surplus length, and the receiver's "sum must be zero" check are the
+  inclusion of the 16-bit surplus length, and the receiver's one's-complement-zero check are the
   RFC 9868 Sec. 9 contribution.
 
 Explicitly avoided: `nom`, `pnet`, `etherparse`, `smoltcp`, `bytes`, `nix`, and `zerocopy`. Pulling in

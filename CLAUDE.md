@@ -93,14 +93,16 @@ Design rules:
   SAFE = 0..=191, UNSAFE = 192..=255.
 - **OCS** uses the RFC 1071 sum over the whole surplus area (with the OCS field treated as zero) plus
   the 16-bit surplus length; it must be the first content in the surplus area; the receiver checks
-  that the sum is zero. The UDP checksum covers only up to UDP Length (not the surplus area).
+  that the sum is the one's-complement zero (folded sum `0xFFFF`). A computed `0x0000` is sent as
+  `0xFFFF`; a zero OCS is legal only when the UDP checksum is also zero. The UDP checksum covers only
+  up to UDP Length (not the surplus area).
 - **FRAG** is used only with empty UDP user data (UDP Length == 8). Reassembly is keyed by
   (src IP, src port, dst IP, dst port, Identification); overlap aborts; timeout <= 2 min; per-pair
   limits; default MRDS 2926 (IPv4) / 2886 (IPv6).
 - **Receive order:** verify UDP checksum, locate/validate the surplus area, validate the OCS, parse
   the options, then reassemble (FRAG) or deliver. A malformed surplus area discards the options but
   still delivers the payload; unknown SAFE options are ignored; unknown UNSAFE options cause the
-  reassembled data to be dropped.
+  reassembled data to be dropped (a zero-length datagram is still delivered to the user).
 
 ## Coding conventions
 

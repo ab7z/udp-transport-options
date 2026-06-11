@@ -13,8 +13,10 @@ Reassemble FRAG fragments with overlap protection, timeouts, and DoS limits.
 - A reassembly timeout (<= 2 minutes) and garbage collection of expired partials.
 - Per-socket-pair byte and segment limits, plus a global cap on pending partials; one pair hitting a
   limit must not affect another.
-- On completion, return the reassembled datagram for one re-pass through the pipeline; a reassembled
-  datagram must not itself carry FRAG (reject to prevent loops).
+- On completion, return the reassembled datagram for one re-pass through the pipeline. A FRAG
+  reappearing there with non-empty user data follows the RFC rule: ignore all options, deliver the
+  data (Sec. 11.4). Only a nested FRAG with empty user data is rejected, as local anti-loop policy
+  (the RFC does not define nested fragmentation); there is never a second re-feed.
 
 ## Plan
 
@@ -23,7 +25,8 @@ Reassemble FRAG fragments with overlap protection, timeouts, and DoS limits.
 2. Insert with overlap detection (overlap -> `Abort(Overlap)`); enforce per-pair byte and segment
    caps plus a global pending-partial cap.
 3. Timeout and garbage-collect partials (<= 2 minutes); on completion reconstruct the datagram
-   (`Complete(bytes)`) and reject a nested FRAG on the re-pass.
+   (`Complete(bytes)`) and re-pass once: FRAG with non-empty data -> options ignored, data delivered
+   (Sec. 11.4); nested FRAG with empty data -> rejected (local policy).
 4. Tests: in-order and out-of-order success; overlap abort; each cap firing; GC; pair isolation; no
    re-process loop.
 
@@ -32,7 +35,7 @@ Reassemble FRAG fragments with overlap protection, timeouts, and DoS limits.
 - [ ] Cache structure, insertion, overlap detection.
 - [ ] Timeout + GC.
 - [ ] Per-pair and global limits.
-- [ ] Completion + re-pass with nested-FRAG rejection.
+- [ ] Completion + single re-pass (RFC rule for non-empty data; empty-data nested FRAG rejected).
 - [ ] Tests for each behavior.
 
 ## Definition of Done

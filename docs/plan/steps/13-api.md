@@ -19,10 +19,12 @@ Expose the library through a low-level and a high-level API, with finalized erro
 1. Low-level API: build a datagram from explicit `RawOption`s and parse a received datagram into
    payload plus options.
 2. High-level peer: wrap the sockets, the pipeline, and the cache; `send(payload, options)` applies
-   the OCS and fragments when needed; `recv()` reassembles transparently and returns the payload and
-   typed options.
+   the OCS and auto-fragments when the payload exceeds the single-datagram capacity (fragment size S
+   from the path MTU, MDS as a hint); a send whose reassembled size exceeds the peer's MRDS fails
+   with an error; `recv()` reassembles transparently and returns the payload and typed options.
 3. Consolidate the `thiserror` error types and document the public surface.
-4. Doctests plus a larger-than-MRDS auto-fragment / reassemble round-trip.
+4. Doctests plus a larger-than-one-datagram (within-MRDS) auto-fragment / reassemble round-trip and
+   an over-MRDS send that fails with an error.
 
 ## Tasks
 
@@ -33,5 +35,6 @@ Expose the library through a low-level and a high-level API, with finalized erro
 
 ## Definition of Done
 
-- `cargo doc` builds; a high-level send of a payload larger than MRDS auto-fragments and a high-level
-  receive reassembles it transparently.
+- `cargo doc` builds; a high-level send of a payload larger than a single datagram's capacity (but
+  within the peer's MRDS) auto-fragments and a high-level receive reassembles it transparently; a
+  send whose reassembled size exceeds the peer's MRDS fails with an error.

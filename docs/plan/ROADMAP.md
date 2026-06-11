@@ -59,14 +59,14 @@ Legend: [ ] pending, [~] in progress, [x] done.
 | 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [ ] |
 | 4 | Zero-copy TLV parser (`OptionsIter`/`OptionRef`) | correct iteration; truncated/overrun/bad-extended each one `Err` + halt; no panic on random input | [ ] |
 | 5 | Serializer (`OptionsBuilder`): ordering, NOP align, EOL + zero-fill, extended length | serialize->parse round-trip; canonical order; even length; golden-byte test | [ ] |
-| 6 | OCS compute + validate (two-pass back-patch; odd-pad zero) | validates to 0; any byte flip fails; OCS==0-with-nonzero-UDP-cksum flagged | [ ] |
+| 6 | OCS compute + validate (two-pass back-patch; odd-pad zero; computed 0x0000 sent as 0xFFFF) | validates (one's-complement zero); any byte flip fails; OCS==0-with-nonzero-UDP-cksum flagged | [ ] |
 | 7 | Typed options: APC (CRC32C), MDS, MRDS, REQ, RES | each round-trips encode->parse->decode; APC vs `crc32c` + vector; wrong length -> `ParseError` | [ ] |
 | 8 | Raw send path (`IP_HDRINCL`) | root-gated loopback: serializer bytes hit the socket unchanged; UDP Length < IP Total Length on wire | [ ] |
 | 9 | Raw recv socket | root-gated loopback: **surplus bytes arrive intact** (premise smoke-tested at Step 0.5); ports filtered; no spurious ICMP | [ ] |
 | 10 | Receive pipeline (pure) | table-driven tests cover deliver/discard, unknown SAFE/UNSAFE, cksum0 x OCS matrix, NOP flood (no root) | [ ] |
 | 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [ ] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [ ] |
-| 13 | Two-tier API + error types | `cargo doc` builds; high-level >MRDS send auto-fragments and recv reassembles transparently | [ ] |
+| 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [ ] |
 | 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [ ] |
 | 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [ ] |
 | 16 | IPv6 socket wiring (`AF_INET6`, `IPV6_HDRINCL`) | `::1` loopback round-trip with surplus + options + FRAG; pipeline path shared with v4 | [ ] |
