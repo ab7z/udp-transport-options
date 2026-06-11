@@ -5,15 +5,17 @@
 //! the IP datagram; if the area's natural start is odd, a single zero pad byte precedes the OCS
 //! (RFC 9868 Section 8).
 
+use std::ops::Range;
+
 use crate::model::length::OCS;
 use crate::wire::ip::IpRepr;
 use crate::wire::udp::UdpHeader;
 
 /// The computed layout of the surplus area relative to the start of the IP datagram.
 ///
-/// `starts_at..starts_at + len` is exactly the surplus area: the alignment pad byte, when present,
-/// is the area's first byte (RFC 9868 Section 8 — "option area bytes used for alignment before the
-/// OCS MUST be zero"), and the OCS field sits at `starts_at + usize::from(needs_pad)`.
+/// [`Self::range`] is exactly the surplus area: the alignment pad byte, when present, is the
+/// area's first byte (RFC 9868 Section 8 — "option area bytes used for alignment before the OCS
+/// MUST be zero"), and the OCS field sits at [`Self::ocs_at`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurplusLayout {
     /// Byte offset of the surplus area from the start of the IP datagram. Odd exactly when
@@ -23,6 +25,19 @@ pub struct SurplusLayout {
     pub needs_pad: bool,
     /// Length of the surplus area in bytes, including any pad byte and the OCS.
     pub len: usize,
+}
+
+impl SurplusLayout {
+    /// Byte offset of the OCS field from the start of the IP datagram: the first 2-byte-aligned
+    /// offset in the area, past the pad byte when one is present.
+    pub fn ocs_at(&self) -> usize {
+        self.starts_at + usize::from(self.needs_pad)
+    }
+
+    /// The surplus area as a byte range within the IP datagram.
+    pub fn range(&self) -> Range<usize> {
+        self.starts_at..self.starts_at + self.len
+    }
 }
 
 /// Computes where the surplus area lives, or `None` when there is no usable surplus area.
@@ -85,6 +100,8 @@ mod tests {
                 len: 4
             }
         );
+        assert_eq!(layout.ocs_at(), 32);
+        assert_eq!(layout.range(), 32..36);
     }
 
     #[test]
@@ -99,6 +116,8 @@ mod tests {
                 len: 5
             }
         );
+        assert_eq!(layout.ocs_at(), 34);
+        assert_eq!(layout.range(), 33..38);
     }
 
     #[test]

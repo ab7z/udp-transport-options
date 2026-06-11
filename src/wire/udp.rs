@@ -45,7 +45,11 @@ impl UdpHeader {
         })
     }
 
-    /// Writes the eight header bytes in network byte order. Panics if `out` is shorter than 8.
+    /// Writes the eight header bytes in network byte order.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than [`HEADER_LEN`].
     pub fn write(&self, out: &mut [u8]) {
         out[0..2].copy_from_slice(&self.src_port.to_be_bytes());
         out[2..4].copy_from_slice(&self.dst_port.to_be_bytes());
@@ -60,6 +64,8 @@ impl UdpHeader {
     /// A computed zero is transmitted as `0xFFFF` (RFC 768), so this never returns 0; the
     /// receive-side acceptance of a stored zero checksum ("no checksum", RFC 9868 Section 14) is
     /// the pipeline's policy, not handled here.
+    ///
+    /// # Panics
     ///
     /// Panics if `self.length` does not equal `HEADER_LEN + data.len()` — a mismatch would
     /// silently yield a checksum over the wrong byte range.

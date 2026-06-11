@@ -20,7 +20,7 @@ const IPV6_HEADER_LEN: usize = 40;
 const DEFAULT_TTL: u8 = 64;
 
 /// An IP-version-generic view of the header fields the UDP-options layer depends on.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IpRepr {
     /// IPv4 header fields.
     V4 {
@@ -163,9 +163,14 @@ impl IpRepr {
 
     /// Writes the IP header into `out` (V4: exactly 20 bytes, V6: exactly 40 bytes).
     ///
-    /// Building IPv4 options or IPv6 extension headers is out of scope, so V4 requires `ihl == 5`
-    /// and V6 requires `ext_hdr_len == 0`. The IPv4 header checksum is computed and back-patched.
-    /// Panics if `out` is shorter than [`Self::header_len`].
+    /// Building IPv4 options or IPv6 extension headers is out of scope, so this cannot round-trip
+    /// a repr that [`Self::parse`] accepted from a datagram carrying them. The IPv4 header
+    /// checksum is computed and back-patched.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `out` is shorter than [`Self::header_len`], or if the repr carries headers this
+    /// writer cannot build (V4 `ihl != 5`, V6 `ext_hdr_len != 0`).
     pub fn write(&self, out: &mut [u8]) {
         match *self {
             IpRepr::V4 {

@@ -364,8 +364,12 @@ pub struct SurplusLayout {
     pub needs_pad: bool,  // true when starts_at is odd (a single zero pad byte precedes the OCS)
     pub len: usize,       // length of the surplus area in bytes, including any pad and the OCS
 }
-// starts_at..starts_at + len is exactly the surplus area; the pad byte, when present, is the
-// area's first byte, and the OCS field sits at starts_at + usize::from(needs_pad).
+
+impl SurplusLayout {
+    pub fn ocs_at(&self) -> usize;       // OCS offset: starts_at plus the pad byte when present
+    pub fn range(&self) -> Range<usize>; // the surplus area: starts_at..starts_at + len
+}
+// range() is exactly the surplus area; the pad byte, when present, is the area's first byte.
 
 // Compute where the surplus area lives, or None when there is no usable surplus area: no surplus,
 // too small for any required pad byte plus the aligned OCS, or (defensively) UDP Length larger

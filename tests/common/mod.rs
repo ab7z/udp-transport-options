@@ -50,10 +50,12 @@ pub fn check_wire_invariants(buf: &[u8]) {
             // the transport payload past the UDP Length, so it must end at the IP datagram end.
             assert_eq!(layout.starts_at + layout.len, ip_end);
             assert_eq!(layout.needs_pad, want_pad);
-            let surplus = &buf[layout.starts_at..layout.starts_at + layout.len];
+            assert_eq!(layout.range(), layout.starts_at..ip_end);
+            let surplus = &buf[layout.range()];
             assert!(surplus.len() >= usize::from(layout.needs_pad) + 2);
             // The OCS field is 2-byte aligned relative to the IP datagram start and in-bounds.
-            let ocs_at = layout.starts_at + usize::from(layout.needs_pad);
+            let ocs_at = layout.ocs_at();
+            assert_eq!(ocs_at, layout.starts_at + usize::from(layout.needs_pad));
             assert_eq!(ocs_at % 2, 0);
             assert!(ocs_at + 2 <= ip_end);
             let _ocs = &buf[ocs_at..ocs_at + 2];
