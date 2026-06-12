@@ -15,6 +15,13 @@ Receive full IP datagrams with the surplus area intact and hand them to the rece
   bound (bind a dummy `SOCK_DGRAM` to absorb ICMP).
 - This step proves the project's core premise: the surplus area arrives intact.
 
+## Lean verification
+
+Not applicable: raw-socket delivery, port filtering, and ICMP noise are kernel behavior, and the
+core premise (the surplus area arrives intact) is empirical by nature -- Step 0.5, this step's
+loopback round-trip, and Step 17 carry that evidence. No Lean obligations; see
+`LEAN_RFC9868_VALIDATION.md`.
+
 ## Plan
 
 1. Create an AF_INET SOCK_RAW IPPROTO_UDP socket; attach a BPF destination-port filter, or filter by

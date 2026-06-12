@@ -19,6 +19,22 @@ Compute and validate the Option Checksum (RFC 9868 Section 9) over the surplus a
 - Handle the zero-OCS rules: OCS == 0 with UDP checksum == 0 is "unused, assumed correct" (no sum is
   run); "OCS == 0 while the UDP checksum is nonzero" means the options are ignored (Sec. 9, 14).
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): OCS = the one's-complement sum over the whole surplus area (the OCS
+field as zero) plus the 16-bit surplus length, stored complemented; validation accepts iff the
+folded sum is `0xFFFF`; OCS == 0 with UDP checksum == 0 is "unused, assumed correct"; OCS == 0 with
+a non-zero UDP checksum means the options are ignored; the odd-start pad byte is zero. Caveat: the
+"computed `0x0000` is sent as `0xFFFF`" rule is not literally quotable from RFC 9868 -- it follows
+from the Internet-checksum convention plus the non-zero-OCS requirement (Sec. 9); pin the exact
+citation in the spec rather than axiomatizing it silently.
+
+Theorems (after implementation): compute -> validate succeeds for every serialized surplus; the
+forced `0x0000 -> 0xFFFF` value still validates; validation is equivalent to the sum specification
+(so any byte change that alters the sum fails); a non-zero pad is rejected.
+
 ## Plan
 
 1. `compute_ocs`: over the serialized surplus (OCS field zeroed) plus the 16-bit surplus length, run

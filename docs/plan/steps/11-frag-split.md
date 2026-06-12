@@ -21,6 +21,18 @@ Split an oversized datagram into FRAG fragments.
   2 segments when no MRDS was received (Sec. 11.6); a payload over that cap is rejected with an
   error, not fragmented.
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): every fragment carries empty UDP user data (UDP Length == 8);
+non-terminal fragments use the 10-byte FRAG form, the terminal one the 12-byte form with RDOS;
+chunks are <= S-12 / S-14; offsets are contiguous and the reassembled size respects the MRDS cap
+(reject, never fragment past it); the atomic single-fragment case.
+
+Theorems (after implementation): split -> concatenate is the identity on the payload (N bytes in,
+N bytes reassembled); the sizing bound holds; the offset/RDOS arithmetic is correct.
+
 ## Plan
 
 1. From a payload plus per-datagram options, size fragments against S (path MTU, MDS hint) and the

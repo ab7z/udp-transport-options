@@ -15,6 +15,11 @@ evaluation traffic.
 - A clear, non-panicking error when the process lacks `CAP_NET_RAW`.
 - Verbose / hexdump output to support inspection alongside `tcpdump`/Wireshark.
 
+## Lean verification
+
+Not applicable: the CLIs are I/O binaries over the library; the library behavior they exercise is
+covered by the specs of Steps 3-13. No Lean obligations; see `LEAN_RFC9868_VALIDATION.md`.
+
 ## Plan
 
 1. `udpopt-send`: clap arguments for destination, payload, options (APC, MDS, MRDS), and a

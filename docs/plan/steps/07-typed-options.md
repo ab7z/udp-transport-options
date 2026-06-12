@@ -13,6 +13,17 @@ Implement `TypedOption` decode/encode for the fixed-size must-support options.
   full Kind + Length + Value framing.
 - `Frag` encode/decode is shared with Steps 11/12 (the value layout lives here).
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): the exact fixed lengths (APC 6, MDS 4, MRDS 5, REQ 6, RES 6; FRAG 10
+non-terminal / 12 terminal with RDOS) and the big-endian value layouts.
+
+Theorems (after implementation): `decode` accepts exactly the spec lengths and rejects all others;
+encode -> decode round-trips; the FRAG length determines the terminal flag. APC's CRC32C stays a
+trusted primitive validated by external test vectors, not a Lean model.
+
 ## Plan
 
 1. Implement `TypedOption` for `Apc`, `Mds`, `Mrds`, `Req`, `Res`, and the `Frag` value codec.

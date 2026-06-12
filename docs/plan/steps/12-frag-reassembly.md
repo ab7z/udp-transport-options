@@ -18,6 +18,21 @@ Reassemble FRAG fragments with overlap protection, timeouts, and DoS limits.
   data (Sec. 11.4). Only a nested FRAG with empty user data is rejected, as local anti-loop policy
   (the RFC does not define nested fragmentation); there is never a second re-feed.
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): the cache as a pure state machine over insert/gc transitions with a
+passed-in `now`; the key is (source IP, source port, destination IP, destination port) plus
+Identification; overlap aborts; completion exactly on gap-free coverage with a terminal fragment;
+the timeout is a parameter whose default is at most 2 minutes (an RFC SHOULD, modeled as the
+default, not a hard invariant); the per-pair and global caps.
+
+Theorems (after implementation): Step 11 fragments inserted in any order complete to the original
+bytes; any overlap aborts; gc removes exactly the expired partials; the caps fire; two pairs are
+isolated. Wall-clock time itself is not modeled, only the relation between `now` and stored
+timestamps.
+
 ## Plan
 
 1. `ReassemblyCache` keyed by `FragKey`, with a per-key partial holding offset-sorted segments, the

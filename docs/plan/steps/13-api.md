@@ -14,6 +14,19 @@ Expose the library through a low-level and a high-level API, with finalized erro
 - Finalized `thiserror` error types across parse / receive / socket layers.
 - Documented public API (`cargo doc` builds cleanly).
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): the high-level send/receive as compositions of the already-specified
+pieces -- send = serialize + OCS (+ split when the payload needs it), receive = pipeline
+(+ reassembly). The socket layer is excluded; only the pure composition is in scope.
+
+Theorems (after implementation): an end-to-end round trip -- for well-formed inputs within the MRDS
+cap, a high-level send followed by a high-level receive returns the original payload and options.
+Most obligations are inherited from Steps 4-6 and 10-12; this step proves the composition, not new
+wire rules.
+
 ## Plan
 
 1. Low-level API: build a datagram from explicit `RawOption`s and parse a received datagram into

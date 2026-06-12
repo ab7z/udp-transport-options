@@ -17,6 +17,18 @@ Serialize a set of options into a surplus area with correct ordering, alignment,
 - The leading two-byte OCS field is reserved here and back-patched in Step 6. The OCS is positional,
   not a TLV: a bare two-byte slot with no Kind and no Length octet (RFC 9868 Sec. 8).
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): the canonical surplus encoding -- must-support options before other
+SAFE options; NOP only for alignment; EOL then zero-fill to an even length; the smallest length
+form (one byte for values <= 254, extended above); the leading two-byte OCS slot is positional, not
+a TLV.
+
+Theorems (after implementation): the builder's output is well-formed under the Step 4 grammar;
+serialize -> parse round-trips; the ordering and evenness invariants hold for every input set.
+
 ## Plan
 
 1. `OptionsBuilder` accumulates owned `RawOption`s from typed options.

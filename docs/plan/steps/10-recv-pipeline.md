@@ -24,6 +24,22 @@ Implement the pure, root-free receive state machine that encodes the RFC 9868 pr
 - Apply the >7-consecutive-NOP DoS log (via `log`).
 - No I/O; fully unit-testable without privilege.
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): the receive order as a pure function of the datagram bytes -- UDP
+Length bounds, UDP checksum, surplus location/pad, OCS, TLV parse, option dispositions, then
+FRAG/deliver -- and the full Sec. 14 disposition matrix, including Erratum 8834 (an overrunning
+option is a malformed surplus area: discard all options, deliver the payload), the
+known-SAFE-unexpected-length rule, unknown SAFE ignored, unknown UNSAFE dropping the (reassembled)
+data with zero-length delivery, the FRAG-with-non-empty-data precedence, and the
+{UDP checksum 0/nonzero} x {OCS 0/valid/invalid} matrix.
+
+Theorems (after implementation): `process_datagram` is total over byte buffers; each matrix row is
+an equation on the function; options are never delivered unless every prior gate passed. The
+table-driven Rust tests come first; the Lean theorems track the same matrix.
+
 ## Plan
 
 1. `process_datagram(ip_datagram, &mut cache)`: check the UDP Length bounds (drop + log outside

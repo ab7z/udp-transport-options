@@ -93,6 +93,12 @@ The hand-written table became a deterministic generator (`cases()` in `examples/
   checksum check, no length-consistency check), so the Step 10 receive pipeline must validate
   the UDP checksum and the UDP Length itself, exactly as RFC 9868's receive order prescribes.
 
+## Lean verification
+
+Not applicable: the spike's findings are empirical Linux raw-socket/kernel behaviors (Findings
+A-C), which lie outside what Lean can prove. They remain spike/integration evidence; the Lean
+track covers only the pure wire rules (see `LEAN_RFC9868_VALIDATION.md`).
+
 ## Tasks
 
 - [x] `examples/support/common.rs`: constants, case table, datagram builder, marker matcher, checksums.

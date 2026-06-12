@@ -15,6 +15,16 @@ Send a datagram with a surplus area over a raw socket, building all headers and 
 - Set the IP Total Length explicitly and handle the kernel's `IP_HDRINCL` field-fill behavior.
 - A typed `PermissionError` when the process lacks `CAP_NET_RAW`.
 
+## Lean verification
+
+Not applicable for the socket path: socket I/O, `IP_HDRINCL` kernel behavior (Step 0.5 Findings
+A/B), and capabilities are system effects, covered by the root-gated achim tests. No new Lean
+obligations: the wire postconditions of the assembled buffer (IP Total Length = buffer length,
+UDP Length < IP Total Length opening the surplus, UDP checksum and OCS per spec) are already the
+Steps 2/5/6 scope. Only if this step adds pure packet-assembly helpers beyond those pieces may
+their postconditions optionally be specced, per the `socket/*` section of
+`LEAN_RFC9868_VALIDATION.md`.
+
 ## Plan
 
 1. Create an AF_INET SOCK_RAW socket via `socket2`, set `IP_HDRINCL`, and map `EPERM` to

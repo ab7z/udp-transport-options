@@ -14,6 +14,20 @@ must-support, with the framing rules for each Kind.
 - Framing classification per Kind: single-byte (EOL, NOP) vs TLV vs the extended (255) length form.
 - The fixed length expected for each fixed-size Kind (from `model::length`).
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`). This step also
+bootstraps the Lean track: a `formal/lean-rfc9868/` Lake project with a repo-pinned
+`lean-toolchain`, a no-`sorry` policy, and the retrofit specs of Steps 1-2.
+
+Spec (before implementation): the Kind constants; SAFE `0..=191` / UNSAFE `192..=255`;
+must-support `0..=7`; EOL and NOP as the only single-byte kinds; the fixed lengths (APC 6,
+FRAG 10/12, MDS 4, MRDS 5, REQ 6, RES 6); `255` as the extended-length marker.
+
+Theorems (after implementation, exhaustive over all 256 byte values): `to_u8 (from_u8 b) = b`;
+`is_safe b` iff `b < 192`; `is_unsafe` iff not `is_safe`; `is_must_support b` iff `b <= 7`; the
+framing classification and `fixed_len` agree with the spec table.
+
 ## Plan
 
 1. `OptionKind::from_u8` / `to_u8` backed by `model::kind`, mapping unknown bytes to `Other(u8)`.

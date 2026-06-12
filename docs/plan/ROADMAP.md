@@ -103,6 +103,11 @@ stable (no renumbering).
 
 - Per step: the DoD above; `cargo build` + `cargo fmt --check` + `cargo clippy --all-targets -- -D
   warnings` stay green; the step's unit tests pass.
+- Lean track (spec first): each step with Lean obligations extends the spec in
+  `formal/lean-rfc9868/` *before* implementing and proves its theorems after (`lake build` green,
+  no `sorry`) in the same step commit; the per-step "Lean verification" sections and
+  `LEAN_RFC9868_VALIDATION.md` define the scope. Socket I/O and middlebox behavior stay outside
+  the Lean claim (empirical lanes above).
 - Before every PR (opening and updating): the mandatory local gate `scripts/pre-pr.sh` (host
   fmt/clippy/test with 1024 proptest cases, achim cross verify, time-boxed libFuzzer smoke). Every
   step that adds a parsing surface extends the property tests and fuzz targets in the same commit.
