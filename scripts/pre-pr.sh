@@ -2,9 +2,10 @@
 # Mandatory local verification gate: run before opening or *updating* any PR.
 #
 # Lanes, fail-fast in order: host fmt/clippy/tests (property tests at PROPTEST_CASES, default
-# 1024), the achim cross verify (build + test + fmt + clippy for aarch64-unknown-linux-musl; the
-# ssh runner forwards no environment, so proptest runs its default 256 cases there), and a
-# time-boxed libFuzzer smoke per fuzz target on this host.
+# 1024), the Lean gate (formal specs build + kernel axiom audit, scripts/lean-gate.sh), the achim
+# cross verify (build + test + fmt + clippy for aarch64-unknown-linux-musl; the ssh runner
+# forwards no environment, so proptest runs its default 256 cases there), and a time-boxed
+# libFuzzer smoke per fuzz target on this host.
 #
 # One-time prerequisites:  rustup toolchain install nightly && cargo install cargo-fuzz
 # (cargo +nightly overrides the rust-toolchain.toml pin for the fuzz lane only.)
@@ -44,6 +45,7 @@ start=$SECONDS
 lane "fmt" cargo fmt --check
 lane "clippy host" cargo clippy --all-targets -- -D warnings
 lane "test host ($PROPTEST_CASES proptest cases)" env PROPTEST_CASES="$PROPTEST_CASES" cargo test
+lane "lean gate (build + axiom audit)" scripts/lean-gate.sh
 lane "achim verify" scripts/vm-ubuntu-server.sh verify
 for target in "${FUZZ_TARGETS[@]}"; do
     mkdir -p "fuzz/corpus/$target"

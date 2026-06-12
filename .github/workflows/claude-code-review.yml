@@ -44,10 +44,46 @@ jobs:
       - name: Run ${{ matrix.check }}
         run: ${{ matrix.command }}
 
+  lean:
+    name: Lean verification
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
+    needs: rust
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cache elan and Lake build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.elan
+            formal/lean-rfc9868/.lake
+          key: lean-${{ runner.os }}-${{ hashFiles('formal/lean-rfc9868/lean-toolchain') }}
+
+      - name: Install elan (pinned toolchain only)
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
+              | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build specs and audit axioms
+        run: scripts/lean-gate.sh
+
   agent-reviews:
     name: Request agent reviews
     runs-on: ubuntu-latest
     if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
+    needs: [rust, lean]
     permissions:
       pull-requests: write
     env:
