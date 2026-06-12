@@ -8,7 +8,7 @@
 
 mod common;
 
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::Ipv4Addr;
 
 use proptest::collection::vec;
 use proptest::prelude::*;
@@ -29,13 +29,13 @@ fn build_v4(src: Ipv4Addr, dst: Ipv4Addr, ihl: u8, ports: (u16, u16), user: &[u8
 
     // IpRepr::write only emits IHL-5 headers; for IHL 6 the NOP options are spliced in by hand and
     // the header checksum back-patched (same pattern as the v4_parse_skips_ip_options unit test).
-    let ip = IpRepr::V4 {
+    let ip = IpRepr {
         src,
         dst,
         ihl,
         total_len,
     };
-    IpRepr::V4 {
+    IpRepr {
         src,
         dst,
         ihl: 5,
@@ -51,35 +51,6 @@ fn build_v4(src: Ipv4Addr, dst: Ipv4Addr, ihl: u8, ports: (u16, u16), user: &[u8
     }
 
     write_udp_and_payload(&ip, header_len, ports, user, surplus, &mut buf);
-    buf
-}
-
-/// Builds a complete IPv6 datagram, optionally with one 8-byte Hop-by-Hop extension header.
-fn build_v6(src: Ipv6Addr, dst: Ipv6Addr, with_ext: bool, ports: (u16, u16), user: &[u8], surplus: &[u8]) -> Vec<u8> {
-    let ext_hdr_len = if with_ext { 8 } else { 0 };
-    let udp_length = u16::try_from(udp::HEADER_LEN + user.len()).unwrap();
-    let payload_len = u16::try_from(usize::from(ext_hdr_len) + usize::from(udp_length) + surplus.len()).unwrap();
-    let mut buf = vec![0u8; 40 + usize::from(payload_len)];
-
-    let ip = IpRepr::V6 {
-        src,
-        dst,
-        payload_len,
-        ext_hdr_len,
-    };
-    IpRepr::V6 {
-        src,
-        dst,
-        payload_len,
-        ext_hdr_len: 0,
-    }
-    .write(&mut buf);
-    if with_ext {
-        buf[6] = 0; // hop-by-hop directly after the base header
-        buf[40..48].copy_from_slice(&[0x11, 0x00, 0x01, 0x04, 0x00, 0x00, 0x00, 0x00]);
-    }
-
-    write_udp_and_payload(&ip, 40 + usize::from(ext_hdr_len), ports, user, surplus, &mut buf);
     buf
 }
 
@@ -127,30 +98,12 @@ fn v4_datagram() -> impl Strategy<Value = Vec<u8>> {
         .prop_map(|(src, dst, ihl, ports, user, surplus)| build_v4(src.into(), dst.into(), ihl, ports, &user, &surplus))
 }
 
-fn v6_datagram() -> impl Strategy<Value = Vec<u8>> {
-    (
-        any::<[u8; 16]>(),
-        any::<[u8; 16]>(),
-        any::<bool>(),
-        any::<(u16, u16)>(),
-        user_data(),
-        surplus_data(),
-    )
-        .prop_map(|(src, dst, with_ext, ports, user, surplus)| {
-            build_v6(src.into(), dst.into(), with_ext, ports, &user, &surplus)
-        })
-}
-
-fn valid_datagram() -> impl Strategy<Value = Vec<u8>> {
-    prop_oneof![v4_datagram(), v6_datagram()]
-}
-
 /// Raw bytes plus valid datagrams with 1..=4 XOR-flipped bytes: mutations reach far deeper into
 /// the parse chain than unstructured bytes, which rarely survive the IP header checksum.
 fn arbitrary_bytes() -> impl Strategy<Value = Vec<u8>> {
     prop_oneof![
         vec(any::<u8>(), 0..=128),
-        (valid_datagram(), vec((any::<Index>(), 1u8..=255), 1..=4)).prop_map(|(mut buf, flips)| {
+        (v4_datagram(), vec((any::<Index>(), 1u8..=255), 1..=4)).prop_map(|(mut buf, flips)| {
             for (index, mask) in flips {
                 let at = index.index(buf.len());
                 buf[at] ^= mask;
@@ -161,23 +114,12 @@ fn arbitrary_bytes() -> impl Strategy<Value = Vec<u8>> {
 }
 
 proptest! {
-    /// Property 1a: IPv4 header write -> parse round-trip, offset == header_len.
+    /// Property 1: IPv4 header write -> parse round-trip, offset == header_len.
     #[test]
     fn v4_header_round_trip(src in any::<[u8; 4]>(), dst in any::<[u8; 4]>(), payload_len in 0u16..=200) {
         let total_len = 20 + payload_len;
-        let ip = IpRepr::V4 { src: src.into(), dst: dst.into(), ihl: 5, total_len };
+        let ip = IpRepr { src: src.into(), dst: dst.into(), ihl: 5, total_len };
         let mut buf = vec![0u8; usize::from(total_len)];
-        ip.write(&mut buf);
-        let (parsed, offset) = IpRepr::parse(&buf).unwrap();
-        prop_assert_eq!(&parsed, &ip);
-        prop_assert_eq!(offset, ip.header_len());
-    }
-
-    /// Property 1b: IPv6 header write -> parse round-trip, offset == header_len.
-    #[test]
-    fn v6_header_round_trip(src in any::<[u8; 16]>(), dst in any::<[u8; 16]>(), payload_len in 0u16..=200) {
-        let ip = IpRepr::V6 { src: src.into(), dst: dst.into(), payload_len, ext_hdr_len: 0 };
-        let mut buf = vec![0u8; 40 + usize::from(payload_len)];
         ip.write(&mut buf);
         let (parsed, offset) = IpRepr::parse(&buf).unwrap();
         prop_assert_eq!(&parsed, &ip);
@@ -187,7 +129,7 @@ proptest! {
     /// Property 2: on any successfully built datagram, header_len + transport_payload_len equals
     /// the real buffer end (the builders size the buffer from the declared lengths).
     #[test]
-    fn declared_lengths_match_buffer(buf in valid_datagram()) {
+    fn declared_lengths_match_buffer(buf in v4_datagram()) {
         let (ip, offset) = IpRepr::parse(&buf).unwrap();
         prop_assert_eq!(offset, ip.header_len());
         prop_assert_eq!(ip.header_len() + ip.transport_payload_len(), buf.len());
@@ -205,7 +147,7 @@ proptest! {
     /// Property 4: receiver-side verification — the pseudo-header plus the UDP header (with its
     /// stored checksum) plus the user data folds to one's-complement zero.
     #[test]
-    fn stored_checksum_verifies_to_zero(buf in valid_datagram()) {
+    fn stored_checksum_verifies_to_zero(buf in v4_datagram()) {
         let (ip, offset) = IpRepr::parse(&buf).unwrap();
         let header = UdpHeader::parse(&buf[offset..]).unwrap();
         let mut sum = ip.pseudo_header_sum(header.length);
@@ -216,7 +158,7 @@ proptest! {
     /// Property 5: the UDP checksum covers the user data only — flipping arbitrary surplus bytes
     /// must leave receiver-side verification intact (RFC 9868 Section 17).
     #[test]
-    fn checksum_ignores_surplus(buf in valid_datagram(), flips in vec((any::<Index>(), 1u8..=255), 1..=4)) {
+    fn checksum_ignores_surplus(buf in v4_datagram(), flips in vec((any::<Index>(), 1u8..=255), 1..=4)) {
         let mut buf = buf;
         let (ip, offset) = IpRepr::parse(&buf).unwrap();
         let header = UdpHeader::parse(&buf[offset..]).unwrap();
@@ -234,7 +176,7 @@ proptest! {
     /// parity, OCS alignment, minimal-size iff) over structured datagrams. The oracle actually
     /// indexes every claimed range; see tests/common/mod.rs.
     #[test]
-    fn surplus_layout_invariants(buf in valid_datagram()) {
+    fn surplus_layout_invariants(buf in v4_datagram()) {
         common::check_wire_invariants(&buf);
     }
 

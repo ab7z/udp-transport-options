@@ -43,8 +43,8 @@ impl SurplusLayout {
 /// Computes where the surplus area lives, or `None` when there is no usable surplus area.
 ///
 /// The surplus area is the IP transport payload past the UDP Length (RFC 9868 Section 7). Its
-/// natural start offset is counted from byte 0 of the IP datagram — for IPv6 that is the base
-/// header, so extension headers count toward the offset (RFC 9868 Section 8). Returns `None` when
+/// natural start offset is counted from byte 0 of the IP datagram (RFC 9868 Section 8). Returns
+/// `None` when
 /// there is no surplus, when the area is too small to hold the aligned OCS plus any required pad
 /// byte (RFC 9868 Section 8: options exist only "as long as there remains enough space for the
 /// aligned OCS"), or — defensively — when the UDP Length exceeds the transport payload; that
@@ -71,7 +71,7 @@ mod tests {
     use super::*;
 
     fn v4(total_len: u16) -> IpRepr {
-        IpRepr::V4 {
+        IpRepr {
             src: "192.0.2.1".parse().unwrap(),
             dst: "198.51.100.2".parse().unwrap(),
             ihl: 5,
@@ -167,7 +167,7 @@ mod tests {
     fn v4_ip_options_shift_natural_start() {
         // IHL 6 (one 4-byte IP option): header 24 + UDP Length 12 = natural start 36 (still even —
         // an IPv4 header length is always a multiple of 4, so IP options never flip the parity).
-        let ip = IpRepr::V4 {
+        let ip = IpRepr {
             src: "192.0.2.1".parse().unwrap(),
             dst: "198.51.100.2".parse().unwrap(),
             ihl: 6,
@@ -179,27 +179,6 @@ mod tests {
             SurplusLayout {
                 starts_at: 36,
                 needs_pad: false,
-                len: 4
-            }
-        );
-    }
-
-    #[test]
-    fn v6_ext_header_shifts_natural_start() {
-        // Base header 40 + extension headers 8 + UDP Length 13 = surplus starts at 61 (odd):
-        // pad byte at 61, OCS at 62.
-        let ip = IpRepr::V6 {
-            src: "2001:db8::1".parse().unwrap(),
-            dst: "2001:db8::2".parse().unwrap(),
-            payload_len: 25,
-            ext_hdr_len: 8,
-        };
-        let layout = locate_surplus(&ip, &udp(13)).unwrap();
-        assert_eq!(
-            layout,
-            SurplusLayout {
-                starts_at: 61,
-                needs_pad: true,
                 len: 4
             }
         );

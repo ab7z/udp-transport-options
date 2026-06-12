@@ -22,8 +22,7 @@ The companion thesis asks two research questions, and the architecture is shaped
 
 RFC 9868 carries transport options in the **surplus area**: the bytes between the end of the UDP
 payload (delimited by the UDP Length field) and the end of the IP transport payload (IPv4 Total
-Length minus the IHL x 4 header bytes, or IPv6 Payload Length minus any extension headers)
-(RFC 9868 Sec. 4, Sec. 7).
+Length minus the IHL x 4 header bytes) (RFC 9868 Sec. 4, Sec. 7).
 A normal operating-system UDP stack delivers only the UDP-length-bounded payload and never exposes
 the surplus area, so this crate reaches it with raw sockets on Linux.
 
@@ -56,8 +55,9 @@ Design goals, in priority order:
    serializer, and the OCS are hand-rolled rather than pulled from a crate, because they are the
    subject of the thesis. The crate deliberately avoids `nom`, `pnet`, `etherparse`, `smoltcp`,
    `bytes`, `nix`, and `zerocopy`.
-4. **IP-version genericity.** IPv4 and IPv6 share one wire layer; only the `AF_INET6` socket wiring
-   is version-specific.
+4. **A single IP version: IPv4.** IPv6 is deliberately removed from scope: the RFC 9868 mechanism is
+   IP-version-neutral and fully demonstrated on IPv4, while IPv6 raw-socket `IPV6_HDRINCL` semantics
+   differ and add platform fragility without protocol insight.
 5. **A safe boundary around `unsafe`.** All FFI lives in `src/socket/` behind safe wrappers; the
    crate sets `#![deny(unsafe_op_in_unsafe_fn)]`.
 
@@ -65,11 +65,11 @@ Design goals, in priority order:
 
 In scope: the TLV options framework (RFC 9868 Sec. 10); the OCS (RFC 9868 Sec. 9); the must-support
 options EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES; the zero-copy parser and the serializer; FRAG
-fragmentation and reassembly; the two-tier API; IPv4 and IPv6; unit and loopback integration tests;
+fragmentation and reassembly; the two-tier API; IPv4; unit and loopback integration tests;
 example peer CLIs.
 
 Out of scope: the TIME option; the reserved AUTH/UCMP/UENC options; the RFC 9869 (DPLPMTUD)
-REQ/RES-for-PMTUD use case; kernel modules; bidirectional or stateful protocols.
+REQ/RES-for-PMTUD use case; kernel modules; bidirectional or stateful protocols; IPv6.
 
 ### Layering
 
@@ -125,7 +125,7 @@ Single source of truth for the protocol constants and limits taken from RFC 9868
   (`APC = 6`, `FRAG_NON_TERMINAL = 10`, `FRAG_TERMINAL = 12`, `MDS = 4`, `MRDS = 5`, `REQ = 6`,
   `RES = 6`) plus `OCS = 2`.
 - `model::limits`: the reassembly defaults and the DoS knobs (`MRDS_DEFAULT_IPV4 = 2926`,
-  `MRDS_DEFAULT_IPV6 = 2886`, `MIN_REASSEMBLY_SEGMENTS = 2`, `REASSEMBLY_TIMEOUT_MAX = 120 s`,
+  `MIN_REASSEMBLY_SEGMENTS = 2`, `REASSEMBLY_TIMEOUT_MAX = 120 s`,
   `NOP_RUN_DOS_THRESHOLD = 7`).
 
 Inputs: none (compile-time constants). Outputs: constants consumed by every higher layer.
@@ -146,10 +146,10 @@ folded later). Root-free.
 
 ### `wire/ip` (pure)
 
-`IpRepr`, the IP-version-generic view of the header fields the UDP-options layer needs (addresses,
-the transport-payload length, and a pseudo-header seed for the UDP checksum), plus IPv4 and IPv6
-header parse/build. Writing the surplus math, the UDP pseudo-header, and the FRAG keying once for both
-families depends on this type. Inputs (parse): the leading bytes of an IP datagram. Outputs: an
+`IpRepr`, the view of the IPv4 header fields the UDP-options layer needs (addresses,
+the transport-payload length, and a pseudo-header seed for the UDP checksum), plus IPv4
+header parse/build. The surplus math, the UDP pseudo-header, and the FRAG keying are written
+against this type. Inputs (parse): the leading bytes of an IP datagram. Outputs: an
 `IpRepr` and the offset of the transport payload; or, on build, header bytes. Root-free.
 
 ### `wire/udp` (pure)
@@ -264,7 +264,7 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 - **high-level:** a peer that sends and receives payloads with typed options, applying the OCS and
   fragmentation/reassembly transparently. A send too large for a single datagram (the fragment size
   derives from the path MTU, with MDS as a hint) auto-fragments; the reassembled size -- UDP header,
-  data, and per-datagram options -- must stay within the peer's MRDS (defaults 2926/2886 when none
+  data, and per-datagram options -- must stay within the peer's MRDS (default 2926 when none
   received), otherwise the send fails with an error; the receiver reassembles transparently.
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
@@ -305,7 +305,6 @@ pub mod length {
 pub mod limits {
     use std::time::Duration;
     pub const MRDS_DEFAULT_IPV4: u16 = 2926;
-    pub const MRDS_DEFAULT_IPV6: u16 = 2886;
     pub const MIN_REASSEMBLY_SEGMENTS: u8 = 2;
     pub const REASSEMBLY_TIMEOUT_MAX: Duration = Duration::from_secs(120);
     pub const NOP_RUN_DOS_THRESHOLD: usize = 7;
@@ -315,31 +314,26 @@ pub mod limits {
 ### `wire::ip::IpRepr`
 
 ```rust
-pub enum IpRepr {
-    V4 { src: Ipv4Addr, dst: Ipv4Addr, ihl: u8, total_len: u16 },
-    V6 { src: Ipv6Addr, dst: Ipv6Addr, payload_len: u16, ext_hdr_len: u16 },
+pub struct IpRepr {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub ihl: u8,
+    pub total_len: u16,
 }
 
 impl IpRepr {
     // Parse the leading IP header; return the repr and the offset of the transport payload.
-    // IPv4 options are skipped (never decoded) and the header checksum is verified; IPv6
-    // Hop-by-Hop (only directly after the base header) and Destination Options are skipped by
-    // length, Routing/Fragment/AH/ESP and other chains are rejected.
+    // IPv4 options are skipped (never decoded) and the header checksum is verified.
     pub fn parse(bytes: &[u8]) -> Result<(IpRepr, usize), HeaderError>;
-    // Emit the header bytes (V4: 20 bytes incl. back-patched header checksum, requires ihl == 5;
-    // V6: 40 bytes, requires ext_hdr_len == 0 — building options/extension headers is out of scope).
+    // Emit the header bytes (20 bytes incl. back-patched header checksum, requires ihl == 5).
     pub fn write(&self, out: &mut [u8]);
-    // Offset of the transport payload from IP datagram start (ihl * 4, or 40 + ext_hdr_len).
+    // Offset of the transport payload from IP datagram start (ihl * 4).
     pub fn header_len(&self) -> usize;
-    // Length of the IP transport payload in bytes (Total Length - IHL, or Payload Length
-    // - ext_hdr_len).
+    // Length of the IP transport payload in bytes (Total Length - IHL*4).
     pub fn transport_payload_len(&self) -> usize;
     // Fold the UDP pseudo-header (addresses, protocol 17, UDP length) into a fresh RFC 1071
-    // accumulator, identically for V4 and V6; callers continue with header + data and finish().
+    // accumulator; callers continue with header + data and finish().
     pub fn pseudo_header_sum(&self, udp_len: u16) -> Checksum;
-    // The source / destination IpAddr, used to build a FragKey.
-    pub fn src_addr(&self) -> IpAddr;
-    pub fn dst_addr(&self) -> IpAddr;
 }
 ```
 
@@ -474,8 +468,8 @@ Length is 10 for a non-terminal fragment (no RDOS) and 12 for the terminal fragm
 
 ```rust
 pub struct FragKey {
-    pub src: IpAddr,
-    pub dst: IpAddr,
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
     pub src_port: u16,
     pub dst_port: u16,
     pub identification: u32, // FRAG Identification (RFC 9868 Sec. 11.4)
@@ -500,9 +494,8 @@ impl ReassemblyCache {
 }
 ```
 
-> The `src`/`dst` addresses in `FragKey` are full `IpAddr` values, so the same key type covers IPv4
-> and IPv6 without change. The reassembly key is (src IP, dst IP, src port, dst port, Identification)
-> (RFC 9868 Sec. 11.4).
+> The `src`/`dst` addresses in `FragKey` are `Ipv4Addr` values. The reassembly key is (src IP, dst
+> IP, src port, dst port, Identification) (RFC 9868 Sec. 11.4).
 
 ### `recv::pipeline::Delivery` and `process_datagram`
 
@@ -580,29 +573,23 @@ and the only owning step is the deliberate hand-off at the API edge.
    Frag/Apc/... (Copy, no lifetime)  |  RawOption { kind, value: Vec<u8> }  <- crosses the API
 ```
 
-### Rule 2: IP-version-generic wire layer
+### Rule 2: a single IP version (IPv4)
 
-`IpRepr { V4, V6 }` exposes exactly the fields the UDP-options layer needs (addresses, the
-transport-payload length, and a pseudo-header seed). Because of this, three pieces of logic are
-written once and shared by both address families:
+`IpRepr` exposes exactly the fields the UDP-options layer needs (addresses, the transport-payload
+length, and a pseudo-header seed). The surplus-area math (`locate_surplus`), the UDP pseudo-header
+(`IpRepr::pseudo_header_sum`), and the FRAG keying (`FragKey` stores `Ipv4Addr`) are all written
+against this one type.
 
-1. **surplus-area math** (`locate_surplus`): it works from the transport-payload length and the UDP
-   Length regardless of version (RFC 9868 Sec. 7).
-2. **the UDP pseudo-header** for the checksum: `IpRepr::pseudo_header_sum` folds the V4 or V6
-   pseudo-header into the same running RFC 1071 sum.
-3. **FRAG keying**: `FragKey` stores `IpAddr`, so one key type covers both families.
-
-Only the `AF_INET6` socket wiring (`IPV6_HDRINCL`, address structs) is version-specific, and it is
-confined to `socket/`. Rationale: the protocol logic is identical across versions; duplicating it
-would double the surface that must be verified against the RFC and tested. Centralizing it means
-Step 16 (IPv6) reuses the pipeline unchanged and only adds socket wiring.
+IPv6 is deliberately removed from scope: the RFC 9868 mechanism is IP-version-neutral and fully
+demonstrated on IPv4, while IPv6 raw-socket `IPV6_HDRINCL` semantics differ and add platform
+fragility without protocol insight.
 
 ### Rule 3: pure pipeline vs privileged I/O
 
 `recv::pipeline::process_datagram` is a pure function from bytes (plus a mutable
 `ReassemblyCache`) to a `Delivery`. It performs no system calls. The privileged surface is confined
 to `socket/send` and `socket/recv`, which are thin: they obtain raw-socket file descriptors, set the
-options (`IP_HDRINCL`, `IPV6_HDRINCL`), read or write bytes, and otherwise delegate to the pure
+options (`IP_HDRINCL`), read or write bytes, and otherwise delegate to the pure
 layers. All `unsafe` FFI lives in `socket/` behind safe wrappers; the crate denies
 `unsafe_op_in_unsafe_fn`.
 
@@ -658,8 +645,7 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         |   produces: UDP header bytes + checksum
         v
  (4) wire/ip  (build, via IpRepr)
-        - IP Total Length (v4) = IHL*4 + UDP Length + surplus-area length
-        - IPv6 Payload Length = ext-header length + UDP Length + surplus-area length
+        - IP Total Length = IHL*4 + UDP Length + surplus-area length
         - assemble: IP header | UDP header | user data | [pad] | OCS | options
         |   produces: a full IP datagram on the stack
         v
@@ -676,8 +662,8 @@ MDS as a hint -- never from MRDS), step (1) is preceded by `frag/split`, which p
 fragment per output datagram: each fragment has empty UDP user data (UDP Length 8) and carries its
 data in the surplus area after all of the fragment's options; non-terminal fragments use the 10-byte
 FRAG form and the terminal fragment the 12-byte form with the RDOS (RFC 9868 Sec. 11.4). The
-reassembled size (UDP header + data + per-datagram options) is capped by the peer's MRDS (defaults
-2926/2886 when none received); a payload over that cap is rejected, not fragmented. Steps (2)
+reassembled size (UDP header + data + per-datagram options) is capped by the peer's MRDS (default
+2926 when none received); a payload over that cap is rejected, not fragmented. Steps (2)
 through (5) then run per fragment.
 
 ### 5.2 Receive walkthrough (ASCII state machine)
@@ -820,7 +806,6 @@ never complete), so the limits are gathered in one place and enforced in `frag/r
 | Knob                            | Value         | Purpose                                              |
 |---------------------------------|---------------|-----------------------------------------------------|
 | `MRDS_DEFAULT_IPV4`             | 2926 bytes    | reassembled-size cap when no MRDS option was seen    |
-| `MRDS_DEFAULT_IPV6`             | 2886 bytes    | reassembled-size cap (IPv6) when no MRDS was seen    |
 | `MIN_REASSEMBLY_SEGMENTS`       | 2             | the minimum fragment count an implementation supports|
 | `REASSEMBLY_TIMEOUT_MAX`        | 120 s         | upper bound on how long a partial may live           |
 | `NOP_RUN_DOS_THRESHOLD`         | 7             | a run of NOPs beyond this is logged as a possible DoS |
@@ -840,7 +825,7 @@ the reference implementation and feeds FF1).
 
 - **`socket2`** (raw-socket construction and options): a thin, well-tested wrapper over
   `socket`/`setsockopt`. The protocol is the contribution, not the socket boilerplate.
-- **`libc`** (`IP_HDRINCL`/`IPV6_HDRINCL`, `AF_INET6`, FFI constants): platform constants and calls
+- **`libc`** (`IP_HDRINCL`, FFI constants): platform constants and calls
   that `socket2` does not expose; confined to `socket/`.
 - **`thiserror`** (deriving `Display`/`Error` on the two enums): removes boilerplate; it does not
   touch any protocol logic.

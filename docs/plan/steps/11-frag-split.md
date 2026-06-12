@@ -17,7 +17,7 @@ Split an oversized datagram into FRAG fragments.
 - The single-fragment (atomic) case is supported.
 - The fragment size S derives from the path MTU, with MDS as a hint (Sec. 11.5) -- never from MRDS;
   chunks are <= S-12 (non-terminal) / S-14 (terminal). The reassembled size (UDP header + data +
-  per-datagram options) must not exceed the peer's MRDS; assume 2926 (IPv4) / 2886 (IPv6) and
+  per-datagram options) must not exceed the peer's MRDS; assume 2926 (IPv4) and
   2 segments when no MRDS was received (Sec. 11.6); a payload over that cap is rejected with an
   error, not fragmented.
 

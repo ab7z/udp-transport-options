@@ -2,6 +2,9 @@
 
 Status: done
 
+Addendum 2026-06: the IPv6 parts built here were later removed in a deliberate scope cut (IPv6
+dropped from project scope).
+
 ## Goal
 
 Provide the IP-version-generic header representation, IPv4/IPv6 and UDP header parse/build, the UDP

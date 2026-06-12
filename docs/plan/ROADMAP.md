@@ -13,7 +13,7 @@ that tracks status.
   method signatures, the send/receive data flows, and the design rules.
 - [`wire-format.md`](../wire-format.md) - byte-level reference: surplus-area layout, the OCS
   algorithm, the option TLV/extended forms, the option-kind registry, and the FRAG layouts.
-- [`steps/`](steps/) - one file per step (0-17) with Requirements / Plan / Tasks / DoD.
+- [`steps/`](steps/) - one file per step (0-15, 17; 16 removed with IPv6) with Requirements / Plan / Tasks / DoD.
 - The repo-root [`CLAUDE.md`](../../CLAUDE.md) holds the working conventions and a condensed overview.
 
 ## Goal
@@ -29,19 +29,19 @@ CLIs, and an evaluation harness, to answer two research questions:
 ## Locked decisions
 
 - **Rust**, userspace only, **raw sockets** (no kernel modules, no TUN/TAP).
-- **Linux only**, `AF_INET`/`AF_INET6` `SOCK_RAW`. Send uses `IP_HDRINCL` (we build the IP header so
+- **Linux only**, `AF_INET` `SOCK_RAW`. Send uses `IP_HDRINCL` (we build the IP header so
   UDP Length can be smaller than IP Total Length, creating the surplus area; we compute the UDP
   checksum and the OCS ourselves). Receive uses a `SOCK_RAW` `IPPROTO_UDP` socket that gets full IP
   datagrams with the surplus area intact; port filtering in userspace. No Ethernet/L2 framing.
 - **In scope:** TLV framework; OCS; must-support options (EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES);
-  zero-copy parser; serializer; FRAG fragmentation + reassembly; two-tier API; IPv4 + IPv6; unit +
+  zero-copy parser; serializer; FRAG fragmentation + reassembly; two-tier API; IPv4; unit +
   loopback integration tests; example peer CLIs.
-- **Out of scope:** TIME; AUTH/UCMP/UENC; RFC 9869 (DPLPMTUD); kernel modules; stateful protocols.
+- **Out of scope:** IPv6; TIME; AUTH/UCMP/UENC; RFC 9869 (DPLPMTUD); kernel modules; stateful protocols.
 
 ## Architecture
 
 See `../../CLAUDE.md` for the module map and design rules (parse borrowed / decode owned;
-IP-version-generic wire layer; pure pipeline vs privileged I/O).
+IPv4-only wire layer; pure pipeline vs privileged I/O).
 
 Dependencies: `socket2` + `libc` (raw sockets), `thiserror` (errors), `crc32c` (APC), `clap` (CLIs),
 `log` (diagnostics). Hand-rolled: RFC 1071 checksum, TLV parser/serializer, OCS.
@@ -55,7 +55,7 @@ Legend: [ ] pending, [~] in progress, [x] done.
 | 0 | Bootstrap: lib+bin layout, deps, stub module tree, `model` consts, `CLAUDE.md`, this roadmap + step stubs, `rustfmt.toml`, `rust-toolchain.toml`, gitignore `.idea`, musl cross target + `achim` remote run setup | `cargo build` + `fmt --check` + `clippy -D warnings` green (host and `--target aarch64-unknown-linux-musl`); first commit present | [x] |
 | 0.5 | Spike (throwaway): client/server raw send->recv of **arbitrary** surplus bytes over a staged **1500-MTU veth link across two netns**, to de-risk surplus-area survival and the raw-socket send/recv limits before any machinery (folded into Steps 8-9; prototypes the Step 17 harness) | `scripts/spike.sh` exits 0: surplus survives intact up to the MTU; documents Finding A (`IP_HDRINCL` forces IP Total Length = buffer) and Finding B (`IP_HDRINCL` won't fragment, >MTU send -> `EMSGSIZE`) | [x] |
 | 1 | RFC 1071 checksum primitive | unit tests vs RFC example + hand vectors (odd-length, all-zero); `sum + complement == 0` | [x] |
-| 2 | Wire model: `IpRepr` V4+V6, IPv4+IPv6 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [x] |
+| 2 | Wire model: `IpRepr` (IPv4), IPv4 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [x] |
 | 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [ ] |
 | 4 | Zero-copy TLV parser (`OptionsIter`/`OptionRef`) | correct iteration; truncated/overrun/bad-extended each one `Err` + halt; no panic on random input | [ ] |
 | 5 | Serializer (`OptionsBuilder`): ordering, NOP align, EOL + zero-fill, extended length | serialize->parse round-trip; canonical order; even length; golden-byte test | [ ] |
@@ -69,8 +69,12 @@ Legend: [ ] pending, [~] in progress, [x] done.
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [ ] |
 | 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [ ] |
 | 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [ ] |
-| 16 | IPv6 socket wiring (`AF_INET6`, `IPV6_HDRINCL`) | `::1` loopback round-trip with surplus + options + FRAG; pipeline path shared with v4 | [ ] |
 | 17 | Evaluation runbook + netns/veth/tunnel scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the staged env on Linux; runbook reproduces integration results; quick-start verified | [ ] |
+
+The 15 -> 17 numbering gap is intentional: **step 16 removed from scope (IPv6), 2026-06** -- the
+mechanism is IP-version-neutral and fully demonstrated on IPv4; IPv6 raw-socket semantics
+(`IPV6_HDRINCL`) added platform fragility without protocol insight. Step numbers and FR IDs stay
+stable (no renumbering).
 
 ## Top risks (Linux AF_INET raw) and mitigations
 
@@ -87,9 +91,9 @@ Legend: [ ] pending, [~] in progress, [x] done.
   IP Length). Finding B: `IP_HDRINCL` will not fragment (>MTU -> `EMSGSIZE`), so datagrams must stay
   <= MTU and oversize logical payloads go through FRAG (RFC 9868 §5/§11.4 motivate FRAG for exactly
   this: messages larger than the IP MTU travel via FRAG, not IP fragmentation).
-- **CAP_NET_RAW / root**: keep the privileged surface to Steps 8, 9, 14-16; everything else is
+- **CAP_NET_RAW / root**: keep the privileged surface to Steps 8, 9, 14-15; everything else is
   root-free; integration tests are `#[ignore]`-gated so "green" stays trustworthy.
-- **Loopback != real NIC**: use `127.0.0.1`/`::1` plus a veth/netns path (Step 17); document offload
+- **Loopback != real NIC**: use `127.0.0.1` plus a veth/netns path (Step 17); document offload
   disabling (`ethtool -K`).
 - **Reassembly DoS**: per-pair byte/segment caps, global partial cap, <= 2 min timeout, GC,
   overlap -> abort (Step 12).

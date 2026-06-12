@@ -4,9 +4,9 @@
 //!
 //! RFC 9868 carries transport options in the *surplus area*: the bytes between the end of the UDP
 //! payload (delimited by the UDP Length field) and the end of the IP transport payload (IPv4 Total
-//! Length minus the IHL, or IPv6 Payload Length minus the extension headers). Because the operating
-//! system's UDP stack delivers only the UDP-length-bounded payload, this crate accesses the surplus
-//! area with raw sockets (`AF_INET`/`AF_INET6` `SOCK_RAW`) on Linux.
+//! Length minus the IHL). Because the operating system's UDP stack delivers only the
+//! UDP-length-bounded payload, this crate accesses the surplus area with raw sockets (`AF_INET`
+//! `SOCK_RAW`) on Linux.
 //!
 //! ## Module map
 //!
@@ -22,9 +22,9 @@
 //! ## Scope
 //!
 //! In scope: the TLV options framework, the Option Checksum (OCS), the must-support options
-//! (EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES), fragmentation/reassembly, and IPv4 + IPv6.
-//! Out of scope: the TIME option, the reserved AUTH/UCMP/UENC options, RFC 9869 (DPLPMTUD), and
-//! kernel modules. See `docs/plan/ROADMAP.md` for the full plan.
+//! (EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES), fragmentation/reassembly, and IPv4.
+//! Out of scope: IPv6, the TIME option, the reserved AUTH/UCMP/UENC options, RFC 9869 (DPLPMTUD),
+//! and kernel modules. See `docs/plan/ROADMAP.md` for the full plan.
 //!
 //! [RFC 9868]: https://www.rfc-editor.org/rfc/rfc9868.txt
 

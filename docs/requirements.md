@@ -17,10 +17,12 @@ ROADMAP step that implements it (see `docs/plan/ROADMAP.md`), and a status. The 
 - **Not-feasible-in-userspace**: cannot be met faithfully from userspace with raw sockets; explained in the same
   section. (No in-scope requirement currently carries this status; it is reserved for the FF1 discussion.)
 
-Out-of-scope items (TIME, AUTH/UCMP/UENC, RFC 9869 DPLPMTUD use cases, kernel modules, stateful protocols) are kept
-in the conformance matrix and marked explicitly so the boundary of the contribution is visible.
+Out-of-scope items (TIME, AUTH/UCMP/UENC, RFC 9869 DPLPMTUD use cases, kernel modules, stateful protocols, IPv6) are
+kept in the conformance matrix and marked explicitly so the boundary of the contribution is visible. IPv6 was removed
+from scope: the RFC 9868 mechanism is IP-version-neutral and fully demonstrated on IPv4; IPv6 raw-socket
+`IPV6_HDRINCL` semantics differ and added platform fragility without protocol insight.
 
-IDs (FR-NN, NFR-NN) are stable; do not renumber. Steps are the ROADMAP.md numbers 0..17. Arrows are written `->`;
+IDs (FR-NN, NFR-NN) are stable; do not renumber. Steps are the ROADMAP.md numbers 0..17 (16 removed with IPv6). Arrows are written `->`;
 comparisons `<=` / `>=`.
 
 ## Reference: wire facts used below
@@ -57,7 +59,7 @@ The surplus area itself (RFC 9868 Sec. 8, 9, 10):
 | ID | Requirement | RFC source | Priority | Scope | Step | Status | Notes |
 |----|-------------|-----------|----------|-------|------|--------|-------|
 | FR-01 | Compute the RFC 1071 one's-complement Internet checksum, including the odd-length (final-byte) and all-zero cases, such that `sum + complement == 0`. | Sec. 9; RFC 1071 | MUST | in | 1 | Planned | Hand-rolled in `wire::checksum`; pedagogical core. Basis for UDP checksum and OCS. |
-| FR-02 | Represent IPv4 and IPv6 headers in an IP-version-generic `IpRepr` (V4/V6) exposing addresses, transport-payload length, and the pseudo-header seed. | Sec. 7 | MUST | in | 2 | Planned | `wire::ip::IpRepr`. IPv4 bound `UDP_Length <= Total_Length - IHL*4`; IPv6 bound `UDP_Length <= Payload_Length - ext-hdr len`. |
+| FR-02 | Represent the IPv4 header in `IpRepr` exposing addresses, transport-payload length, and the pseudo-header seed. | Sec. 7 | MUST | in | 2 | Planned | `wire::ip::IpRepr`. IPv4 bound `UDP_Length <= Total_Length - IHL*4`. |
 | FR-03 | Parse and build the 8-byte `UdpHeader`; compute the UDP checksum over pseudo-header + UDP header + user data only (not the surplus area). | Sec. 7, 9; RFC 768 | MUST | in | 2 | Planned | `wire::udp::UdpHeader`. Kernel does not checksum raw datagrams, so this is done by hand. |
 | FR-04 | Locate the surplus area: the bytes from UDP Length to the end of the IP transport payload (Sec. 7), with the OCS aligned to the first 2-byte boundary of the area relative to the IP datagram start (Sec. 8). | Sec. 7, 8 | MUST | in | 2 | Planned | `wire::surplus::locate_surplus` -> `SurplusLayout { starts_at, needs_pad, len }`. Area existence/location is Sec. 7; the OCS 2-byte alignment is Sec. 8. |
 | FR-05 | Honor the odd-pad rule: a surplus area whose natural start is odd is preceded by exactly one byte that MUST be zero; on transmit emit a zero pad, on receipt reject a non-zero pad. | Sec. 8 | MUST | in | 2,6 | Planned | `SurplusLayout::needs_pad`; non-zero pad -> `ParseError::NonZeroPad` -> discard all options, deliver payload. |
@@ -90,7 +92,7 @@ The surplus area itself (RFC 9868 Sec. 8, 9, 10):
 | FR-32 | Abort reassembly on any fragment overlap, discarding all fragments of that datagram, with no ICMP error. | Sec. 11.4 | MUST | in | 12 | Planned | `ReassemblyOutcome::Abort(AbortReason::Overlap)`. Exact duplicates MAY be dropped rather than treated as overlap. |
 | FR-33 | Enforce a reassembly timeout of at most 2 minutes, generating no ICMP error and no zero-length frame to the user on expiry. | Sec. 11.4 | SHOULD/MUST | in | 12 | Planned | `model::limits::REASSEMBLY_TIMEOUT_MAX = 120s`. `Abort(AbortReason::Timeout)`; ICMP-suppression is the MUST. |
 | FR-34 | Limit reassembly resources with per-socket-pair (not shared) and global caps; abort on exceedance. | Sec. 11.4, 25.4 | SHOULD | in | 12 | Planned | `Abort(AbortReason::LimitExceeded)`; per-pair byte/segment caps plus a global partial cap (no cross-pair starvation). |
-| FR-35 | Support a local MRDS size of at least 2926 (IPv4) / 2886 (IPv6) bytes and at least 2 segments; assume these as defaults when no MRDS was received. | Sec. 11.4, 11.6 | MUST | in | 11,12 | Planned | `model::limits::{MRDS_DEFAULT_IPV4, MRDS_DEFAULT_IPV6, MIN_REASSEMBLY_SEGMENTS=2}`. |
+| FR-35 | Support a local MRDS size of at least 2926 (IPv4) bytes and at least 2 segments; assume these as defaults when no MRDS was received. | Sec. 11.4, 11.6 | MUST | in | 11,12 | Planned | `model::limits::{MRDS_DEFAULT_IPV4, MIN_REASSEMBLY_SEGMENTS=2}`. |
 | FR-36 | Apply the RFC 9868 Sec. 14 receive disposition exactly (UDP checksum -> OCS x checksum matrix -> option processing -> deliver/discard), implemented as a pure function. | Sec. 9, 14 | MUST | in | 10 | Planned | `recv::pipeline::process_datagram` -> `Delivery::{Payload{data,options}, Buffered}`. Owns the `OCS == 0` with non-zero UDP checksum case (legacy emulation). See the disposition table below. |
 | FR-37 | Make per-packet options and their success/fail status available to the user, except FRAG, NOP, EOL (handled internally). | Sec. 14, 15 | MUST | in | 10,13 | Planned | `Delivery::Payload.options: Vec<RawOption>`; APC/REQ/RES/MDS/MRDS surfaced, FRAG/NOP/EOL never. |
 | FR-38 | Deliver the UDP user data by default for all SAFE options regardless of whether options are supported, present, or succeed (legacy equivalence), unless explicitly overridden. | Sec. 6, 14, 19 | MUST | in | 10,13 | Planned | Default-deliver is the spine of the pipeline; an override (drop-on-failure) is opt-in per FR-43. |
@@ -102,7 +104,6 @@ The surplus area itself (RFC 9868 Sec. 8, 9, 10):
 | FR-44 | Offer a per-socket-pair receive setting to require named options (drop + log if absent) and a setting to discard all option-bearing datagrams (defaulting to normal processing). | Sec. 15 | MUST | in | 13 | Planned | "Require option" -> silent drop + log; "drop all options" default = off (process normally). |
 | FR-45 | Do not expose user control over option order or per-packet fragment boundaries; do allow enabling/disabling options (incl. fragmentation) per packet. | Sec. 15 (API guidance, non-normative); Sec. 25 (rationale) | guidance | in | 13 | Planned | Sec. 15 states APIs "are not intended to provide" this control (no BCP-14 MUST); enabling/disabling per packet is expected. Enforced here as the project's anti-covert-channel canonicalization. The API toggles options, not layout (FR-14). |
 | FR-46 | Provide example peer CLIs `udpopt-send` and `udpopt-recv` with working `--help` and a documented loopback run that sends options and prints them decoded. | Sec. 15 (API illustration); ROADMAP | SHOULD | in | 14 | Planned | `src/bin/udpopt-send.rs`, `src/bin/udpopt-recv.rs` (`clap`). Privileged (CAP_NET_RAW). |
-| FR-47 | Support IPv6 end to end: `AF_INET6` raw socket wiring sharing the IP-generic pipeline; `::1` loopback round-trip with surplus, options, and FRAG. | Sec. 7; locked decision | MUST | in | 16 | Partial-in-userspace | `IpRepr::V6` plus `IPV6_HDRINCL`. IPv6 raw `IP_HDRINCL` semantics differ from IPv4 (see limitations). |
 | FR-48 | Never emit an ICMP error from UDP-options processing (reassembly expiry, overlap abort, length-invalid drops). | Sec. 10, 11.4 | MUST | in | 9,10,12 | Planned | Userspace raw path emits no ICMP by construction; the kernel ICMP for the absent normal port is suppressed via the dummy socket (FR-41). |
 | FR-49 | Validate UDP Length bounds: at least 8 and no larger than the IP transport payload; silently drop (and log) datagrams outside this range. | Sec. 10 | MUST | in | 2,10 | Planned | Checked in `locate_surplus` / pipeline before option parsing. |
 | FR-50 | Silently ignore any option whose claimed length exceeds the UDP packet extent (would read beyond the surplus area), modeling legacy behavior. | Sec. 14 | SHOULD | in | 10 | Planned | RFC-internal tension with FR-10: Sec. 10's MUST (overrun -> malformed surplus -> discard all options) governs the implementation; this row records the milder Sec. 14 SHOULD for the conformance matrix only. |
@@ -127,9 +128,9 @@ The surplus area itself (RFC 9868 Sec. 8, 9, 10):
 | NFR-04 | DoS resistance, option count: bound the number of non-padding TLVs processed per datagram and drop/log beyond it. | Sec. 25.3 | SHOULD | 10 | Planned | Limit >= (supported option count + small slack); RFC's example is ~13-14 for 10 supported. Adaptive, not a global constant. |
 | NFR-05 | DoS resistance, NOP runs: detect runs of more than seven NOPs and limit the work they cause; log occurrences. | Sec. 11.2, 25.2 | SHOULD | 10 | Planned | Backed by `NOP_RUN_DOS_THRESHOLD`; ties to FR-16. |
 | NFR-06 | DoS resistance, reassembly: per-pair (non-shared) and global caps, a `<= 2 min` timeout, garbage collection of stale partials, and overlap-abort. | Sec. 11.4, 25.4 | SHOULD | 12 | Planned | Implements FR-32..FR-34; GC is caller-driven (synchronous): the application calls `gc(now)`, so a single pair cannot pin memory. No background thread. |
-| NFR-07 | Platform/privilege: raw-socket paths run only on Linux and require `CAP_NET_RAW` (or root); the library and binaries still compile on any platform. | Locked decision; Linux capabilities | MUST | 8,9,15,16 | Partial-in-userspace | `RecvError::PermissionDenied` for the missing-capability case; pure modules need no privilege. |
+| NFR-07 | Platform/privilege: raw-socket paths run only on Linux and require `CAP_NET_RAW` (or root); the library and binaries still compile on any platform. | Locked decision; Linux capabilities | MUST | 8,9,15 | Partial-in-userspace | `RecvError::PermissionDenied` for the missing-capability case; pure modules need no privilege. |
 | NFR-08 | Rate-limited logging: all diagnostic logging (DoS indicators, dropped datagrams, required-option failures) is rate limited and may be coalesced to a count. | Sec. 10, 25.1 | SHOULD | 10,12,13 | Planned | Uses the `log` crate; logging must not itself become a resource sink. |
-| NFR-09 | Reproducible tests: a root-free functional lane (`cargo test`) and a root-gated, `#[ignore]`-d integration lane (on Linux `sudo cargo test -- --ignored`; from macOS `scripts/vm-ubuntu-server.sh ignored` against a configurable SSH Linux host) that is skipped, not failed, without privilege. | ROADMAP verification | MUST | 10,15,16,17 | Planned | Pure pipeline is fully unit-testable; loopback/netns tests are gated so a green run stays trustworthy; on any Linux box the lanes run natively without the cross-compile setup. |
+| NFR-09 | Reproducible tests: a root-free functional lane (`cargo test`) and a root-gated, `#[ignore]`-d integration lane (on Linux `sudo cargo test -- --ignored`; from macOS `scripts/vm-ubuntu-server.sh ignored` against a configurable SSH Linux host) that is skipped, not failed, without privilege. | ROADMAP verification | MUST | 10,15,17 | Planned | Pure pipeline is fully unit-testable; loopback/netns tests are gated so a green run stays trustworthy; on any Linux box the lanes run natively without the cross-compile setup. |
 | NFR-10 | Performance/overhead observability: make the surplus-area overhead measurable on the wire and provide a reproducible evaluation runbook (netns/veth/tunnel) for FF2. | FF2; ROADMAP Step 17 | SHOULD | 17 | Planned | `tcpdump`/Wireshark confirm UDP Length < IP Total Length; staged paths probe middlebox/NAT behavior. |
 | NFR-11 | Code style and hygiene: `rustfmt` at `max_width = 120`, clean `clippy -D warnings`, and hand-rolled checksum/TLV/OCS (no `nom`, `pnet`, `etherparse`, `smoltcp`, `bytes`, `nix`, `zerocopy`). | ROADMAP conventions | MUST | all | Planned | The hand-rolled primitives are the pedagogical core of the thesis. |
 | NFR-12 | Determinism / no hidden state: the receive pipeline is a pure function over byte buffers; all mutable state (reassembly cache) is explicit and isolated from I/O. | "pure pipeline vs privileged I/O" rule | MUST | 10,12 | Planned | `process_datagram` takes buffers and returns a `Delivery`; reassembly state is an explicit `ReassemblyCache`. |
@@ -181,7 +182,7 @@ scope exclusions.
 | Sec. 11.4 | Individual fragments MUST NOT be forwarded to the user | MUST | yes | 12 | FR-31. |
 | Sec. 11.4 | Reassembly failure -> no zero-length frame to the user | SHOULD | yes | 12 | FR-33, `Delivery::Buffered` only. |
 | Sec. 11.5 | MDS encode/decode; MDS MUST NOT limit transmission | MUST | yes | 7 | FR-24. |
-| Sec. 11.6 | MRDS size >= 2926 (v4)/2886 (v6), segs >= 2; defaults when absent | MUST | yes | 7,11,12 | FR-35. |
+| Sec. 11.6 | MRDS size >= 2926, segs >= 2; defaults when absent | MUST | yes (IPv4; IPv6 out of scope) | 7,11,12 | FR-35. |
 | Sec. 11.7 | REQ/RES token handling; never auto-respond | MUST | yes | 7 | FR-25. |
 | Sec. 11.7 | Auto REQ/RES layer (if any) disabled by default | MUST | yes (vacuous) | 13 | No such layer is built; RFC 9869 use case is out of scope. |
 | Sec. 11.8 | TIME option | MUST (when implemented) | out | - | Out of scope. |
@@ -237,7 +238,7 @@ absent -> payload still delivered; UNSAFE-bearing payload -> lost, since it live
 is squarely the FF2 measurement target and is why Step 17 stages netns/veth/tunnel paths; no endpoint code can
 make a stripping path conformant.
 
-**L4 - Privilege requirement, `CAP_NET_RAW` / root (FR-40, FR-41, FR-46, FR-47; NFR-07).** Both raw sockets require
+**L4 - Privilege requirement, `CAP_NET_RAW` / root (FR-40, FR-41, FR-46; NFR-07).** Both raw sockets require
 `CAP_NET_RAW`. This is not an RFC requirement but it constrains who can run an RFC 9868 endpoint in userspace: an
 unprivileged process cannot open the surplus area at all. The design quarantines this to `src/socket/` and the CLIs
 so the entire parser/serializer/OCS/FRAG/pipeline is testable unprivileged (NFR-09); `RecvError::PermissionDenied`
@@ -249,12 +250,6 @@ to the target port, the kernel would emit ICMP port-unreachable. The implementat
 and own-source in userspace and binds a dummy `SOCK_DGRAM` to absorb the ICMP, satisfying the RFC's
 no-ICMP-from-options-processing posture (FR-48). The residual risk is that this is a heuristic at the edge of the
 kernel's behavior, not a kernel-enforced demux; that caveat is what makes FR-41 Partial-in-userspace.
-
-**L6 - IPv6 `IP_HDRINCL` semantics differ (FR-47).** IPv6 raw sockets do not expose the IPv4-style `IP_HDRINCL`
-contract; header construction goes through `IPV6_HDRINCL` and ancillary data, and the kernel owns more of the
-header than on IPv4. The surplus area still arises from `UDP Length < IPv6 Payload Length - ext-hdr len`, and the
-IP-generic `IpRepr::V6` keeps the pipeline shared, but the send/recv wiring is the one genuinely V6-specific piece
-and is the most platform-fragile (Step 16). Status of FR-47: Partial-in-userspace.
 
 **L7 - macOS receive is impossible.** macOS raw sockets cannot receive UDP at all, which is why the project is
 Linux-only at runtime. This bounds the portability of any userspace RFC 9868 endpoint and is recorded as a hard
@@ -268,7 +263,7 @@ fidelity worth naming for FF1.
 
 Net FF1 reading: the entire transport-options state machine (surplus location, OCS, TLV parse/serialize, must-
 support options, FRAG split/reassembly, Sec. 14 disposition) is fully implementable in userspace and is Planned.
-The raw-socket boundary degrades, but does not block, the I/O requirements (FR-40, FR-41, FR-47: Partial-in-
-userspace, per L1, L4, L5, L6), and the only outright infeasibility is platform reach (macOS receive, L7) and the
+The raw-socket boundary degrades, but does not block, the I/O requirements (FR-40, FR-41: Partial-in-
+userspace, per L1, L4, L5), and the only outright infeasibility is platform reach (macOS receive, L7) and the
 network-path survival of the surplus area (L3), the latter being precisely the empirical question FF2 measures
 rather than a code defect.

@@ -22,8 +22,8 @@ UDP datagram (RFC 9868 Sec. 7). It is computed from the IP payload length and th
 surplus_area = ip_transport_payload_length - udp_length
 ```
 
-where `ip_transport_payload_length` is the IP total length minus the IP header and any extension
-headers, and `udp_length` is the UDP `Length` field. The surplus area begins at the byte immediately
+where `ip_transport_payload_length` is the IP total length minus the IP header (IHL x 4), and
+`udp_length` is the UDP `Length` field. The surplus area begins at the byte immediately
 following the UDP user data (as delimited by `udp_length`) and runs to the end of the IP payload
 (RFC 9868 Sec. 7):
 
@@ -42,9 +42,8 @@ surplus-area start offset (the pad byte, when required, is the area's first byte
 byte is required, and the total surplus length; the 2-byte-aligned OCS field sits at
 `starts_at + needs_pad`.
 
-The IP-version-generic inputs come from `wire::ip::IpRepr`: for IPv4 the transport payload length is
-`total_len` minus the IP header length in bytes (IHL x 4), and for IPv6 it is `payload_len` minus
-`ext_hdr_len`. The UDP boundary is
+The inputs come from `wire::ip::IpRepr`: the transport payload length is `total_len` minus the IP
+header length in bytes (IHL x 4). The UDP boundary is
 `wire::udp::UdpHeader::length`.
 
 UDP Options are not reliable: middleboxes may strip or drop the surplus area, and a sender cannot
@@ -282,9 +281,9 @@ reassembly: a 16-bit size followed by a one-byte maximum-segment count (RFC 9868
 Fields map to `options::typed::Mrds { max_reassembled_size, max_segments }`. The advertised size
 counts the whole reassembled datagram including the UDP header and any per-datagram options
 (RFC 9868 Sec. 11.6). When no MRDS option has been received, a sender MUST assume an MRDS size of
-2926 bytes over IPv4 (`model::limits::MRDS_DEFAULT_IPV4`) and 2886 bytes over IPv6
-(`model::limits::MRDS_DEFAULT_IPV6`) with 2 segments; a receiver MUST support at least these values
-(`model::limits::MIN_REASSEMBLY_SEGMENTS` = 2) (RFC 9868 Sec. 11.6).
+2926 bytes over IPv4 (`model::limits::MRDS_DEFAULT_IPV4`) with 2 segments; a receiver MUST support
+at least these values (`model::limits::MIN_REASSEMBLY_SEGMENTS` = 2) (the RFC additionally defines
+2886 for IPv6, out of scope here) (RFC 9868 Sec. 11.6).
 
 ## 10. Echo Request and Echo Response (REQ / RES)
 

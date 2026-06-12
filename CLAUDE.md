@@ -34,10 +34,10 @@ proptest default of 256 cases.
 In scope: the TLV options framework; the Option Checksum (OCS, RFC 9868 Section 9); the must-support
 options EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES; a zero-copy parser and a serializer; FRAG
 fragmentation and reassembly (cache, timeout, garbage collection, DoS limits); the two-tier API;
-IPv4 and IPv6; unit tests and loopback integration tests; example sender/receiver peer CLIs.
+IPv4; unit tests and loopback integration tests; example sender/receiver peer CLIs.
 
-Out of scope: the TIME option; the reserved AUTH/UCMP/UENC options; the REQ/RES-for-PMTUD use case of
-RFC 9869 (DPLPMTUD); kernel modules; bidirectional/stateful protocols.
+Out of scope: IPv6; the TIME option; the reserved AUTH/UCMP/UENC options; the REQ/RES-for-PMTUD use
+case of RFC 9869 (DPLPMTUD); kernel modules; bidirectional/stateful protocols.
 
 ## Architecture (module map)
 
@@ -47,7 +47,7 @@ src/
   error.rs       ParseError, RecvError
   wire/
     checksum.rs  RFC 1071 one's-complement Internet checksum            [hand-rolled]
-    ip.rs        IpRepr { V4, V6 }: transport-payload length, pseudo-header seed; header parse/build
+    ip.rs        IpRepr (IPv4): transport-payload length, pseudo-header seed; header parse/build
     udp.rs       UdpHeader parse/build + UDP checksum
     surplus.rs   SurplusLayout + locate_surplus()
   options/
@@ -73,8 +73,9 @@ Design rules:
 
 - **Parse borrowed, decode owned.** Only `OptionRef`/`OptionsIter` carry a lifetime; typed options
   are fixed-length `Copy` PODs. The borrow never crosses the public API boundary.
-- **IP-version-generic from the wire layer.** `IpRepr` covers V4 and V6 so the surplus math, the UDP
-  pseudo-header, and FRAG keying are written once. Only the `AF_INET6` socket wiring is V6-specific.
+- **IPv4-only wire layer.** `IpRepr` covers IPv4 so the surplus math, the UDP pseudo-header, and FRAG
+  keying are written once. IPv6 was deliberately cut from scope (the mechanism is IP-version-neutral
+  and fully demonstrated on IPv4).
 - **Pure pipeline vs privileged I/O.** `recv/pipeline.rs` is a pure function over byte buffers
   (root-free, fully unit-testable); the socket modules are thin and root-gated.
 - **Strictly single-threaded and synchronous.** No threads, no async, no background tasks anywhere
@@ -98,7 +99,7 @@ Design rules:
   up to UDP Length (not the surplus area).
 - **FRAG** is used only with empty UDP user data (UDP Length == 8). Reassembly is keyed by
   (src IP, src port, dst IP, dst port, Identification); overlap aborts; timeout <= 2 min; per-pair
-  limits; default MRDS 2926 (IPv4) / 2886 (IPv6).
+  limits; default MRDS 2926 (IPv4).
 - **Receive order:** verify UDP checksum, locate/validate the surplus area, validate the OCS, parse
   the options, then reassemble (FRAG) or deliver. A malformed surplus area discards the options but
   still delivers the payload; unknown SAFE options are ignored; unknown UNSAFE options cause the
@@ -127,7 +128,7 @@ Design rules:
 ## Platform
 
 Linux only at runtime. The raw-socket paths need `CAP_NET_RAW` (or root). There is no macOS path:
-macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`, `::1`) is used for integration tests; a
+macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`) is used for integration tests; a
 network-namespace/veth setup is used for the staged evaluation (see `docs/plan/steps/17-*`).
 
 On macOS, develop locally and **cross-compile** for `aarch64-unknown-linux-musl` (statically linked

@@ -33,11 +33,11 @@ Planned in scope:
 - Option Checksum (OCS)
 - must-support options: EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES
 - FRAG fragmentation and reassembly
-- IPv4 and IPv6 support
+- IPv4 support
 - low-level and high-level APIs
 - example sender/receiver CLIs
 
-Out of scope: kernel modules, TIME, AUTH/UCMP/UENC, and RFC 9869 DPLPMTUD.
+Out of scope: IPv6, kernel modules, TIME, AUTH/UCMP/UENC, and RFC 9869 DPLPMTUD.
 
 ## Build
 
