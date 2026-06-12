@@ -17,9 +17,12 @@ echo "== lake build (toolchain: $(cat lean-toolchain)) =="
 "$LAKE" build
 
 echo "== axiom audit =="
+# `lemma` is a Mathlib synonym for `theorem` and does not exist in core Lean (this project is
+# dependency-free), but the audit covers it defensively in case that ever changes.
 audit_input=$(
     echo "import Rfc9868"
-    grep -hoE '^theorem [A-Za-z0-9_]+' Rfc9868/*.lean | awk '{print "#print axioms Rfc9868." $2}'
+    grep -hoE '^(theorem|lemma) [A-Za-z0-9_]+' Rfc9868/*.lean \
+        | awk '{print "#print axioms Rfc9868." $2}'
 )
 n_theorems=$(($(printf '%s\n' "$audit_input" | wc -l) - 1))
 audit_output=$(printf '%s\n' "$audit_input" | "$LAKE" env lean --stdin)
