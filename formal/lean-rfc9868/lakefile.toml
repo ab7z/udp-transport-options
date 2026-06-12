@@ -1,0 +1,5 @@
+name = "rfc9868"
+defaultTargets = ["Rfc9868"]
+
+[[lean_lib]]
+name = "Rfc9868"
