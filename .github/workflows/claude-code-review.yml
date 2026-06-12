@@ -69,10 +69,12 @@ jobs:
           key: lean-${{ runner.os }}-${{ hashFiles('formal/lean-rfc9868/lean-toolchain') }}
 
       - name: Install elan (pinned toolchain only)
+        env:
+          # Commit-pinned elan-init.sh (immutable URL), not the floating master branch.
+          ELAN_INIT_URL: https://raw.githubusercontent.com/leanprover/elan/b6cec7e10fe4965a605aaf60d1cb4a5837f0462b/elan-init.sh
         run: |
           if [ ! -x "$HOME/.elan/bin/elan" ]; then
-            curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh \
-              | sh -s -- -y --default-toolchain none
+            curl -sSfL "$ELAN_INIT_URL" | sh -s -- -y --default-toolchain none
           fi
           echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
 
