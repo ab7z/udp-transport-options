@@ -15,6 +15,8 @@ Parse the options in a surplus area as a zero-copy, total, panic-free iterator o
   handled.
 - Strict bounds and length validation: a truncated header, an option that overruns the surplus, or a
   malformed extended length yields exactly one `Err` and then stops.
+- No option-specific APC/FRAG/MDS/MRDS/REQ/RES length validation in this step; fixed-length typed
+  decoding remains Step 7, and receive disposition remains Step 10.
 - Count consecutive NOPs so the pipeline can apply the >7-NOP DoS policy (Step 10).
 - No panic on any input; no allocation.
 
