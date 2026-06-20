@@ -1,6 +1,6 @@
 # Lean/RFC 9868 Validation
 
-Stand: 2026-06-12
+Stand: 2026-06-12; Status-Update nach Step 3: 2026-06-20
 
 ## Kurzurteil
 
@@ -15,14 +15,15 @@ Der belastbare Pfad ist gestuft:
    Lean zu extrahieren und gegen die Spezifikation zu beweisen.
 
 Nicht belastbar waere die Aussage "Lean verifiziert jetzt den geschriebenen Code
-vollstaendig gegen RFC 9868". Das ist in diesem Checkout heute falsch, weil:
+vollstaendig gegen RFC 9868". Das bleibt in diesem Checkout falsch, weil:
 
-- der aktive Branch `step-03-option-kind` nur Step 0-2 implementiert; Step 3 ist
-  laut Roadmap noch offen, spaetere Module sind Stubs;
-- das Repo noch kein Lean/Lake-Projekt enthaelt;
+- der aktive Branch `step-03-option-kind` nach Step 3 nur den reinen Wire-/Kind-Kern
+  implementiert; Step 4 und spaetere Module sind weiterhin Stubs oder geplant;
+- das Repo jetzt ein manuelles Lean/Lake-Projekt fuer Steps 1-3 enthaelt, aber keine
+  Rust-zu-Lean-Extraktion;
 - Charon/Aeneas lokal nicht installiert sind;
-- die lokale Lean-Installation nur ueber eine explizite `elan run`-Toolchain
-  funktioniert;
+- die Lean-Schiene ueber die repo-gepinnte Toolchain und `scripts/lean-gate.sh`
+  laeuft;
 - RFC-9868-Konformitaet teilweise von Linux-Raw-Socket- und Middlebox-Verhalten
   abhaengt, das Lean nicht beweisen kann.
 
@@ -40,18 +41,19 @@ Checkout:
 
 Implementierungsstand:
 
-- Fertig laut Roadmap: Step 0, 0.5, 1, 2.
-- Offen laut Roadmap: Step 3 `OptionKind`-Methoden und Tests; Step 4-17.
+- Fertig laut Roadmap nach dem Status-Update: Step 0, 0.5, 1, 2, 3.
+- Offen laut Roadmap: Step 4-15 und 17 (Step 16 entfernt, Step 9 in Step 8
+  gemerged).
 - Reiner Ist-Code mit Substanz:
   - `src/model.rs`
   - `src/wire/checksum.rs`
   - `src/wire/ip.rs`
   - `src/wire/udp.rs`
   - `src/wire/surplus.rs`
+  - `src/options/kind.rs`
   - `tests/properties_wire.rs`
   - `tests/common/mod.rs`
 - Stub- oder Planmodule:
-  - `src/options/kind.rs` enthaelt aktuell nur das Enum.
   - `src/options/parse.rs` enthaelt nur `OptionRef`.
   - `src/options/serialize.rs`, `src/options/ocs.rs`, `src/frag/split.rs`,
     `src/socket/send.rs`, `src/socket/recv.rs`, `src/api/mod.rs` sind Stubs.
@@ -367,16 +369,18 @@ Lean-Eignung: sehr hoch, aber aktueller Code ist unvollstaendig.
 
 Ist-Zustand:
 
-- Nur das Enum existiert.
-- `from_u8`, `to_u8`, SAFE/UNSAFE, must-support und length/framing helpers sind
-  noch nicht implementiert.
+- Step 3 ist umgesetzt.
+- `from_byte`, `to_byte`, SAFE/UNSAFE, must-support und length/framing helpers sind
+  implementiert und exhaustiv ueber alle 256 Kind-byte-Werte getestet.
+- Die manuelle Lean-Spec `Rfc9868/Kind.lean` beweist die Kind-Tabelle und die
+  Grenzpraedikate.
 
 Beweisziele nach Step 3:
 
 - Exhaustive 256-Kind-Theoreme.
-- `to_u8 (from_u8 b) = b`.
-- `is_safe` iff `to_u8 kind < 192`.
-- `is_unsafe` iff `to_u8 kind >= 192`.
+- `to_byte(from_byte(b)) == b`.
+- `is_safe` iff `to_byte(kind) < 192`.
+- `is_unsafe` iff `to_byte(kind) >= 192`.
 - `is_must_support` iff raw Kind in `0..=7`.
 - EOL/NOP sind Single-Byte; andere Kinds sind TLV/extended-capable.
 
@@ -584,14 +588,15 @@ Aber das belastbare Ergebnis ist begrenzt:
 - Grundsaetzlich nicht durch Lean allein moeglich: Nachweis von Linux-Raw-Socket-
   und Middlebox-Verhalten.
 
-Die naechste technisch saubere Arbeitseinheit waere:
+Diese Punkte sind seit Step 3 erledigt:
 
 1. Step 3 implementieren.
-2. Parallel ein kleines `formal/lean-rfc9868/` anlegen.
+2. `formal/lean-rfc9868/` anlegen.
 3. `OptionKind` und `locate_surplus` als erste Lean-Beweise formalisieren.
-4. Danach entscheiden, ob Charon/Aeneas fuer diesen Crate stabil genug ist oder
-   ob der Wert primaer in einer manuellen Spezifikation plus Rust-Testvektoren
-   liegt.
+
+Die naechste technisch saubere Arbeitseinheit ist Step 4: der zero-copy TLV-Parser. Danach bleibt
+die Entscheidung offen, ob Charon/Aeneas fuer diesen Crate stabil genug ist oder ob der Wert
+primaer in einer manuellen Spezifikation plus Rust-Testvektoren liegt.
 
 ## Review-Korrekturen und Empfehlungen (2026-06-12)
 

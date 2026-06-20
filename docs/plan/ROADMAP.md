@@ -57,7 +57,7 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 0.5 | Spike (throwaway): client/server raw send->recv of **arbitrary** surplus bytes over a staged **1500-MTU veth link across two netns**, to de-risk surplus-area survival and the raw-socket send/recv limits before any machinery (folded into Step 8; prototypes the Step 17 harness) | `scripts/spike.sh` exits 0: surplus survives intact up to the MTU; documents Finding A (`IP_HDRINCL` forces IP Total Length = buffer) and Finding B (`IP_HDRINCL` won't fragment, >MTU send -> `EMSGSIZE`) | [x] |
 | 1 | RFC 1071 checksum primitive | unit tests vs RFC example + hand vectors (odd-length, all-zero); `sum + complement == 0` | [x] |
 | 2 | Wire model: `IpRepr` (IPv4), IPv4 + UDP headers, pseudo-header checksum, `locate_surplus` | round-trip parse->build; UDP cksum vs known datagram; surplus offset+pad correct even/odd | [x] |
-| 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [ ] |
+| 3 | `OptionKind` model + SAFE/UNSAFE + must-support + framing rules | exhaustive table tests; `is_must_support` correct for 0..7 | [x] |
 | 4 | Zero-copy TLV parser (`OptionsIter`/`OptionRef`) | correct iteration; truncated/overrun/bad-extended each one `Err` + halt; no panic on random input | [ ] |
 | 5 | Serializer (`OptionsBuilder`): ordering, NOP align, EOL + zero-fill, extended length | serialize->parse round-trip; canonical order; even length; golden-byte test | [ ] |
 | 6 | OCS compute + validate (two-pass back-patch; odd-pad zero; computed 0x0000 sent as 0xFFFF) | validates (one's-complement zero); any byte flip fails; OCS==0-with-nonzero-UDP-cksum flagged | [ ] |

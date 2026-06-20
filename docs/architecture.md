@@ -387,11 +387,19 @@ pub enum OptionKind {
 }
 
 impl OptionKind {
-    pub fn from_byte(b: u8) -> OptionKind;        // (planned)
-    pub fn to_byte(self) -> u8;                   // (planned)
-    pub fn is_safe(self) -> bool;                 // Kind <= 191 (planned)
-    pub fn is_must_support(self) -> bool;         // Kinds 0..=7 (planned)
-    pub fn is_single_byte(self) -> bool;          // Eol / Nop (planned)
+    pub const fn from_byte(b: u8) -> OptionKind;
+    pub const fn to_byte(self) -> u8;
+    pub const fn is_safe(self) -> bool;           // Kind <= 191
+    pub const fn is_unsafe(self) -> bool;         // Kind >= 192
+    pub const fn is_must_support(self) -> bool;   // Kinds 0..=7
+    pub const fn framing(self) -> OptionFraming;  // single-byte vs length-delimited
+    pub const fn is_single_byte(self) -> bool;    // Eol / Nop
+    pub const fn fixed_tlv_lengths(self) -> &'static [u8];
+}
+
+pub enum OptionFraming {
+    SingleByte,
+    LengthDelimited,
 }
 ```
 
