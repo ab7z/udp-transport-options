@@ -206,21 +206,19 @@ mod tests {
 
     #[test]
     fn fixed_tlv_lengths_match_must_support_table() {
-        assert_eq!(OptionKind::Apc.fixed_tlv_lengths(), &[length::APC]);
-        assert_eq!(
-            OptionKind::Frag.fixed_tlv_lengths(),
-            &[length::FRAG_NON_TERMINAL, length::FRAG_TERMINAL]
-        );
-        assert_eq!(OptionKind::Mds.fixed_tlv_lengths(), &[length::MDS]);
-        assert_eq!(OptionKind::Mrds.fixed_tlv_lengths(), &[length::MRDS]);
-        assert_eq!(OptionKind::Req.fixed_tlv_lengths(), &[length::REQ]);
-        assert_eq!(OptionKind::Res.fixed_tlv_lengths(), &[length::RES]);
-        assert_eq!(OptionKind::Eol.fixed_tlv_lengths(), &[]);
-        assert_eq!(OptionKind::Nop.fixed_tlv_lengths(), &[]);
-        assert_eq!(OptionKind::Other(8).fixed_tlv_lengths(), &[]);
-        assert_eq!(OptionKind::Other(191).fixed_tlv_lengths(), &[]);
-        assert_eq!(OptionKind::Other(192).fixed_tlv_lengths(), &[]);
-        assert_eq!(OptionKind::Other(255).fixed_tlv_lengths(), &[]);
+        for byte in 0..=u8::MAX {
+            let expected: &[u8] = match byte {
+                kind::APC => &[length::APC],
+                kind::FRAG => &[length::FRAG_NON_TERMINAL, length::FRAG_TERMINAL],
+                kind::MDS => &[length::MDS],
+                kind::MRDS => &[length::MRDS],
+                kind::REQ => &[length::REQ],
+                kind::RES => &[length::RES],
+                _ => &[],
+            };
+
+            assert_eq!(OptionKind::from_byte(byte).fixed_tlv_lengths(), expected, "byte {byte}");
+        }
     }
 
     #[test]

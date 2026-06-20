@@ -146,6 +146,8 @@ toolchain. See the README "Cross-compiling and the achim Linux test host" sectio
 - Do not mention AI assistants or tools in commit messages.
 - Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)
   and updates the status column in `docs/plan/ROADMAP.md`.
+- `scripts/lean-ide-setup.sh` is a local, untracked Lean editor helper. Do not stage or commit it
+  unless the human explicitly changes that policy.
 
 ## Review guidelines
 
