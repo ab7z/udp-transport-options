@@ -28,9 +28,12 @@ minimum-length and bounds rules of RFC 9868 Sec. 10, with an option running past
 being malformed per Erratum 8834 (all options discarded, payload still delivered -- the pipeline
 disposition, Step 10).
 
-Theorems (after implementation): the parser is total (defined for every input -- the Lean analogue
-of "never panics"); options are yielded in stream order; the first violation yields exactly one
-error and ends iteration; parsing the Step 5 serializer's output round-trips.
+Theorems (after implementation): the Lean parser model reduces every input to a stopped trace (the
+Lean analogue of "never panics"); representative default TLVs are yielded in stream order; any
+`parseOne` framing error yields exactly one error and ends the loop; EOL terminates the stream; NOP
+advances the NOP run; strict Extended Length rejects values below 255 and advances valid extended
+TLVs by the 16-bit total length. Serializer round-trip proof belongs to Step 5, where the serializer
+is introduced.
 
 ## Plan
 

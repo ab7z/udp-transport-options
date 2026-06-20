@@ -98,16 +98,14 @@ impl<'a> Iterator for OptionsIter<'a> {
                     }
 
                     let total_len = u16::from_be_bytes([self.bytes[start + 2], self.bytes[start + 3]]) as usize;
-                    if total_len <= usize::from(kind::EXTENDED_LENGTH_MARKER - 1) {
+                    if total_len < usize::from(kind::EXTENDED_LENGTH_MARKER) {
                         return self.fail(ParseError::InvalidLength {
                             kind: raw_kind,
                             len: total_len,
                         });
                     }
 
-                    let Some(end) = start.checked_add(total_len) else {
-                        return self.fail(ParseError::Overrun { offset: start });
-                    };
+                    let end = start + total_len;
                     if end > self.bytes.len() {
                         return self.fail(ParseError::Overrun { offset: start });
                     }
@@ -126,9 +124,7 @@ impl<'a> Iterator for OptionsIter<'a> {
                         });
                     }
 
-                    let Some(end) = start.checked_add(total_len) else {
-                        return self.fail(ParseError::Overrun { offset: start });
-                    };
+                    let end = start + total_len;
                     if end > self.bytes.len() {
                         return self.fail(ParseError::Overrun { offset: start });
                     }
@@ -156,6 +152,13 @@ mod tests {
         assert_eq!(iter.next(), Some(Err(expected)));
         assert_eq!(iter.next(), None);
         assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn accepts_empty_input() {
+        let mut iter = OptionsIter::new(&[]);
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.max_nop_run(), 0);
     }
 
     #[test]
@@ -234,6 +237,29 @@ mod tests {
         let mut iter = OptionsIter::new(&bytes);
         while iter.next().is_some() {}
         assert_eq!(iter.max_nop_run(), 3);
+    }
+
+    #[test]
+    fn preserves_maximum_nop_run_after_error() {
+        let bytes = [kind::NOP, kind::NOP, kind::APC];
+        let mut iter = OptionsIter::new(&bytes);
+        assert_eq!(
+            iter.next(),
+            Some(Ok(OptionRef {
+                kind: OptionKind::Nop,
+                value: &[]
+            }))
+        );
+        assert_eq!(
+            iter.next(),
+            Some(Ok(OptionRef {
+                kind: OptionKind::Nop,
+                value: &[]
+            }))
+        );
+        assert_eq!(iter.next(), Some(Err(ParseError::Overrun { offset: 2 })));
+        assert_eq!(iter.next(), None);
+        assert_eq!(iter.max_nop_run(), 2);
     }
 
     #[test]

@@ -6,6 +6,11 @@ import Rfc9868.Kind
 A small, total model of the RFC 9868 option stream after the OCS field. This mirrors the Step 4 Rust
 iterator contract: EOL and NOP are single-byte options, all other Kinds use default or extended
 length framing, the first malformed frame yields one error, and parsing then stops.
+
+**Honesty note (no extraction):** these theorems are about this Lean model, not about the Rust code
+itself. The coupling to Rust is via mirrored constants, Rust unit tests, property tests, and the
+`options_tlv` fuzz target. The model operates over `List Nat`; byte-valued inputs are stated
+explicitly with `bytesInU8Range`.
 -/
 
 namespace Rfc9868
@@ -18,6 +23,9 @@ def firstExtendedOnlyLength : Nat := 255
 
 def be16 (hi lo : Nat) : Nat :=
   hi * 256 + lo
+
+def bytesInU8Range (bytes : List Nat) : Prop :=
+  ∀ byte ∈ bytes, byte < 256
 
 inductive TlvError where
   | invalidLength (kind len : Nat)
@@ -137,9 +145,34 @@ def parse (bytes : List Nat) : ParseTrace :=
 
 /-! ## Theorems over representative Step 4 cases -/
 
-/-- **The parser model is total**: every input has a parse trace. -/
-theorem parse_total (bytes : List Nat) : ∃ trace, parse bytes = trace := by
-  exact ⟨parse bytes, rfl⟩
+/-- **The byte-domain assumption is explicit for representative parser inputs.** -/
+theorem sample_bytes_in_u8_range :
+    bytesInU8Range [kindNop, kindApc, 2, kindEol] := by
+  intro byte h
+  simp [bytesInU8Range, kindNop, kindApc, kindEol] at h
+  omega
+
+/-- **Every bounded parser loop reduces to a stopped trace.** -/
+theorem parseLoop_stopped
+    (fuel : Nat)
+    (bytes : List Nat)
+    (pos currentNopRun maxNopRun : Nat) :
+    (parseLoop fuel bytes pos currentNopRun maxNopRun).stopped = true := by
+  induction fuel generalizing pos currentNopRun maxNopRun with
+  | zero =>
+      simp [parseLoop]
+  | succ fuel ih =>
+      simp [parseLoop]
+      split
+      · rfl
+      · rfl
+      · split
+        · rfl
+        · exact ih _ _ _
+
+/-- **The parser model is total in the Lean sense: every input reduces to a stopped trace.** -/
+theorem parse_stopped (bytes : List Nat) : (parse bytes).stopped = true := by
+  exact parseLoop_stopped (bytes.length + 1) bytes 0 0 0
 
 /-- **Empty option bytes are accepted as the end of the stream.** -/
 theorem parseOne_empty : parseOne [] 0 0 0 = ParseStep.done := by
@@ -175,9 +208,49 @@ theorem parseOne_extended_length_too_short :
       ParseStep.error (TlvError.invalidLength kindApc 254) := by
   simp [parseOne, kindEol, kindNop, kindApc, extendedLengthMarker, firstExtendedOnlyLength, be16]
 
-/-- **The first malformed option yields exactly one error item and stops.** -/
-theorem parse_error_stops_after_one :
+/-- **Any `parseOne` error yields exactly one error item and stops the loop.** -/
+theorem parseLoop_error_stops_after_one
+    (fuel : Nat)
+    (bytes : List Nat)
+    (pos currentNopRun maxNopRun : Nat)
+    (error : TlvError)
+    (h : parseOne bytes pos currentNopRun maxNopRun = ParseStep.error error) :
+    parseLoop (fuel + 1) bytes pos currentNopRun maxNopRun =
+      { items := [ParseItem.error error], pos := pos, maxNopRun := maxNopRun, stopped := true } := by
+  simp [parseLoop, h]
+
+/-- **The first malformed representative option yields exactly one error item and stops.** -/
+theorem parse_missing_length_error_stops_after_one :
     (parse [kindApc]).items = [ParseItem.error (TlvError.overrun 0)] := by
   simp [parse, parseLoop, parseOne, kindEol, kindNop, kindApc]
+
+/-- **Default TLVs are yielded in stream order and advance by their total Length.** -/
+theorem parse_default_options_in_stream_order :
+    (parse [kindApc, 2, kindMds, 4, 0, 0]).items =
+      [
+        ParseItem.option
+          { kind := kindApc, start := 0, headerLen := minDefaultTlvLength, valueLen := 0, nextPos := 2, isEol := false },
+        ParseItem.option
+          { kind := kindMds, start := 2, headerLen := minDefaultTlvLength, valueLen := 2, nextPos := 6, isEol := false }
+      ] := by
+  simp [parse, parseLoop, parseOne, kindEol, kindNop, kindApc, kindMds, extendedLengthMarker, minDefaultTlvLength]
+
+set_option maxRecDepth 10000
+
+/-- **Extended TLVs advance by the 16-bit total Extended Length.** -/
+theorem parse_extended_option_advances_by_total_length :
+    parseOne (kindApc :: extendedLengthMarker :: 0 :: 255 :: List.replicate 251 0) 0 0 0 =
+      ParseStep.option
+        {
+          kind := kindApc,
+          start := 0,
+          headerLen := extendedHeaderLength,
+          valueLen := 251,
+          nextPos := 255,
+          isEol := false
+        }
+        0
+        0 := by
+  rfl
 
 end Rfc9868

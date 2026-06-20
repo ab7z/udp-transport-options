@@ -9,9 +9,13 @@ ground the two research questions of the accompanying master's thesis:
   datagrams that carry it.
 
 Each functional requirement carries an RFC source section, a normative level (MUST/SHOULD/MAY), a scope flag, the
-ROADMAP step that implements it (see `docs/plan/ROADMAP.md`), and a status. The status vocabulary is the FF1 lens:
+ROADMAP step that implements it (see `docs/plan/ROADMAP.md`), and a status. The status vocabulary tracks both
+implementation progress and the FF1 userspace feasibility lens:
 
 - **Planned**: in scope, fully implementable in userspace, scheduled in a ROADMAP step.
+- **Implemented**: the covered in-scope requirement is complete in the steps listed in the row.
+- **Partially implemented**: the covered in-scope requirement is split across multiple ROADMAP steps; at least one listed
+  step is complete and the remaining behavior is still scheduled.
 - **Partial-in-userspace**: implementable, but with a caveat imposed by the userspace / raw-socket constraint
   (documented in the Notes and in the "Userspace / raw-socket limitations" section).
 - **Not-feasible-in-userspace**: cannot be met faithfully from userspace with raw sockets; explained in the same
@@ -66,7 +70,7 @@ The surplus area itself (RFC 9868 Sec. 8, 9, 10):
 | FR-06 | Classify any Kind byte into `OptionKind` (Eol/Nop/Apc/Frag/Mds/Mrds/Req/Res/Other) with correct SAFE/UNSAFE and must-support predicates. | Sec. 10 | MUST | in | 3 | Implemented | `options::kind::OptionKind`; `is_must_support` true for 0..7; UNSAFE for `kind >= model::kind::UNSAFE_MIN` (192). Exhaustive tests cover all 256 Kind byte values. |
 | FR-07 | Parse the TLV stream zero-copy via `OptionsIter`/`OptionRef`, in surplus order, without panicking on any input. | Sec. 10, 14 | MUST | in | 4 | Implemented | `options::parse::OptionsIter`. Borrowed view; property tests and `options_tlv` fuzz target exhaust arbitrary bytes. |
 | FR-08 | Treat EOL (Kind 0) and NOP (Kind 1) as single-byte options with no Length field. | Sec. 10, 11.1, 11.2 | MUST | in | 4 | Implemented | Parser yields EOL and NOP with empty `OptionRef.value`; EOL then terminates iteration and trailing bytes are not processed. |
-| FR-09 | Decode and encode the Extended Length form when `Length == 255` (16-bit network-order Extended Length). | Sec. 10 | MUST | in | 4,5 | Partial | Parser decodes strict Extended Length (`> 254`) in Step 4; serializer encoding remains Step 5. |
+| FR-09 | Decode and encode the Extended Length form when `Length == 255` (16-bit network-order Extended Length). | Sec. 10 | MUST | in | 4,5 | Partially implemented | Parser decodes strict Extended Length (`> 254`) in Step 4; serializer encoding remains Step 5. |
 | FR-10 | On an option Length below the minimum for its Kind, or pointing past the end of the surplus area (underrun/overrun), treat the surplus area as malformed and silently discard all options. | Sec. 10, 14 | MUST | in | 4 | Implemented | Parser returns exactly one `ParseError::InvalidLength` / `ParseError::Overrun` and then halts; Step 10 applies the payload-delivery disposition. |
 | FR-11 | Silently ignore unknown or malformed SAFE options (Kind in 0..191), matching legacy behavior. | Sec. 10, 19 | MUST | in | 4,10 | Planned | An unexpected length of a known SAFE Kind (within bounds, not below the Kind minimum) is malformed -> ignore that option only; sub-minimum/underrun/overrun lengths instead discard all options (FR-10); FRAG is the exception (FR-27). Unknown SAFE -> carried as `Other` or ignored. |
 | FR-12 | Do not treat merely unexpected Lengths of known options as fatal where the RFC forbids it (to allow future option revisions). | Sec. 10 | MUST | in | 4,7 | Planned | Distinguish "framing-invalid" (fatal to options) from "unrecognized length of a known Kind" (option-local, e.g. APC -> FR-21). |
