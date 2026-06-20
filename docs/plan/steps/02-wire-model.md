@@ -108,7 +108,7 @@ assumed.
   every claimed range), the `fuzz/` cargo-fuzz crate with the `wire_datagram` target (same oracle
   via `include!`) and five curated seeds, `tests/fuzz_regressions.rs` (`include_bytes!` replays plus
   hand-derived layout/checksum expectations), and the mandatory `scripts/pre-pr.sh` gate (host
-  fmt/clippy/test at 1024 proptest cases, achim cross verify, 60-second libFuzzer smoke). Mutation
+  fmt/clippy/test at 1024 proptest cases, Lean gate, achim cross verify, 60-second libFuzzer smoke). Mutation
   test: re-introducing the `starts_at` bug fails three properties (shrunk counterexamples persisted
   in `tests/properties_wire.proptest-regressions`) and crashes the fuzzer within a second on the
   `v4_hello_surplus_odd` seed.

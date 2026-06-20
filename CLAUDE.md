@@ -23,11 +23,12 @@ The library and binaries **compile** on any platform, but the raw-socket paths o
 
 **`scripts/pre-pr.sh` is mandatory before opening or updating any PR.** Its lanes, fail-fast in
 order: `cargo fmt --check`, host clippy (`-D warnings`), host `cargo test` with `PROPTEST_CASES`
-(default 1024), `scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy), and
-a time-boxed libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host.
-One-time prerequisites: `rustup toolchain install nightly` and `cargo install cargo-fuzz`. The
-achim ssh runner forwards no environment, so the cross-target property tests always run the
-proptest default of 256 cases.
+(default 1024), `scripts/lean-gate.sh` (Lean spec build + theorem axiom audit),
+`scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy), and a time-boxed
+libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host. One-time
+prerequisites: `rustup toolchain install nightly` and `cargo install cargo-fuzz`; the Lean lane uses
+the repo-pinned toolchain under `formal/lean-rfc9868/`. The achim ssh runner forwards no
+environment, so the cross-target property tests always run the proptest default of 256 cases.
 
 ## Scope
 
@@ -172,6 +173,14 @@ junior developer; keep them current:
 Every step: append a `journal.html` entry, promote any durable finding/caveat into the `journal.html`
 `#reference` section, and add any new term to `glossary.html`. Do not let a useful finding live only in
 a commit message or step file.
+
+These HTML files are personal preparation and learning artifacts for the user. Keep them ignored by
+Git and publish the local copies through the user's Netlify account. The Netlify build config
+intentionally copies only `journal.html` and `glossary.html` into the publish directory. After every
+edit to either file, redeploy the current HTML files to that Netlify site; if the Netlify
+CLI/auth/site link is unavailable, stop and report that deployment could not be verified.
+Use an explicit directory deploy: rebuild `netlify-public/` from exactly those two HTML files and run
+`netlify deploy --prod --no-build --dir netlify-public`. Do not deploy the repository root.
 
 ## Literature
 

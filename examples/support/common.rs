@@ -2,7 +2,7 @@
 //!
 //! `spike_client` (default netns) and `spike_server` (netns `spk`) both use the same deterministic
 //! case table. It is not library code and not a conformance test; its findings fold into the real
-//! Steps 8-9 (`src/socket/`), after which the whole spike can be deleted. See `scripts/spike.sh`
+//! Step 8 (`src/socket/`), after which the whole spike can be deleted. See `scripts/spike.sh`
 //! and `docs/plan/steps/00b-spike.md`.
 //!
 //! Three findings (confirmed on the wire) shape these cases:

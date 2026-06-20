@@ -51,6 +51,11 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+Formal verification artifacts live in `formal/lean-rfc9868/`. Run
+`scripts/lean-gate.sh` to build the Lean specification and audit theorem axioms.
+Lean covers pure RFC 9868 wire/spec invariants; raw-socket and middlebox behavior
+remain empirical and are checked by the Linux lanes.
+
 On a Linux host everything runs natively and self-contained: `cargo test`,
 `sudo cargo test -- --ignored` (root-gated raw-socket lane), and
 `scripts/spike.sh` need nothing beyond the pinned Rust toolchain and `iproute2`.

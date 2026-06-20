@@ -10,7 +10,7 @@ datagram whose `UDP Length` is smaller than the IP `Total Length` -- i.e. one ca
 path, and pin down what the raw-socket send/recv layer does at the boundaries.
 
 This is a **walking skeleton**, not a conformance step: arbitrary surplus bytes, no OCS, no TLV
-options, no FRAG, no IPv6, no library wiring. Its findings fold into the real Steps 8-9
+options, no FRAG, no IPv6, no library wiring. Its findings fold into the real Step 8
 (`src/socket/{send,recv}.rs`), after which the spike can be deleted. It also **prototypes the Step 17
 netns/veth harness**.
 
