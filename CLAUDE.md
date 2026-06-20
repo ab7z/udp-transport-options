@@ -23,21 +23,22 @@ The library and binaries **compile** on any platform, but the raw-socket paths o
 
 **`scripts/pre-pr.sh` is mandatory before opening or updating any PR.** Its lanes, fail-fast in
 order: `cargo fmt --check`, host clippy (`-D warnings`), host `cargo test` with `PROPTEST_CASES`
-(default 1024), `scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy), and
-a time-boxed libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host.
-One-time prerequisites: `rustup toolchain install nightly` and `cargo install cargo-fuzz`. The
-achim ssh runner forwards no environment, so the cross-target property tests always run the
-proptest default of 256 cases.
+(default 1024), `scripts/lean-gate.sh` (Lean spec build + theorem axiom audit),
+`scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy), and a time-boxed
+libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host. One-time
+prerequisites: `rustup toolchain install nightly` and `cargo install cargo-fuzz`; the Lean lane uses
+the repo-pinned toolchain under `formal/lean-rfc9868/`. The achim ssh runner forwards no
+environment, so the cross-target property tests always run the proptest default of 256 cases.
 
 ## Scope
 
 In scope: the TLV options framework; the Option Checksum (OCS, RFC 9868 Section 9); the must-support
 options EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES; a zero-copy parser and a serializer; FRAG
 fragmentation and reassembly (cache, timeout, garbage collection, DoS limits); the two-tier API;
-IPv4 and IPv6; unit tests and loopback integration tests; example sender/receiver peer CLIs.
+IPv4; unit tests and loopback integration tests; example sender/receiver peer CLIs.
 
-Out of scope: the TIME option; the reserved AUTH/UCMP/UENC options; the REQ/RES-for-PMTUD use case of
-RFC 9869 (DPLPMTUD); kernel modules; bidirectional/stateful protocols.
+Out of scope: IPv6; the TIME option; the reserved AUTH/UCMP/UENC options; the REQ/RES-for-PMTUD use
+case of RFC 9869 (DPLPMTUD); kernel modules; bidirectional/stateful protocols.
 
 ## Architecture (module map)
 
@@ -47,7 +48,7 @@ src/
   error.rs       ParseError, RecvError
   wire/
     checksum.rs  RFC 1071 one's-complement Internet checksum            [hand-rolled]
-    ip.rs        IpRepr { V4, V6 }: transport-payload length, pseudo-header seed; header parse/build
+    ip.rs        IpRepr (IPv4): transport-payload length, pseudo-header seed; header parse/build
     udp.rs       UdpHeader parse/build + UDP checksum
     surplus.rs   SurplusLayout + locate_surplus()
   options/
@@ -73,8 +74,9 @@ Design rules:
 
 - **Parse borrowed, decode owned.** Only `OptionRef`/`OptionsIter` carry a lifetime; typed options
   are fixed-length `Copy` PODs. The borrow never crosses the public API boundary.
-- **IP-version-generic from the wire layer.** `IpRepr` covers V4 and V6 so the surplus math, the UDP
-  pseudo-header, and FRAG keying are written once. Only the `AF_INET6` socket wiring is V6-specific.
+- **IPv4-only wire layer.** `IpRepr` covers IPv4 so the surplus math, the UDP pseudo-header, and FRAG
+  keying are written once. IPv6 was deliberately cut from scope (the mechanism is IP-version-neutral
+  and fully demonstrated on IPv4).
 - **Pure pipeline vs privileged I/O.** `recv/pipeline.rs` is a pure function over byte buffers
   (root-free, fully unit-testable); the socket modules are thin and root-gated.
 - **Strictly single-threaded and synchronous.** No threads, no async, no background tasks anywhere
@@ -93,14 +95,16 @@ Design rules:
   SAFE = 0..=191, UNSAFE = 192..=255.
 - **OCS** uses the RFC 1071 sum over the whole surplus area (with the OCS field treated as zero) plus
   the 16-bit surplus length; it must be the first content in the surplus area; the receiver checks
-  that the sum is zero. The UDP checksum covers only up to UDP Length (not the surplus area).
+  that the sum is the one's-complement zero (folded sum `0xFFFF`). A computed `0x0000` is sent as
+  `0xFFFF`; a zero OCS is legal only when the UDP checksum is also zero. The UDP checksum covers only
+  up to UDP Length (not the surplus area).
 - **FRAG** is used only with empty UDP user data (UDP Length == 8). Reassembly is keyed by
   (src IP, src port, dst IP, dst port, Identification); overlap aborts; timeout <= 2 min; per-pair
-  limits; default MRDS 2926 (IPv4) / 2886 (IPv6).
+  limits; default MRDS 2926 (IPv4).
 - **Receive order:** verify UDP checksum, locate/validate the surplus area, validate the OCS, parse
   the options, then reassemble (FRAG) or deliver. A malformed surplus area discards the options but
   still delivers the payload; unknown SAFE options are ignored; unknown UNSAFE options cause the
-  reassembled data to be dropped.
+  reassembled data to be dropped (a zero-length datagram is still delivered to the user).
 
 ## Coding conventions
 
@@ -125,7 +129,7 @@ Design rules:
 ## Platform
 
 Linux only at runtime. The raw-socket paths need `CAP_NET_RAW` (or root). There is no macOS path:
-macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`, `::1`) is used for integration tests; a
+macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`) is used for integration tests; a
 network-namespace/veth setup is used for the staged evaluation (see `docs/plan/steps/17-*`).
 
 On macOS, develop locally and **cross-compile** for `aarch64-unknown-linux-musl` (statically linked
@@ -142,6 +146,8 @@ toolchain. See the README "Cross-compiling and the achim Linux test host" sectio
 - Do not mention AI assistants or tools in commit messages.
 - Each step commits its code together with its `docs/plan/steps/NN-*.md` (Requirements/Plan/Tasks/DoD)
   and updates the status column in `docs/plan/ROADMAP.md`.
+- `scripts/lean-ide-setup.sh` is a local, untracked Lean editor helper. Do not stage or commit it
+  unless the human explicitly changes that policy.
 
 ## Review guidelines
 
@@ -169,6 +175,14 @@ junior developer; keep them current:
 Every step: append a `journal.html` entry, promote any durable finding/caveat into the `journal.html`
 `#reference` section, and add any new term to `glossary.html`. Do not let a useful finding live only in
 a commit message or step file.
+
+These HTML files are personal preparation and learning artifacts for the user. Keep them ignored by
+Git and publish the local copies through the user's Netlify account. The Netlify build config
+intentionally copies only `journal.html` and `glossary.html` into the publish directory. After every
+edit to either file, redeploy the current HTML files to that Netlify site; if the Netlify
+CLI/auth/site link is unavailable, stop and report that deployment could not be verified.
+Use an explicit directory deploy: rebuild `netlify-public/` from exactly those two HTML files and run
+`netlify deploy --prod --no-build --dir netlify-public`. Do not deploy the repository root.
 
 ## Literature
 

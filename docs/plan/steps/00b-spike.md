@@ -10,7 +10,7 @@ datagram whose `UDP Length` is smaller than the IP `Total Length` -- i.e. one ca
 path, and pin down what the raw-socket send/recv layer does at the boundaries.
 
 This is a **walking skeleton**, not a conformance step: arbitrary surplus bytes, no OCS, no TLV
-options, no FRAG, no IPv6, no library wiring. Its findings fold into the real Steps 8-9
+options, no FRAG, no IPv6, no library wiring. Its findings fold into the real Step 8
 (`src/socket/{send,recv}.rs`), after which the spike can be deleted. It also **prototypes the Step 17
 netns/veth harness**.
 
@@ -92,6 +92,12 @@ The hand-written table became a deterministic generator (`cases()` in `examples/
   delivered.** The raw-socket receive path bypasses UDP-level validation entirely (no
   checksum check, no length-consistency check), so the Step 10 receive pipeline must validate
   the UDP checksum and the UDP Length itself, exactly as RFC 9868's receive order prescribes.
+
+## Lean verification
+
+Not applicable: the spike's findings are empirical Linux raw-socket/kernel behaviors (Findings
+A-C), which lie outside what Lean can prove. They remain spike/integration evidence; the Lean
+track covers only the pure wire rules (see `LEAN_RFC9868_VALIDATION.md`).
 
 ## Tasks
 

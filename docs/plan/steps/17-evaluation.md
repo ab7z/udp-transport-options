@@ -17,6 +17,12 @@ Provide the reproducible evaluation harness for the thesis's staged network envi
   interfaces.
 - A short soll-ist (spec vs implementation) checklist supporting FF1.
 
+## Lean verification
+
+Not applicable: FF2 (surplus survival across real paths and middleboxes) is exactly the part Lean
+cannot prove and is empirical by design. One hook: the FF1 soll-ist checklist may cite the Lean
+theorems as the "soll" side where a requirement was formalized. See `LEAN_RFC9868_VALIDATION.md`.
+
 ## Plan
 
 1. Scripts: an `ip netns` plus veth setup, a tunnel-based coupling, and a helper to capture at the

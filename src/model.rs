@@ -56,8 +56,6 @@ pub mod limits {
 
     /// Default Maximum Reassembled Datagram Size for IPv4 when no MRDS option was received.
     pub const MRDS_DEFAULT_IPV4: u16 = 2926;
-    /// Default Maximum Reassembled Datagram Size for IPv6 when no MRDS option was received.
-    pub const MRDS_DEFAULT_IPV6: u16 = 2886;
     /// Minimum number of fragments an implementation must be able to reassemble.
     pub const MIN_REASSEMBLY_SEGMENTS: u8 = 2;
     /// Upper bound on the fragment-reassembly timeout.

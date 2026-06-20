@@ -29,7 +29,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: refs/pull/${{ github.event.pull_request.number }}/merge
           fetch-depth: 0
@@ -44,10 +44,48 @@ jobs:
       - name: Run ${{ matrix.check }}
         run: ${{ matrix.command }}
 
+  lean:
+    name: Lean verification
+    runs-on: ubuntu-latest
+    if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
+    needs: rust
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Cache elan and Lake build
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            ~/.elan
+            formal/lean-rfc9868/.lake
+          key: lean-${{ runner.os }}-${{ hashFiles('formal/lean-rfc9868/lean-toolchain') }}
+
+      - name: Install elan (pinned toolchain only)
+        env:
+          # Commit-pinned elan-init.sh (immutable URL), not the floating master branch.
+          ELAN_INIT_URL: https://raw.githubusercontent.com/leanprover/elan/b6cec7e10fe4965a605aaf60d1cb4a5837f0462b/elan-init.sh
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl -sSfL "$ELAN_INIT_URL" | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Build specs and audit axioms
+        run: scripts/lean-gate.sh
+
   agent-reviews:
     name: Request agent reviews
     runs-on: ubuntu-latest
     if: github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.ref != 'main'
+    needs: [rust, lean]
     permissions:
       pull-requests: write
     env:

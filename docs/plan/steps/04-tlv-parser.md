@@ -18,6 +18,20 @@ Parse the options in a surplus area as a zero-copy, total, panic-free iterator o
 - Count consecutive NOPs so the pipeline can apply the >7-NOP DoS policy (Step 10).
 - No panic on any input; no allocation.
 
+## Lean verification
+
+Spec first, then implement, then prove (see `LEAN_RFC9868_VALIDATION.md`).
+
+Spec (before implementation): the TLV grammar over the bytes after the OCS -- EOL terminates, NOP
+is one byte, every other Kind carries Length (with `255` selecting the extended 2-byte form); the
+minimum-length and bounds rules of RFC 9868 Sec. 10, with an option running past the surplus area
+being malformed per Erratum 8834 (all options discarded, payload still delivered -- the pipeline
+disposition, Step 10).
+
+Theorems (after implementation): the parser is total (defined for every input -- the Lean analogue
+of "never panics"); options are yielded in stream order; the first violation yields exactly one
+error and ends iteration; parsing the Step 5 serializer's output round-trips.
+
 ## Plan
 
 1. `OptionsIter::new(bytes_after_ocs)` tracking `pos`, a `done` flag, and a consecutive-NOP counter.

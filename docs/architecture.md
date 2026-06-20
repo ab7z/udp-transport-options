@@ -22,7 +22,7 @@ The companion thesis asks two research questions, and the architecture is shaped
 
 RFC 9868 carries transport options in the **surplus area**: the bytes between the end of the UDP
 payload (delimited by the UDP Length field) and the end of the IP transport payload (IPv4 Total
-Length minus the IHL, or IPv6 Payload Length minus any extension headers) (RFC 9868 Sec. 4, Sec. 7).
+Length minus the IHL x 4 header bytes) (RFC 9868 Sec. 4, Sec. 7).
 A normal operating-system UDP stack delivers only the UDP-length-bounded payload and never exposes
 the surplus area, so this crate reaches it with raw sockets on Linux.
 
@@ -32,7 +32,7 @@ the surplus area, so this crate reaches it with raw sockets on Linux.
  | IP header      | UDP header (8 B)   | UDP user data | surplus area         |
  +----------------+--------------------+---------------+----------------------+
                   |<------ UDP Length ---------------->|
- |<------------------------ IP payload (Total Length - IHL) ------------------>|
+ |<---------------------- IP payload (Total Length - IHL*4) ------------------>|
                                                        |<-- surplus area ----->|
                                                        (OCS, then UDP options)
 ```
@@ -55,8 +55,9 @@ Design goals, in priority order:
    serializer, and the OCS are hand-rolled rather than pulled from a crate, because they are the
    subject of the thesis. The crate deliberately avoids `nom`, `pnet`, `etherparse`, `smoltcp`,
    `bytes`, `nix`, and `zerocopy`.
-4. **IP-version genericity.** IPv4 and IPv6 share one wire layer; only the `AF_INET6` socket wiring
-   is version-specific.
+4. **A single IP version: IPv4.** IPv6 is deliberately removed from scope: the RFC 9868 mechanism is
+   IP-version-neutral and fully demonstrated on IPv4, while IPv6 raw-socket `IPV6_HDRINCL` semantics
+   differ and add platform fragility without protocol insight.
 5. **A safe boundary around `unsafe`.** All FFI lives in `src/socket/` behind safe wrappers; the
    crate sets `#![deny(unsafe_op_in_unsafe_fn)]`.
 
@@ -64,11 +65,11 @@ Design goals, in priority order:
 
 In scope: the TLV options framework (RFC 9868 Sec. 10); the OCS (RFC 9868 Sec. 9); the must-support
 options EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES; the zero-copy parser and the serializer; FRAG
-fragmentation and reassembly; the two-tier API; IPv4 and IPv6; unit and loopback integration tests;
+fragmentation and reassembly; the two-tier API; IPv4; unit and loopback integration tests;
 example peer CLIs.
 
 Out of scope: the TIME option; the reserved AUTH/UCMP/UENC options; the RFC 9869 (DPLPMTUD)
-REQ/RES-for-PMTUD use case; kernel modules; bidirectional or stateful protocols.
+REQ/RES-for-PMTUD use case; kernel modules; bidirectional or stateful protocols; IPv6.
 
 ### Layering
 
@@ -124,7 +125,7 @@ Single source of truth for the protocol constants and limits taken from RFC 9868
   (`APC = 6`, `FRAG_NON_TERMINAL = 10`, `FRAG_TERMINAL = 12`, `MDS = 4`, `MRDS = 5`, `REQ = 6`,
   `RES = 6`) plus `OCS = 2`.
 - `model::limits`: the reassembly defaults and the DoS knobs (`MRDS_DEFAULT_IPV4 = 2926`,
-  `MRDS_DEFAULT_IPV6 = 2886`, `MIN_REASSEMBLY_SEGMENTS = 2`, `REASSEMBLY_TIMEOUT_MAX = 120 s`,
+  `MIN_REASSEMBLY_SEGMENTS = 2`, `REASSEMBLY_TIMEOUT_MAX = 120 s`,
   `NOP_RUN_DOS_THRESHOLD = 7`).
 
 Inputs: none (compile-time constants). Outputs: constants consumed by every higher layer.
@@ -145,10 +146,10 @@ folded later). Root-free.
 
 ### `wire/ip` (pure)
 
-`IpRepr`, the IP-version-generic view of the header fields the UDP-options layer needs (addresses,
-the transport-payload length, and a pseudo-header seed for the UDP checksum), plus IPv4 and IPv6
-header parse/build. Writing the surplus math, the UDP pseudo-header, and the FRAG keying once for both
-families depends on this type. Inputs (parse): the leading bytes of an IP datagram. Outputs: an
+`IpRepr`, the view of the IPv4 header fields the UDP-options layer needs (addresses,
+the transport-payload length, and a pseudo-header seed for the UDP checksum), plus IPv4
+header parse/build. The surplus math, the UDP pseudo-header, and the FRAG keying are written
+against this type. Inputs (parse): the leading bytes of an IP datagram. Outputs: an
 `IpRepr` and the offset of the transport payload; or, on build, header bytes. Root-free.
 
 ### `wire/udp` (pure)
@@ -193,8 +194,10 @@ byte buffer (with a zero placeholder where the OCS goes). Root-free.
 
 OCS computation and validation (RFC 9868 Sec. 9). Computation is a two-pass back-patch: serialize the
 surplus area with the OCS field zero, run the RFC 1071 sum over the whole surplus area plus the 16-bit
-surplus length, then write the one's complement of the folded sum into the OCS field. Validation recomputes the sum over the same
-bytes (including the stored OCS) and requires the result to be zero. Built on `wire/checksum`. Input:
+surplus length, then write the one's complement of the folded sum into the OCS field (a would-be
+`0x0000` is written as its one's-complement equivalent `0xFFFF`, keeping a used OCS non-zero as
+Sec. 9 requires when the UDP checksum is non-zero). Validation recomputes the sum over the same
+bytes (including the stored OCS) and requires the result to be the one's-complement zero. Built on `wire/checksum`. Input:
 the surplus-area bytes (and length). Output: the OCS value, or a pass/fail verdict. Root-free.
 
 ### `options/typed` (pure)
@@ -223,7 +226,9 @@ Root-free.
 Reassembly on the receive side (RFC 9868 Sec. 11.4). `ReassemblyCache` keyed by `FragKey`, with
 offset-sorted insertion, overlap detection (overlap aborts), a timeout (<= 2 minutes), garbage
 collection, and per-pair plus global DoS limits. A completed datagram is returned for one re-feed
-into the pipeline (a reassembled datagram must not itself carry FRAG). Input: one fragment's
+into the pipeline; a FRAG reappearing there with non-empty reassembled data follows the RFC 9868
+Sec. 11.4 rule (all options ignored, data delivered), and a nested FRAG with empty data is rejected
+as a local anti-loop policy (the RFC does not define nested fragmentation). Input: one fragment's
 `FragKey`, `Frag` fields, and data. Output: a `ReassemblyOutcome` (`Incomplete`, `Complete(bytes)`,
 or `Abort(reason)`). Root-free.
 
@@ -257,8 +262,10 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 
 - **low-level:** set and read explicit options on individual datagrams.
 - **high-level:** a peer that sends and receives payloads with typed options, applying the OCS and
-  fragmentation/reassembly transparently (a send larger than MRDS auto-fragments; the receiver
-  reassembles transparently).
+  fragmentation/reassembly transparently. A send too large for a single datagram (the fragment size
+  derives from the path MTU, with MDS as a hint) auto-fragments; the reassembled size -- UDP header,
+  data, and per-datagram options -- must stay within the peer's MRDS (default 2926 when none
+  received), otherwise the send fails with an error; the receiver reassembles transparently.
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
 
@@ -298,7 +305,6 @@ pub mod length {
 pub mod limits {
     use std::time::Duration;
     pub const MRDS_DEFAULT_IPV4: u16 = 2926;
-    pub const MRDS_DEFAULT_IPV6: u16 = 2886;
     pub const MIN_REASSEMBLY_SEGMENTS: u8 = 2;
     pub const REASSEMBLY_TIMEOUT_MAX: Duration = Duration::from_secs(120);
     pub const NOP_RUN_DOS_THRESHOLD: usize = 7;
@@ -308,31 +314,26 @@ pub mod limits {
 ### `wire::ip::IpRepr`
 
 ```rust
-pub enum IpRepr {
-    V4 { src: Ipv4Addr, dst: Ipv4Addr, ihl: u8, total_len: u16 },
-    V6 { src: Ipv6Addr, dst: Ipv6Addr, payload_len: u16, ext_hdr_len: u16 },
+pub struct IpRepr {
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
+    pub ihl: u8,
+    pub total_len: u16,
 }
 
 impl IpRepr {
     // Parse the leading IP header; return the repr and the offset of the transport payload.
-    // IPv4 options are skipped (never decoded) and the header checksum is verified; IPv6
-    // Hop-by-Hop (only directly after the base header) and Destination Options are skipped by
-    // length, Routing/Fragment/AH/ESP and other chains are rejected.
+    // IPv4 options are skipped (never decoded) and the header checksum is verified.
     pub fn parse(bytes: &[u8]) -> Result<(IpRepr, usize), HeaderError>;
-    // Emit the header bytes (V4: 20 bytes incl. back-patched header checksum, requires ihl == 5;
-    // V6: 40 bytes, requires ext_hdr_len == 0 — building options/extension headers is out of scope).
+    // Emit the header bytes (20 bytes incl. back-patched header checksum, requires ihl == 5).
     pub fn write(&self, out: &mut [u8]);
-    // Offset of the transport payload from IP datagram start (ihl * 4, or 40 + ext_hdr_len).
+    // Offset of the transport payload from IP datagram start (ihl * 4).
     pub fn header_len(&self) -> usize;
-    // Length of the IP transport payload in bytes (Total Length - IHL, or Payload Length
-    // - ext_hdr_len).
+    // Length of the IP transport payload in bytes (Total Length - IHL*4).
     pub fn transport_payload_len(&self) -> usize;
     // Fold the UDP pseudo-header (addresses, protocol 17, UDP length) into a fresh RFC 1071
-    // accumulator, identically for V4 and V6; callers continue with header + data and finish().
+    // accumulator; callers continue with header + data and finish().
     pub fn pseudo_header_sum(&self, udp_len: u16) -> Checksum;
-    // The source / destination IpAddr, used to build a FragKey.
-    pub fn src_addr(&self) -> IpAddr;
-    pub fn dst_addr(&self) -> IpAddr;
 }
 ```
 
@@ -386,11 +387,19 @@ pub enum OptionKind {
 }
 
 impl OptionKind {
-    pub fn from_byte(b: u8) -> OptionKind;        // (planned)
-    pub fn to_byte(self) -> u8;                   // (planned)
-    pub fn is_safe(self) -> bool;                 // Kind <= 191 (planned)
-    pub fn is_must_support(self) -> bool;         // Kinds 0..=7 (planned)
-    pub fn is_single_byte(self) -> bool;          // Eol / Nop (planned)
+    pub const fn from_byte(b: u8) -> OptionKind;
+    pub const fn to_byte(self) -> u8;
+    pub const fn is_safe(self) -> bool;           // Kind <= 191
+    pub const fn is_unsafe(self) -> bool;         // Kind >= 192
+    pub const fn is_must_support(self) -> bool;   // Kinds 0..=7
+    pub const fn framing(self) -> OptionFraming;  // single-byte vs length-delimited
+    pub const fn is_single_byte(self) -> bool;    // Eol / Nop
+    pub const fn fixed_tlv_lengths(self) -> &'static [u8];
+}
+
+pub enum OptionFraming {
+    SingleByte,
+    LengthDelimited,
 }
 ```
 
@@ -467,8 +476,8 @@ Length is 10 for a non-terminal fragment (no RDOS) and 12 for the terminal fragm
 
 ```rust
 pub struct FragKey {
-    pub src: IpAddr,
-    pub dst: IpAddr,
+    pub src: Ipv4Addr,
+    pub dst: Ipv4Addr,
     pub src_port: u16,
     pub dst_port: u16,
     pub identification: u32, // FRAG Identification (RFC 9868 Sec. 11.4)
@@ -493,9 +502,8 @@ impl ReassemblyCache {
 }
 ```
 
-> The `src`/`dst` addresses in `FragKey` are full `IpAddr` values, so the same key type covers IPv4
-> and IPv6 without change. The reassembly key is (src IP, dst IP, src port, dst port, Identification)
-> (RFC 9868 Sec. 11.4).
+> The `src`/`dst` addresses in `FragKey` are `Ipv4Addr` values. The reassembly key is (src IP, dst
+> IP, src port, dst port, Identification) (RFC 9868 Sec. 11.4).
 
 ### `recv::pipeline::Delivery` and `process_datagram`
 
@@ -520,10 +528,10 @@ pub fn process_datagram(
 
 ```rust
 pub enum ParseError {
-    InvalidLength { kind: u8, len: usize }, // Length wrong for this Kind
+    InvalidLength { kind: u8, len: usize }, // Length below the Kind minimum (malformed surplus)
     Overrun { offset: usize },              // option claims to extend past the surplus area
     NonZeroPad,                             // the single odd-offset alignment pad byte was non-zero
-    OcsMismatch,                            // OCS did not validate to zero over the surplus area
+    OcsMismatch,                            // OCS sum did not fold to the one's-complement zero
 }
 
 pub enum HeaderError {                      // IP/UDP header invalidates the whole datagram (drop)
@@ -573,29 +581,23 @@ and the only owning step is the deliberate hand-off at the API edge.
    Frag/Apc/... (Copy, no lifetime)  |  RawOption { kind, value: Vec<u8> }  <- crosses the API
 ```
 
-### Rule 2: IP-version-generic wire layer
+### Rule 2: a single IP version (IPv4)
 
-`IpRepr { V4, V6 }` exposes exactly the fields the UDP-options layer needs (addresses, the
-transport-payload length, and a pseudo-header seed). Because of this, three pieces of logic are
-written once and shared by both address families:
+`IpRepr` exposes exactly the fields the UDP-options layer needs (addresses, the transport-payload
+length, and a pseudo-header seed). The surplus-area math (`locate_surplus`), the UDP pseudo-header
+(`IpRepr::pseudo_header_sum`), and the FRAG keying (`FragKey` stores `Ipv4Addr`) are all written
+against this one type.
 
-1. **surplus-area math** (`locate_surplus`): it works from the transport-payload length and the UDP
-   Length regardless of version (RFC 9868 Sec. 7).
-2. **the UDP pseudo-header** for the checksum: `IpRepr::pseudo_header_sum` folds the V4 or V6
-   pseudo-header into the same running RFC 1071 sum.
-3. **FRAG keying**: `FragKey` stores `IpAddr`, so one key type covers both families.
-
-Only the `AF_INET6` socket wiring (`IPV6_HDRINCL`, address structs) is version-specific, and it is
-confined to `socket/`. Rationale: the protocol logic is identical across versions; duplicating it
-would double the surface that must be verified against the RFC and tested. Centralizing it means
-Step 16 (IPv6) reuses the pipeline unchanged and only adds socket wiring.
+IPv6 is deliberately removed from scope: the RFC 9868 mechanism is IP-version-neutral and fully
+demonstrated on IPv4, while IPv6 raw-socket `IPV6_HDRINCL` semantics differ and add platform
+fragility without protocol insight.
 
 ### Rule 3: pure pipeline vs privileged I/O
 
 `recv::pipeline::process_datagram` is a pure function from bytes (plus a mutable
 `ReassemblyCache`) to a `Delivery`. It performs no system calls. The privileged surface is confined
 to `socket/send` and `socket/recv`, which are thin: they obtain raw-socket file descriptors, set the
-options (`IP_HDRINCL`, `IPV6_HDRINCL`), read or write bytes, and otherwise delegate to the pure
+options (`IP_HDRINCL`), read or write bytes, and otherwise delegate to the pure
 layers. All `unsafe` FFI lives in `socket/` behind safe wrappers; the crate denies
 `unsafe_op_in_unsafe_fn`.
 
@@ -630,7 +632,7 @@ the UDP checksum or the OCS for a raw send, so the crate computes both. With `IP
 builds the IP header itself, which is what lets UDP Length be smaller than IP Total Length.
 
 ```
- caller: addresses, ports, payload, typed options [, fragment if > MRDS]
+ caller: addresses, ports, payload, typed options [, fragment if > single-datagram capacity]
         |
         v
  (1) options::serialize::OptionsBuilder
@@ -651,7 +653,7 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         |   produces: UDP header bytes + checksum
         v
  (4) wire/ip  (build, via IpRepr)
-        - IP Total Length (v4) / Payload Length (v6) = headers + UDP Length + surplus-area length
+        - IP Total Length = IHL*4 + UDP Length + surplus-area length
         - assemble: IP header | UDP header | user data | [pad] | OCS | options
         |   produces: a full IP datagram on the stack
         v
@@ -663,19 +665,23 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
  datagram on the wire
 ```
 
-For a payload larger than the peer's MRDS, step (1) is preceded by `frag/split`, which produces one
-FRAG fragment per output datagram: each fragment has empty UDP user data (UDP Length 8) and carries
-its data in the surplus area after the FRAG option; non-terminal fragments use the 10-byte FRAG form
-and the terminal fragment the 12-byte form with the RDOS (RFC 9868 Sec. 11.4). Steps (2) through (5)
-then run per fragment.
+For a payload too large for a single datagram (the fragment size S derives from the path MTU, with
+MDS as a hint -- never from MRDS), step (1) is preceded by `frag/split`, which produces one FRAG
+fragment per output datagram: each fragment has empty UDP user data (UDP Length 8) and carries its
+data in the surplus area after all of the fragment's options; non-terminal fragments use the 10-byte
+FRAG form and the terminal fragment the 12-byte form with the RDOS (RFC 9868 Sec. 11.4). The
+reassembled size (UDP header + data + per-datagram options) is capped by the peer's MRDS (default
+2926 when none received); a payload over that cap is rejected, not fragmented. Steps (2)
+through (5) then run per fragment.
 
 ### 5.2 Receive walkthrough (ASCII state machine)
 
 `recv::pipeline::process_datagram` implements the RFC 9868 processing order: verify the UDP checksum,
 locate and validate the surplus area, validate the OCS, parse the options, then reassemble (FRAG) or
 deliver (RFC 9868 Sec. 14). A malformed surplus area discards the options but still delivers the
-payload; an unknown SAFE option is ignored; an unknown UNSAFE option causes the reassembled data to
-be dropped (RFC 9868 Sec. 10).
+payload; an unknown SAFE option is ignored; an unknown UNSAFE option causes the (reassembled) user
+data to be dropped, with a zero-length datagram still delivered to the user (RFC 9868 Sec. 10,
+Sec. 12, Sec. 14).
 
 ```
  socket/recv (privileged) -> raw IP datagram bytes
@@ -696,7 +702,7 @@ be dropped (RFC 9868 Sec. 10).
  +-------------------------------------------------------------------------------+
  | (C) wire/surplus::locate_surplus                                              |
  +-------------------------------------------------------------------------------+
-        | no surplus area OR surplus < 2 bytes (no room for OCS)
+        | no surplus area OR too small for the aligned OCS (2 bytes, or 3 with the odd-start pad)
         |        -------------------------------> Delivery::Payload { data, options: [] }
         | needs_pad and the pad byte != 0 -> ParseError::NonZeroPad
         |        -------------------------------> Delivery::Payload { data, options: [] }
@@ -705,7 +711,8 @@ be dropped (RFC 9868 Sec. 10).
  | (D) OCS gate (the RFC 9868 Sec. 14 matrix over OCS value x UDP-checksum value) |
  |       OCS == 0: "unused", valid ONLY if the UDP checksum was also zero         |
  |       OCS != 0: validate via options::ocs (RFC 1071 sum over the whole surplus |
- |                 area incl. the stored OCS + the 16-bit surplus length == 0)    |
+ |                 area incl. the stored OCS + the 16-bit surplus length folds to |
+ |                 the one's-complement zero, 0xFFFF)                             |
  +-------------------------------------------------------------------------------+
         | (OCS == 0 and UDP cksum != 0) -> options ignored (legacy emulation)
         |        -------------------------------> Delivery::Payload { data, options: [] }
@@ -715,15 +722,21 @@ be dropped (RFC 9868 Sec. 10).
  +-------------------------------------------------------------------------------+
  | (E) options::parse (OptionsIter): walk the TLVs after the OCS                  |
  +-------------------------------------------------------------------------------+
-        | any InvalidLength / Overrun -> halt
+        | Length under the Kind minimum, option underrun, or surplus overrun -> halt
         |        -------------------------------> Delivery::Payload { data, options: [] }
+        | other unexpected length of a known SAFE option -> ignore that option only
+        |        (Sec. 10; exception: a malformed FRAG counts as unsupported UNSAFE)
         | unknown SAFE option   -> ignore it, keep going
-        | unknown UNSAFE option -> drop the user data (Sec. 12; with FRAG via G, without FRAG directly)
+        | unknown UNSAFE option -> flag it; resolved after (F): the FRAG-with-non-empty-data
+        |        rule takes precedence (options ignored, data delivered); otherwise drop the
+        |        user data, deliver a zero-length datagram (Sec. 11.4, 12, 14; with FRAG via G)
         v parsed options
  +-------------------------------------------------------------------------------+
  | (F) FRAG present?                                                              |
  +-------------------------------------------------------------------------------+
         | no  -> Delivery::Payload { data, options: parsed }
+        | yes but UDP Length != 8 (user data non-empty) -> ignore ALL options
+        |        -------------------------------> Delivery::Payload { data, options: [] } (Sec. 11.4)
         | yes (UDP Length == 8, data in surplus) -> go to (G)
         v
  +-------------------------------------------------------------------------------+
@@ -732,28 +745,32 @@ be dropped (RFC 9868 Sec. 10).
  +-------------------------------------------------------------------------------+
         | Incomplete                 -> Delivery::Buffered
         | Abort(Overlap|LimitExceeded|Timeout) -> drop partial -> Delivery::Buffered
-        | unknown-UNSAFE seen in (E) -> drop the reassembled datagram -> Delivery::Buffered
+        | unknown-UNSAFE seen in (E) -> drop the reassembled user data
+        |        -> Delivery::Payload { data: [], options: [] } (zero-length delivery, Sec. 12, 14)
         | Complete(bytes)            -> re-feed ONCE into process_datagram
-        |                               (reassembled datagram MUST NOT carry FRAG)
         v
- second pass over the reassembled datagram lands at (F) with no FRAG ->
-        Delivery::Payload { data, options }
+ second pass over the reassembled datagram: no FRAG lands at (F) -> Delivery::Payload
+        { data, options }; a FRAG with non-empty data hits the (F) non-empty branch (options
+        ignored, data delivered, Sec. 11.4); a nested FRAG with empty data is rejected -- local
+        anti-loop policy, never a second re-feed (the RFC does not define nested fragmentation)
 ```
 
 Disposition summary:
 
 | Condition                                  | Payload      | Options    | Outcome                          |
 |--------------------------------------------|--------------|------------|----------------------------------|
-| UDP Length out of range                    | dropped      | -          | datagram dropped (RFC Sec. 14)   |
+| UDP Length out of range                    | dropped      | -          | datagram dropped (RFC Sec. 10)   |
 | UDP checksum present and wrong             | dropped      | -          | datagram dropped                 |
-| No surplus area, or surplus < 2 bytes      | delivered    | none       | `Payload { options: [] }`        |
+| No surplus area, or too small for pad+OCS  | delivered    | none       | `Payload { options: [] }`        |
 | Odd-offset pad byte non-zero               | delivered    | discarded  | `Payload { options: [] }`        |
 | OCS == 0 but UDP checksum non-zero         | delivered    | discarded  | `Payload { options: [] }`        |
 | OCS != 0 and validation fails              | delivered    | discarded  | `Payload { options: [] }`        |
-| Malformed TLV (length/overrun)             | delivered    | discarded  | `Payload { options: [] }`        |
+| Malformed TLV (sub-minimum/under/overrun)  | delivered    | discarded  | `Payload { options: [] }`        |
+| Unexpected length, known SAFE option       | delivered    | rest kept  | that option ignored (Sec. 10)    |
+| FRAG present, user data non-empty          | delivered    | discarded  | `Payload { options: [] }` (Sec. 11.4) |
 | Unknown SAFE option                        | delivered    | rest kept  | option ignored                   |
-| Unknown UNSAFE option (no FRAG)            | dropped      | discarded  | user data silently dropped (Sec. 12) |
-| Unknown UNSAFE option (with FRAG)          | -            | -          | reassembled datagram dropped     |
+| Unknown UNSAFE option (no FRAG)            | zero-length  | discarded  | user data dropped; zero-length delivery (Sec. 12, 14) |
+| Unknown UNSAFE option (with FRAG)          | zero-length  | discarded  | reassembled data dropped; zero-length delivery |
 | FRAG, more fragments needed                | -            | -          | `Buffered`                       |
 | FRAG, overlap / cap / timeout              | -            | -          | partial discarded, `Buffered`    |
 | FRAG complete                              | delivered*   | parsed*    | re-fed once, then `Payload`      |
@@ -797,7 +814,6 @@ never complete), so the limits are gathered in one place and enforced in `frag/r
 | Knob                            | Value         | Purpose                                              |
 |---------------------------------|---------------|-----------------------------------------------------|
 | `MRDS_DEFAULT_IPV4`             | 2926 bytes    | reassembled-size cap when no MRDS option was seen    |
-| `MRDS_DEFAULT_IPV6`             | 2886 bytes    | reassembled-size cap (IPv6) when no MRDS was seen    |
 | `MIN_REASSEMBLY_SEGMENTS`       | 2             | the minimum fragment count an implementation supports|
 | `REASSEMBLY_TIMEOUT_MAX`        | 120 s         | upper bound on how long a partial may live           |
 | `NOP_RUN_DOS_THRESHOLD`         | 7             | a run of NOPs beyond this is logged as a possible DoS |
@@ -817,7 +833,7 @@ the reference implementation and feeds FF1).
 
 - **`socket2`** (raw-socket construction and options): a thin, well-tested wrapper over
   `socket`/`setsockopt`. The protocol is the contribution, not the socket boilerplate.
-- **`libc`** (`IP_HDRINCL`/`IPV6_HDRINCL`, `AF_INET6`, FFI constants): platform constants and calls
+- **`libc`** (`IP_HDRINCL`, FFI constants): platform constants and calls
   that `socket2` does not expose; confined to `socket/`.
 - **`thiserror`** (deriving `Display`/`Error` on the two enums): removes boilerplate; it does not
   touch any protocol logic.
@@ -838,7 +854,7 @@ Hand-rolled on purpose (no crate):
   extended-length form, the canonical ordering, the NOP alignment, and the EOL/zero-fill are the core
   mechanism of RFC 9868 Sec. 10.
 - **The OCS** (`options/ocs`): the two-pass back-patch, the "OCS field zero during computation," the
-  inclusion of the 16-bit surplus length, and the receiver's "sum must be zero" check are the
+  inclusion of the 16-bit surplus length, and the receiver's one's-complement-zero check are the
   RFC 9868 Sec. 9 contribution.
 
 Explicitly avoided: `nom`, `pnet`, `etherparse`, `smoltcp`, `bytes`, `nix`, and `zerocopy`. Pulling in

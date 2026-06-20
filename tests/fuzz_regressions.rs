@@ -18,20 +18,14 @@ use udp_transport_options::wire::udp::{self, UdpHeader};
 
 const SEEDS: &[(&str, &[u8])] = &[
     ("v4_hello", include_bytes!("data/v4_hello.bin")),
-    ("v6_hello", include_bytes!("data/v6_hello.bin")),
     (
         "v4_hello_surplus_even",
         include_bytes!("data/v4_hello_surplus_even.bin"),
     ),
     ("v4_hello_surplus_odd", include_bytes!("data/v4_hello_surplus_odd.bin")),
-    ("v6_exthdr_surplus", include_bytes!("data/v6_exthdr_surplus.bin")),
     (
         "shrunk_v4_min_odd_surplus",
         include_bytes!("data/shrunk_v4_min_odd_surplus.bin"),
-    ),
-    (
-        "shrunk_v6_odd_surplus",
-        include_bytes!("data/shrunk_v6_odd_surplus.bin"),
     ),
     (
         "shrunk_v4_long_odd_surplus",
@@ -64,9 +58,8 @@ fn seed_layouts_match_hand_derived_offsets() {
         let (ip, header) = parse(seed(name));
         locate_surplus(&ip, &header)
     };
-    // The plain hello datagrams carry no surplus at all.
+    // The plain hello datagram carries no surplus at all.
     assert_eq!(layout("v4_hello"), None);
-    assert_eq!(layout("v6_hello"), None);
     // Header 20 + UDP Length 12: even start, no pad.
     assert_eq!(
         layout("v4_hello_surplus_even"),
@@ -85,25 +78,12 @@ fn seed_layouts_match_hand_derived_offsets() {
             len: 5
         })
     );
-    // Base header 40 + Hop-by-Hop 8 + UDP Length 13: odd start at 61.
-    assert_eq!(
-        layout("v6_exthdr_surplus"),
-        Some(SurplusLayout {
-            starts_at: 61,
-            needs_pad: true,
-            len: 4
-        })
-    );
 }
 
 #[test]
 fn seed_udp_checksums_match_independent_computation() {
     // Expected values computed with an independent (Python) RFC 1071 implementation.
-    for (name, expected) in [
-        ("v4_hello", 0x9f5c),
-        ("v6_hello", 0x301f),
-        ("v4_hello_surplus_even", 0x0e5f),
-    ] {
+    for (name, expected) in [("v4_hello", 0x9f5c), ("v4_hello_surplus_even", 0x0e5f)] {
         let bytes = seed(name);
         let (ip, header) = parse(bytes);
         let user_at = ip.header_len() + udp::HEADER_LEN;

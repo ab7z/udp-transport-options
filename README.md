@@ -3,8 +3,9 @@
 A userspace Rust reference implementation of
 [RFC 9868: Transport Options for UDP](https://www.rfc-editor.org/rfc/rfc9868.txt).
 
-RFC 9868 stores UDP transport options in the surplus area: bytes after the UDP
-Length field but before the end of the IP transport payload. This crate is
+RFC 9868 stores UDP transport options in the surplus area: bytes after the end
+of the UDP user data (the extent indicated by the UDP Length field) but before
+the end of the IP transport payload. This crate is
 intended to implement that mechanism in userspace, with raw sockets used only
 for the Linux send/receive boundary.
 
@@ -32,11 +33,11 @@ Planned in scope:
 - Option Checksum (OCS)
 - must-support options: EOL, NOP, APC, FRAG, MDS, MRDS, REQ, RES
 - FRAG fragmentation and reassembly
-- IPv4 and IPv6 support
+- IPv4 support
 - low-level and high-level APIs
 - example sender/receiver CLIs
 
-Out of scope: kernel modules, TIME, AUTH/UCMP/UENC, and RFC 9869 DPLPMTUD.
+Out of scope: IPv6, kernel modules, TIME, AUTH/UCMP/UENC, and RFC 9869 DPLPMTUD.
 
 ## Build
 
@@ -49,6 +50,11 @@ cargo test
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
+
+Formal verification artifacts live in `formal/lean-rfc9868/`. Run
+`scripts/lean-gate.sh` to build the Lean specification and audit theorem axioms.
+Lean covers pure RFC 9868 wire/spec invariants; raw-socket and middlebox behavior
+remain empirical and are checked by the Linux lanes.
 
 On a Linux host everything runs natively and self-contained: `cargo test`,
 `sudo cargo test -- --ignored` (root-gated raw-socket lane), and

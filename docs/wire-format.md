@@ -22,8 +22,8 @@ UDP datagram (RFC 9868 Sec. 7). It is computed from the IP payload length and th
 surplus_area = ip_transport_payload_length - udp_length
 ```
 
-where `ip_transport_payload_length` is the IP total length minus the IP header and any extension
-headers, and `udp_length` is the UDP `Length` field. The surplus area begins at the byte immediately
+where `ip_transport_payload_length` is the IP total length minus the IP header (IHL x 4), and
+`udp_length` is the UDP `Length` field. The surplus area begins at the byte immediately
 following the UDP user data (as delimited by `udp_length`) and runs to the end of the IP payload
 (RFC 9868 Sec. 7):
 
@@ -31,8 +31,8 @@ following the UDP user data (as delimited by `udp_length`) and runs to the end o
 +------------+------------+---------------------+-----------------------+
 | IP Header  | UDP Header | UDP user data       | Surplus area          |
 +------------+------------+---------------------+-----------------------+
-|<-------- UDP Length -------------------------->|
-|<-------- IP transport payload length ------------------------------->|
+             |<---------- UDP Length ---------->|
+             |<-------------- IP transport payload length --------------->|
 ```
 
 The surplus area is present only when `surplus_area > 0`; when `udp_length` equals the IP transport
@@ -42,13 +42,16 @@ surplus-area start offset (the pad byte, when required, is the area's first byte
 byte is required, and the total surplus length; the 2-byte-aligned OCS field sits at
 `starts_at + needs_pad`.
 
-The IP-version-generic inputs come from `wire::ip::IpRepr`: for IPv4 the transport payload length is
-`total_len` minus the IHL, and for IPv6 it is `payload_len` minus `ext_hdr_len`. The UDP boundary is
+The inputs come from `wire::ip::IpRepr`: the transport payload length is `total_len` minus the IP
+header length in bytes (IHL x 4). The UDP boundary is
 `wire::udp::UdpHeader::length`.
 
-UDP Options are not reliable: middleboxes may strip or drop the surplus area, so an endpoint MUST NOT
-depend on options arriving and MUST still operate correctly when the surplus area is removed in
-transit (RFC 9868 Sec. 9). Options are interpreted only after the surplus area passes the OCS check
+UDP Options are not reliable: middleboxes may strip or drop the surplus area, and a sender cannot
+know in advance whether the receiver supports options at all (RFC 9868 Sec. 18, Sec. 19, Sec. 25.6).
+The design therefore degrades to legacy behavior by default: SAFE options that do not arrive are
+simply absent and the UDP user data is still delivered. The one exception is a receiver explicitly
+configured to require a given option, which silently drops datagrams missing it (RFC 9868 Sec. 14,
+Sec. 15). Options are interpreted only after the surplus area passes the OCS gate of Section 3
 (RFC 9868 Sec. 8, Sec. 9).
 
 ## 2. OCS Placement and Alignment
@@ -57,8 +60,9 @@ The Options Checksum (OCS) is positional, not a TLV option: it occupies a fixed 
 any required pre-OCS alignment pad and carries no `Kind` or `Length` octet (`model::length::OCS` =
 2). The OCS MUST be aligned to the first 2-byte boundary of the area relative to the start of the IP
 datagram (RFC 9868 Sec. 8). The surplus area is interpreted as UDP options only when there is enough
-space for the optional pad byte and OCS, all pre-OCS pad bytes are zero, and the OCS validates;
-otherwise the entire surplus area is ignored as though no options were present (RFC 9868 Sec. 8).
+space for the optional pad byte and OCS, all pre-OCS pad bytes are zero, and the OCS gate of
+Section 3 passes; otherwise the entire surplus area is ignored as though no options were present
+(RFC 9868 Sec. 8, Sec. 9).
 
 When the surplus area would otherwise begin at an odd offset relative to the start of the IP
 datagram, a single pad byte is inserted before the OCS so that the OCS itself starts on an even
@@ -94,11 +98,21 @@ OCS = !sum
 This is the contract of `options::ocs`, which is built on the RFC 1071 primitive in `wire::checksum`
 (the same primitive backs the UDP checksum, so it is hand-rolled rather than pulled from a crate).
 Computation is a two-pass back-patch over the surplus area: the OCS field is reserved as zero, the
-rest is serialized, then the field is patched in. Validation re-runs the one's-complement sum over
-the whole surplus area; on a valid datagram the result is zero.
+rest is serialized, then the field is patched in. A computed value of `0x0000` is transmitted as its
+one's-complement equivalent `0xFFFF`, exactly as for the UDP checksum, so a used OCS is never zero.
+Validation re-runs the one's-complement sum over the whole surplus area (including the stored OCS
+and the 16-bit surplus length); on a valid datagram the result is the one's-complement zero (a
+folded sum of `0xFFFF`; equivalently, its complement is `0`).
 
-If the computed OCS does not validate, the entire surplus area MUST be ignored and the datagram
-processed as though no options were present (RFC 9868 Sec. 8). The pad byte (Section 2), when
+The OCS is optional in exactly one case: when the UDP checksum is zero, the OCS MAY be unused, which
+is indicated by a zero OCS value, and a zero OCS is then assumed correct without running any sum.
+The OCS MUST be non-zero whenever the UDP checksum is non-zero, and implementations MUST default to
+using a non-zero OCS (RFC 9868 Sec. 9). A zero OCS paired with a non-zero UDP checksum is handled by
+the RFC 9868 Sec. 14 receive disposition (legacy emulation: deliver the payload, ignore all
+options); see the disposition table in `docs/requirements.md` (FR-36).
+
+If the OCS is in use and does not validate, the entire surplus area MUST be ignored and the datagram
+processed as though no options were present (RFC 9868 Sec. 9). The pad byte (Section 2), when
 present, is part of the surplus area and so is covered by this sum.
 
 ## 4. TLV Option Framing
@@ -120,7 +134,8 @@ Each option after the OCS uses TLV (type, length, value) syntax (RFC 9868 Sec. 8
 The parser in `options::parse` yields borrowed `OptionRef { kind, value }` views over the surplus
 bytes (value excludes framing); the owned counterpart is `options::RawOption { kind, value }`. The
 serializer in `options::serialize` emits options in canonical order (must-support first), pads with
-NOP for alignment, terminates with EOL, and reserves the OCS as the first option for back-patching.
+NOP for alignment, terminates with EOL, and reserves the OCS slot (a bare two-byte field, Section 2)
+as the first content of the surplus area for back-patching.
 
 ### 4.1 Extended Length
 
@@ -149,7 +164,9 @@ The `Kind` octet is partitioned into two ranges (RFC 9868 Sec. 10), with the bou
 - SAFE, `Kind` 0..=191: an option a receiver may safely skip when it does not recognize it. Skipping
   it does not change the meaning of the UDP user data.
 - UNSAFE, `Kind` 192..=255: an option that MUST NOT be silently skipped. An unrecognized UNSAFE
-  option forces the receiver to drop the surplus area or drop the datagram.
+  option forces the receiver to terminate option processing, drop all options, and drop the
+  (reassembled) UDP user data; a zero-length datagram is still delivered to the user (RFC 9868
+  Sec. 10, Sec. 12, Sec. 14).
 
 Within the SAFE range, `Kind` 0..=7 are the must-support options every conforming implementation is
 required to support (RFC 9868 Sec. 10):
@@ -167,9 +184,10 @@ required to support (RFC 9868 Sec. 10):
 
 Any other codepoint, assigned or not, is carried verbatim as `OptionKind::Other(u8)`. A well-formed
 but unrecognized option is preserved as a `RawOption` so it can be inspected or re-emitted; SAFE
-`Other` options may be skipped, UNSAFE `Other` options force a drop (RFC 9868 Sec. 10).
+`Other` options may be skipped, UNSAFE `Other` options force the user-data drop described above
+(RFC 9868 Sec. 10).
 
-## 6. Application Payload Checksum (APC)
+## 6. Additional Payload Checksum (APC)
 
 `Kind` 2 (`model::kind::APC` -> `OptionKind::Apc`), `Length` 6 (`model::length::APC`). APC carries a
 CRC32c computed over the UDP user data (the bytes covered by the UDP Length field, excluding the UDP
@@ -190,9 +208,19 @@ checksum (RFC 9868 Sec. 11.3). The typed value is `options::typed::Apc { crc32c 
 to be split across multiple IP packets at the UDP Options layer (RFC 9868 Sec. 11.4). A non-terminal
 fragment uses `Length` 10 (`model::length::FRAG_NON_TERMINAL`); the terminal fragment uses `Length`
 12 (`model::length::FRAG_TERMINAL`), the extra two bytes holding the RDOS (Reassembled Datagram
-Options Size) trailer. The option contains a 16-bit Frag. Start, a 32-bit Identification, and a
+Option Start) pointer. The option contains a 16-bit Frag. Start, a 32-bit Identification, and a
 16-bit Frag. Offset; the terminal fragment additionally carries the 16-bit RDOS (RFC 9868 Sec.
-11.4).
+11.4). The field semantics (all offsets in bytes):
+
+- `Frag. Start`: where this fragment's data begins, measured from the beginning of this fragment's
+  UDP header (the data follows the remainder of the fragment's UDP options and runs to the end of
+  the IP datagram).
+- `Frag. Offset`: where this fragment's data belongs within the original (pre-fragmentation) UDP
+  datagram, measured from the start of the original datagram's UDP header.
+- `RDOS` (terminal only): a pointer, measured from the start of the original UDP datagram's header,
+  to the end of the reassembled data and thus the start of the per-datagram surplus area (the
+  options that apply to the reassembled datagram) within the original datagram. It is an offset,
+  not a size.
 
 Non-terminal FRAG (`Length` 10):
 
@@ -218,7 +246,9 @@ is `Option<u16>`: `None` on a non-terminal fragment, `Some(_)` on the terminal f
 fragments of one datagram share the same 32-bit `identification`; on the receive side a reassembler
 groups them by `frag::reassembly::FragKey { src, dst, src_port, dst_port, identification }` (the UDP
 5-tuple plus the FRAG Identification). The send side (`frag::split`) carries each fragment with empty
-UDP user data (UDP Length 8) and places the data in the surplus area after the FRAG option.
+UDP user data (UDP Length 8) and places the fragment data in the surplus area after all of the
+fragment's options (the data follows the remainder of the UDP options, as located by `Frag. Start`,
+and runs to the end of the IP datagram).
 
 ## 8. Maximum Datagram Size (MDS)
 
@@ -248,10 +278,12 @@ reassembly: a 16-bit size followed by a one-byte maximum-segment count (RFC 9868
    off 0    off 1   off 2 .. off 3    off 4
 ```
 
-Fields map to `options::typed::Mrds { max_reassembled_size, max_segments }`. When no MRDS option is
-received, the default reassembly limits are 2926 bytes over IPv4 (`model::limits::MRDS_DEFAULT_IPV4`)
-and 2886 bytes over IPv6 (`model::limits::MRDS_DEFAULT_IPV6`). A conforming implementation must be
-able to reassemble at least two fragments (`model::limits::MIN_REASSEMBLY_SEGMENTS` = 2).
+Fields map to `options::typed::Mrds { max_reassembled_size, max_segments }`. The advertised size
+counts the whole reassembled datagram including the UDP header and any per-datagram options
+(RFC 9868 Sec. 11.6). When no MRDS option has been received, a sender MUST assume an MRDS size of
+2926 bytes over IPv4 (`model::limits::MRDS_DEFAULT_IPV4`) with 2 segments; a receiver MUST support
+at least these values (`model::limits::MIN_REASSEMBLY_SEGMENTS` = 2) (the RFC additionally defines
+2886 for IPv6, out of scope here) (RFC 9868 Sec. 11.6).
 
 ## 10. Echo Request and Echo Response (REQ / RES)
 
@@ -284,7 +316,8 @@ Putting the pieces together, the surplus area is laid out as:
   odd; it MUST be zero and is covered by the OCS (RFC 9868 Sec. 8).
 - The OCS is computed over the whole surplus area (pad byte included) with the OCS field taken as
   zero, plus `surplus_len` added as a 16-bit one's-complement addend, stored as the one's-complement
-  of the sum (RFC 9868 Sec. 9).
+  of the sum (a computed `0x0000` is sent as `0xFFFF`); a zero OCS is legal only when the UDP
+  checksum is also zero (RFC 9868 Sec. 9).
 - Each TLV option's `Length` counts its own `Kind` and `Length` octets; a `Length` of 255 selects
   the 16-bit Extended Length, and EOL ends processing so any trailing bytes are ignored (RFC 9868
   Sec. 10).

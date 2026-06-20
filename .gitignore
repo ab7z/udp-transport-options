@@ -1,6 +1,7 @@
 /target
 /.idea
 /.zed
+/.netlify/
 
 # cargo-fuzz working state; curated seeds live in fuzz/seeds/ and stay tracked.
 /fuzz/target
@@ -12,4 +13,5 @@
 !requirements.md
 
 *.html
+/netlify-public/
 .env

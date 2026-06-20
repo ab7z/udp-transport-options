@@ -4,15 +4,15 @@
 //! a timeout, garbage collection, and per-socket-pair and global DoS limits. A completed datagram is
 //! re-fed into the receive pipeline once (a reassembled datagram must not itself carry FRAG).
 
-use std::net::IpAddr;
+use std::net::Ipv4Addr;
 
 /// The reassembly key: the UDP 5-tuple plus the FRAG Identification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FragKey {
     /// Source IP address.
-    pub src: IpAddr,
+    pub src: Ipv4Addr,
     /// Destination IP address.
-    pub dst: IpAddr,
+    pub dst: Ipv4Addr,
     /// Source port.
     pub src_port: u16,
     /// Destination port.

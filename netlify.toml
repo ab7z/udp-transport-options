@@ -1,0 +1,9 @@
+[build]
+command = "rm -rf netlify-public && mkdir -p netlify-public && cp journal.html glossary.html netlify-public/"
+publish = "netlify-public"
+
+[[headers]]
+for = "/*"
+
+[headers.values]
+X-Robots-Tag = "noindex, nofollow, noarchive"

@@ -91,7 +91,7 @@ impl UdpHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::ip::{V4_HELLO_DATAGRAM, V6_HELLO_DATAGRAM};
+    use crate::wire::ip::V4_HELLO_DATAGRAM;
 
     fn hello_header() -> UdpHeader {
         UdpHeader {
@@ -123,15 +123,6 @@ mod tests {
     }
 
     #[test]
-    fn checksum_matches_known_good_v6_datagram() {
-        let (ip, offset) = IpRepr::parse(&V6_HELLO_DATAGRAM).unwrap();
-        let header = UdpHeader::parse(&V6_HELLO_DATAGRAM[offset..]).unwrap();
-        let checksum = header.compute_checksum(&ip, &V6_HELLO_DATAGRAM[offset + HEADER_LEN..]);
-        assert_eq!(checksum, 0x301f);
-        assert_eq!(checksum, header.checksum);
-    }
-
-    #[test]
     fn checksum_covers_user_data_only() {
         // The same datagram with four trailing surplus bytes: the user data slice (bounded by UDP
         // Length) is unchanged, so the checksum must not change either (FR-03).
@@ -140,7 +131,7 @@ mod tests {
         with_surplus[2..4].copy_from_slice(&37u16.to_be_bytes());
 
         let header = hello_header();
-        let ip = IpRepr::V4 {
+        let ip = IpRepr {
             src: "192.0.2.1".parse().unwrap(),
             dst: "198.51.100.2".parse().unwrap(),
             ihl: 5,
@@ -160,7 +151,7 @@ mod tests {
             length: 10,
             checksum: 0,
         };
-        let ip = IpRepr::V4 {
+        let ip = IpRepr {
             src: "192.0.2.1".parse().unwrap(),
             dst: "198.51.100.2".parse().unwrap(),
             ihl: 5,

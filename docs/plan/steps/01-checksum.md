@@ -16,6 +16,22 @@ OCS.
 - The "complement" result, such that summing the data together with the stored complement yields zero.
 - Pure, allocation-free, no `unsafe`. Located in `src/wire/checksum.rs`.
 
+## Lean verification
+
+Retrofit done: `formal/lean-rfc9868/Rfc9868/Checksum.lean` (all theorems proven, gated by
+`scripts/lean-gate.sh`). The workflow for all later steps: extend the Lean spec in
+`formal/lean-rfc9868/` first, then implement, then prove (`lake build` green, no `sorry`); see
+`LEAN_RFC9868_VALIDATION.md`.
+
+Spec: the 16-bit one's-complement sum with end-around carry; a trailing odd byte is the high byte
+of a final word.
+
+Theorems: `finish` is the complement of the folded sum; data plus the stored complement folds to
+`0xffff` (also with the `0x0000 -> 0xFFFF` normalization); incremental accumulation equals the
+one-shot sum — word-level unconditionally, byte-level for word-aligned region splits, which is
+the documented `add_slice` contract itself (RFC 1071 Section 2(A)); a trailing odd byte is the
+high byte of a final word.
+
 ## Plan
 
 1. Define a `Checksum` accumulator over a running `u32`: `add_slice(&[u8])` folds 16-bit big-endian

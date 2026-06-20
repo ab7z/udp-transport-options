@@ -2,6 +2,9 @@
 
 Status: done
 
+Addendum 2026-06: the IPv6 parts built here were later removed in a deliberate scope cut (IPv6
+dropped from project scope).
+
 ## Goal
 
 Provide the IP-version-generic header representation, IPv4/IPv6 and UDP header parse/build, the UDP
@@ -16,6 +19,26 @@ pseudo-header checksum, and the surplus-area location computation.
 - `locate_surplus(ip, transport_payload) -> Option<SurplusLayout>`: even start offset, the odd-start
   pad flag, and the surplus length. Surplus = transport payload length minus UDP Length.
 - IP-version-agnostic where possible; only the address family differs.
+
+## Lean verification
+
+Retrofit done: `formal/lean-rfc9868/Rfc9868/Wire.lean` (IPv4-only, matching the scope cut; all
+theorems proven, gated by `scripts/lean-gate.sh`). See `LEAN_RFC9868_VALIDATION.md`.
+
+Spec: `IpRepr` (IPv4) with `header_len = ihl * 4` and `transport_payload_len = total_len - ihl * 4`;
+the pseudo-header sum covers addresses, protocol 17, and UDP Length only (never the surplus);
+`UdpHeader` parses only buffers of at least 8 bytes and rejects UDP Length < 8; a computed-zero UDP
+checksum is sent as `0xFFFF`.
+
+Theorems (mirroring the proptest oracles in `tests/common/mod.rs`): when `locate_surplus` returns
+`Some(layout)`: `starts_at = header_len + udp.length`, `needs_pad` iff `starts_at` is odd,
+`ocs_at = starts_at + pad` and is even, the OCS lies fully inside the area, the area ends exactly
+at the IP datagram end (under the parse invariant `IpReprS.Wf`), and `len >= pad + 2`; `None`
+exactly when `udp.length` exceeds the transport payload or the area cannot hold the aligned OCS.
+The checksum-ignores-surplus property is payload-level (any surplus bytes past the UDP Length
+leave the checksum unchanged), the `compute_checksum` length precondition is the `covers`
+predicate, and the 16-bit field/word bounds derive from byte-level inputs rather than being
+assumed.
 
 ## Plan
 
@@ -85,7 +108,7 @@ pseudo-header checksum, and the surplus-area location computation.
   every claimed range), the `fuzz/` cargo-fuzz crate with the `wire_datagram` target (same oracle
   via `include!`) and five curated seeds, `tests/fuzz_regressions.rs` (`include_bytes!` replays plus
   hand-derived layout/checksum expectations), and the mandatory `scripts/pre-pr.sh` gate (host
-  fmt/clippy/test at 1024 proptest cases, achim cross verify, 60-second libFuzzer smoke). Mutation
+  fmt/clippy/test at 1024 proptest cases, Lean gate, achim cross verify, 60-second libFuzzer smoke). Mutation
   test: re-introducing the `starts_at` bug fails three properties (shrunk counterexamples persisted
   in `tests/properties_wire.proptest-regressions`) and crashes the fuzzer within a second on the
   `v4_hello_surplus_odd` seed.

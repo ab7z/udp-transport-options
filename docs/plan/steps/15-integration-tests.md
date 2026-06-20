@@ -14,6 +14,12 @@ Exercise the full send/receive path over loopback in an automated, privilege-gat
   default `cargo test` stays runnable unprivileged.
 - A documented privileged lane (`scripts/vm-ubuntu-server.sh ignored` or `setcap`).
 
+## Lean verification
+
+Not applicable: tests are oracles and regressions, not verification targets. The loopback suite is
+the empirical complement to the Lean track -- it checks the system path that Lean deliberately
+excludes (sockets, kernel, privileges). See `LEAN_RFC9868_VALIDATION.md`.
+
 ## Plan
 
 1. Add a `tests/` harness with a privilege preflight that skips (does not fail) without

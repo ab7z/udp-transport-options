@@ -26,6 +26,12 @@ focused, reviewable commit on top.
   (`rust-lld`, `.cargo/config.toml`) and only executed on the `achim` SSH host; test binaries travel
   through the cargo runner `scripts/achim-runner.sh`, the lanes through `scripts/vm-ubuntu-server.sh`.
 
+## Lean verification
+
+Not applicable: this step is scaffolding only and adds no RFC-visible behavior to formalize. The
+Lean track itself (a `formal/lean-rfc9868/` Lake project with a repo-pinned `lean-toolchain`) is
+bootstrapped in Step 3; see `LEAN_RFC9868_VALIDATION.md`.
+
 ## Plan
 
 1. Remove `src/main.rs`.

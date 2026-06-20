@@ -49,7 +49,7 @@ pub enum HeaderError {
         have: usize,
     },
 
-    /// The IP version nibble is neither 4 nor 6.
+    /// The IP version nibble is not 4.
     #[error("unsupported IP version {0}")]
     UnsupportedVersion(u8),
 
@@ -57,7 +57,7 @@ pub enum HeaderError {
     #[error("IPv4 IHL {0} is below the minimum of 5")]
     BadIhl(u8),
 
-    /// The IPv4 Total Length or IPv6 Payload Length is inconsistent with the header or the buffer.
+    /// The IPv4 Total Length is inconsistent with the header or the buffer.
     #[error("IP length field {length} is inconsistent with the header or buffer")]
     BadIpLength {
         /// The rejected length-field value.
@@ -68,8 +68,7 @@ pub enum HeaderError {
     #[error("IPv4 header checksum mismatch")]
     IpChecksumMismatch,
 
-    /// The transport protocol / final Next Header is not UDP (17), or an unsupported IPv6
-    /// extension header was encountered.
+    /// The transport protocol is not UDP (17).
     #[error("transport protocol {0} is not UDP")]
     UnexpectedProtocol(u8),
 
