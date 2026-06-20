@@ -1,6 +1,6 @@
 # Step 4: Zero-copy TLV parser
 
-Status: pending
+Status: done
 
 ## Goal
 
@@ -45,10 +45,10 @@ error and ends iteration; parsing the Step 5 serializer's output round-trips.
 
 ## Tasks
 
-- [ ] Implement the iterator with framing + bounds validation.
-- [ ] Extended-length handling.
-- [ ] NOP-run counting surfaced to the caller.
-- [ ] Tests: valid mixed options; truncated; overrun; bad extended length; random inputs do not panic.
+- [x] Implement the iterator with framing + bounds validation.
+- [x] Extended-length handling.
+- [x] NOP-run counting surfaced to the caller.
+- [x] Tests: valid mixed options; truncated; overrun; bad extended length; random inputs do not panic.
 
 ## Definition of Done
 
