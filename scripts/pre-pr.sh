@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 PROPTEST_CASES="${PROPTEST_CASES:-1024}"
 FUZZ_SECONDS="${PRE_PR_FUZZ_SECONDS:-60}"
 # Extend in lockstep with every new parsing surface (TLV parser, OCS, pipeline, FRAG).
-FUZZ_TARGETS=(wire_datagram)
+FUZZ_TARGETS=(wire_datagram options_tlv)
 
 command -v cargo-fuzz >/dev/null || {
     echo "pre-pr: cargo-fuzz is missing — run: cargo install cargo-fuzz" >&2

@@ -1,6 +1,6 @@
 # Step 4: Zero-copy TLV parser
 
-Status: pending
+Status: done
 
 ## Goal
 
@@ -15,6 +15,8 @@ Parse the options in a surplus area as a zero-copy, total, panic-free iterator o
   handled.
 - Strict bounds and length validation: a truncated header, an option that overruns the surplus, or a
   malformed extended length yields exactly one `Err` and then stops.
+- No option-specific APC/FRAG/MDS/MRDS/REQ/RES length validation in this step; fixed-length typed
+  decoding remains Step 7, and receive disposition remains Step 10.
 - Count consecutive NOPs so the pipeline can apply the >7-NOP DoS policy (Step 10).
 - No panic on any input; no allocation.
 
@@ -28,9 +30,12 @@ minimum-length and bounds rules of RFC 9868 Sec. 10, with an option running past
 being malformed per Erratum 8834 (all options discarded, payload still delivered -- the pipeline
 disposition, Step 10).
 
-Theorems (after implementation): the parser is total (defined for every input -- the Lean analogue
-of "never panics"); options are yielded in stream order; the first violation yields exactly one
-error and ends iteration; parsing the Step 5 serializer's output round-trips.
+Theorems (after implementation): the Lean parser model reduces every input to a stopped trace (the
+Lean analogue of "never panics"); representative default TLVs are yielded in stream order; any
+`parseOne` framing error yields exactly one error and ends the loop; EOL terminates the stream; NOP
+advances the NOP run; strict Extended Length rejects values below 255 and advances valid extended
+TLVs by the 16-bit total length. Serializer round-trip proof belongs to Step 5, where the serializer
+is introduced.
 
 ## Plan
 
@@ -45,10 +50,10 @@ error and ends iteration; parsing the Step 5 serializer's output round-trips.
 
 ## Tasks
 
-- [ ] Implement the iterator with framing + bounds validation.
-- [ ] Extended-length handling.
-- [ ] NOP-run counting surfaced to the caller.
-- [ ] Tests: valid mixed options; truncated; overrun; bad extended length; random inputs do not panic.
+- [x] Implement the iterator with framing + bounds validation.
+- [x] Extended-length handling.
+- [x] NOP-run counting surfaced to the caller.
+- [x] Tests: valid mixed options; truncated; overrun; bad extended length; random inputs do not panic.
 
 ## Definition of Done
 

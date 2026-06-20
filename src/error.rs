@@ -8,7 +8,10 @@ use thiserror::Error;
 /// still delivering the UDP user data; these variants identify *why* the options were rejected.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ParseError {
-    /// An option's Length field is invalid for its Kind (too short, or not the fixed size).
+    /// An option's Length field is invalid at the current validation layer.
+    ///
+    /// The TLV parser uses this for framing-invalid lengths; later typed decoders can use the
+    /// same variant for fixed-size option validation.
     #[error("invalid length {len} for option kind {kind:#04x}")]
     InvalidLength {
         /// The option Kind byte.
