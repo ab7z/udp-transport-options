@@ -1,6 +1,6 @@
 # Step 6: OCS compute + validate
 
-Status: pending
+Status: done
 
 ## Goal
 
@@ -45,16 +45,17 @@ forced `0x0000 -> 0xFFFF` value still validates; validation is equivalent to the
    UDP checksum == 0, assumed correct).
 3. Enforce the odd-start pad byte is zero on both write and read (`ParseError::NonZeroPad`).
 4. Encode the disposition: OCS == 0 with a non-zero UDP checksum means the options are ignored.
-5. Wire validation in as the gate before `OptionsIter` runs.
+5. Expose the OCS validation disposition that Step 10 will use as the gate before `OptionsIter`
+   runs; the receive pipeline itself remains deferred to Step 10.
 6. Tests: a serialized surplus validates (one's-complement zero); any byte flip fails; the forced
    `0x0000 -> 0xFFFF` case; seed the cksum/OCS matrix.
 
 ## Tasks
 
-- [ ] OCS compute (back-patch) and validate.
-- [ ] Odd-pad zero enforcement.
-- [ ] Wire the validation into the parse gate.
-- [ ] Tests: validates (one's-complement zero); any byte flip fails; forced `0x0000 -> 0xFFFF`; the
+- [x] OCS compute (back-patch) and validate.
+- [x] Odd-pad zero enforcement.
+- [x] Expose the validation disposition for the Step 10 parse gate.
+- [x] Tests: validates (one's-complement zero); any byte flip fails; forced `0x0000 -> 0xFFFF`; the
       OCS==0/UDP-cksum disposition.
 
 ## Definition of Done
