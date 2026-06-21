@@ -27,6 +27,11 @@ def kindMds : Nat := 4
 def kindMrds : Nat := 5
 def kindReq : Nat := 6
 def kindRes : Nat := 7
+def kindTime : Nat := 8
+def kindAuth : Nat := 9
+def kindExp : Nat := 127
+def kindSafeReservedMin : Nat := 128
+def kindSafeReservedMax : Nat := 191
 def unsafeMin : Nat := 192
 def extendedLengthMarker : Nat := 255
 

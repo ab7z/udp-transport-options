@@ -36,6 +36,73 @@ pub enum ParseError {
     OcsMismatch,
 }
 
+/// Errors produced while serializing UDP options into a canonical surplus-area body.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SerializeError {
+    /// EOL and NOP are reserved for builder-owned termination and alignment.
+    #[error("option kind {kind:#04x} is reserved for the serializer")]
+    ReservedKind {
+        /// The rejected option Kind byte.
+        kind: u8,
+    },
+
+    /// Step 5 only emits SAFE options; UNSAFE options require the later FRAG/reassembly scope.
+    #[error("unsafe option kind {kind:#04x} cannot be serialized at this layer")]
+    UnsafeKind {
+        /// The rejected option Kind byte.
+        kind: u8,
+    },
+
+    /// The Kind is known or reserved by RFC 9868 but not implemented by this send-side builder.
+    #[error("assigned or reserved safe option kind {kind:#04x} cannot be serialized at this layer")]
+    UnsupportedAssignedKind {
+        /// The rejected option Kind byte.
+        kind: u8,
+    },
+
+    /// FRAG can appear at most once in one options area.
+    #[error("FRAG option cannot be serialized more than once")]
+    DuplicateFrag,
+
+    /// The value cannot be represented in the 16-bit Extended Length format.
+    #[error("value for option kind {kind:#04x} is too long: {value_len} bytes, max {max} bytes")]
+    ValueTooLong {
+        /// The option Kind byte.
+        kind: u8,
+        /// The rejected value length.
+        value_len: usize,
+        /// The largest encodable value length.
+        max: usize,
+    },
+
+    /// A known fixed-size option was supplied with a value length that cannot be emitted validly.
+    #[error("invalid value length {value_len} for fixed-size option kind {kind:#04x}")]
+    InvalidFixedValueLength {
+        /// The option Kind byte.
+        kind: u8,
+        /// The rejected value length.
+        value_len: usize,
+    },
+
+    /// The serialized OCS-led body would exceed the even 16-bit length limit.
+    #[error("serialized options body is too long: {len} bytes, max {max} bytes")]
+    BodyTooLong {
+        /// The rejected body length.
+        len: usize,
+        /// The largest body length this serializer emits.
+        max: usize,
+    },
+
+    /// The final FRAG data start offset cannot be represented in the 16-bit FRAG field.
+    #[error("fragment data start {start} exceeds the 16-bit FRAG field max {max}")]
+    FragmentStartTooLarge {
+        /// The computed offset from the start of the UDP header.
+        start: usize,
+        /// The largest representable FRAG start offset.
+        max: usize,
+    },
+}
+
 /// Errors that invalidate the whole IP datagram.
 ///
 /// Unlike [`ParseError`], which rejects the options while the UDP user data is still delivered, a

@@ -22,6 +22,16 @@ pub mod kind {
     pub const REQ: u8 = 6;
     /// Echo Response.
     pub const RES: u8 = 7;
+    /// Timestamp (out of scope for this implementation).
+    pub const TIME: u8 = 8;
+    /// Authentication (reserved, out of scope for this implementation).
+    pub const AUTH: u8 = 9;
+    /// RFC3692-style experiments (out of scope for this implementation).
+    pub const EXP: u8 = 127;
+    /// First reserved SAFE Kind after EXP.
+    pub const SAFE_RESERVED_MIN: u8 = 128;
+    /// Last reserved SAFE Kind before the UNSAFE range.
+    pub const SAFE_RESERVED_MAX: u8 = 191;
 
     /// Lowest Kind value in the UNSAFE range. Kinds `0..=191` are SAFE, `192..=255` are UNSAFE.
     pub const UNSAFE_MIN: u8 = 192;
@@ -48,6 +58,8 @@ pub mod length {
     pub const RES: u8 = 6;
     /// The OCS occupies a fixed 2-byte checksum at the start of the surplus area.
     pub const OCS: u8 = 2;
+    /// UDP header length, used by FRAG pointers that are relative to the UDP header start.
+    pub const UDP_HEADER: u8 = 8;
 }
 
 /// Reassembly defaults and DoS limits (RFC 9868, Section on FRAG and Security Considerations).

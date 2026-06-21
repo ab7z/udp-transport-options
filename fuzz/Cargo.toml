@@ -25,5 +25,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "options_serialize"
+path = "fuzz_targets/options_serialize.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone workspace root: keeps the nightly-only fuzz build out of the parent crate.
 [workspace]

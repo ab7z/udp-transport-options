@@ -2,12 +2,21 @@
 /.idea
 /.zed
 /.netlify/
+/.claude/
 
 # cargo-fuzz working state; curated seeds live in fuzz/seeds/ and stay tracked.
 /fuzz/target
 /fuzz/corpus
 /fuzz/artifacts
 /fuzz/coverage
+
+# Lean IDE helper state from scripts/lean-ide-setup.sh.
+/lean-toolchain
+/lakefile.toml
+/lake-manifest.json
+/Rfc9868.lean
+/Rfc9868
+/.lake/
 
 !CLAUDE.md
 !requirements.md
