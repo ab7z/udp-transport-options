@@ -185,10 +185,18 @@ borrowing those bytes, or one `ParseError`. Root-free.
 
 ### `options/serialize` (pure, hand-rolled)
 
-`OptionsBuilder`: emits options in canonical order (must-support first), pads with NOP for alignment,
-terminates with EOL, and zero-fills to a 2-byte boundary. It reserves the OCS as the first content of
-the surplus area for the OCS pass to back-patch. Input: the options to emit. Output: the surplus-area
-byte buffer (with a zero placeholder where the OCS goes). Root-free.
+`OptionsBuilder`: emits the OCS-led options body with a zeroed two-byte OCS placeholder, canonical
+TLV options (FRAG first when present, then other must-support options, then other SAFE options), NOP
+only before a real TLV that needs 2-byte alignment, EOL, and zero-fill to an even body length. The
+RFC requires must-support options before other SAFE options; FRAG-first ordering inside that group
+and even-length zero-fill are the builder's local canonical form. Known fixed-size options are
+validated against their RFC value lengths before emission, so the sender does not manufacture a
+malformed FRAG/APC/MDS/MRDS/REQ/RES TLV from raw input; FRAG is limited to one occurrence and its
+Frag. Start field is patched from the final body length. Raw `Other` output is limited to the
+unassigned SAFE range `10..=126`; assigned/reserved out-of-scope SAFE Kinds (TIME, AUTH, EXP, and
+128..=191) are not generated. The optional pre-OCS pad byte for odd surplus starts is emitted by the
+wire/send layer. Input: owned `RawOption`s. Output: the OCS-led body with the placeholder at
+`body[0..2]`. Root-free.
 
 ### `options/ocs` (pure, hand-rolled)
 
@@ -431,7 +439,7 @@ pub struct RawOption {
     pub value: Vec<u8>, // owned value bytes, no framing; empty for EOL/NOP
 }
 
-impl<'a> From<OptionRef<'a>> for RawOption { /* copies value into a Vec */ } // (planned)
+impl<'a> From<OptionRef<'a>> for RawOption { /* copies value into a Vec */ }
 ```
 
 ### `options::typed::TypedOption` and the typed structs
@@ -636,9 +644,9 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         |
         v
  (1) options::serialize::OptionsBuilder
-        - emit options must-support-first, NOP-align, EOL-terminate, zero-fill to 2-byte boundary
-        - reserve the OCS as the first two bytes of the surplus area (placeholder 0x0000)
-        |   produces: surplus-area bytes with OCS = 0
+        - emit the OCS-led body: OCS placeholder, canonical TLVs, EOL, even zero-fill
+        - reserve the OCS as body[0..2] (placeholder 0x0000); odd-start pad is added by wire/send
+        |   produces: options body with OCS = 0
         v
  (2) options::ocs  (back-patch)
         - RFC 1071 sum over the whole surplus area (OCS field zero) + the 16-bit surplus length

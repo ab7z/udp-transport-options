@@ -141,6 +141,7 @@ toolchain. See the README "Cross-compiling and the achim Linux test host" sectio
 
 ## Git workflow
 
+- Before starting each step, create and switch to a dedicated step branch from `main`.
 - One reviewed commit per step on `main`; the human reviews the diff between steps.
 - Commit messages in English: imperative subject <= 50 chars, body wrapped at 72.
 - Do not mention AI assistants or tools in commit messages.

@@ -5,10 +5,11 @@
 //! area, which RFC 9868 bounds by the UDP Length field (RFC 9868 Section 17).
 
 use crate::error::HeaderError;
+use crate::model::length;
 use crate::wire::ip::IpRepr;
 
 /// The fixed length of the UDP header in bytes (RFC 768).
-pub const HEADER_LEN: usize = 8;
+pub const HEADER_LEN: usize = length::UDP_HEADER as usize;
 
 /// The eight-byte UDP header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
