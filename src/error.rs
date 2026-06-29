@@ -11,7 +11,10 @@ pub enum ParseError {
     /// An option's Length field is invalid at the current validation layer.
     ///
     /// The TLV parser uses this for framing-invalid lengths; later typed decoders can use the
-    /// same variant for fixed-size option validation.
+    /// same variant for fixed-size option validation. When typed decoders report this after the
+    /// parser has stripped framing, `len` is the implied default TLV length (`value_len + 2`);
+    /// callers that need the exact wire Length for extended-framed options should report it at the
+    /// framing layer.
     #[error("invalid length {len} for option kind {kind:#04x}")]
     InvalidLength {
         /// The option Kind byte.

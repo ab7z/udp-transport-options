@@ -39,5 +39,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "options_typed"
+path = "fuzz_targets/options_typed.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone workspace root: keeps the nightly-only fuzz build out of the parent crate.
 [workspace]
