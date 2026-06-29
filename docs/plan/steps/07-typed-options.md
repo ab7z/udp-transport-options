@@ -1,6 +1,6 @@
 # Step 7: Typed must-support options
 
-Status: pending
+Status: implemented
 
 ## Goal
 
@@ -35,11 +35,12 @@ trusted primitive validated by external test vectors, not a Lean model.
 
 ## Tasks
 
-- [ ] Implement `TypedOption` for `Apc`, `Mds`, `Mrds`, `Req`, `Res` (and `Frag` value layout).
-- [ ] APC CRC32C with a cross-check vector.
-- [ ] Tests: encode->parse->decode round-trips; wrong length -> `ParseError`.
+- [x] Implement `TypedOption` for `Apc`, `Mds`, `Mrds`, `Req`, `Res` (and `Frag` value layout).
+- [x] APC CRC32C with a cross-check vector.
+- [x] Tests: encode->parse->decode round-trips; FRAG terminal flag by length; wrong length ->
+      `ParseError`.
 
 ## Definition of Done
 
 - Each typed option round-trips encode->parse->decode; APC matches the `crc32c` crate and a known
-  vector; an incorrect value length yields `ParseError`.
+  vector; FRAG length selects the terminal flag; an incorrect value length yields `ParseError`.
