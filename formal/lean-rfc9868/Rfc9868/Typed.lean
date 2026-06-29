@@ -33,11 +33,29 @@ def be32At (value : List Nat) (offset : Nat) : Nat :=
     byteAt value (offset + 2) * 256 +
     byteAt value (offset + 3)
 
-def u16Bytes (value : Nat) : List Nat :=
-  [value / 256, value % 256]
+def u8Byte (value : Nat) : Option Nat :=
+  if value < 256 then
+    some value
+  else
+    none
 
-def u32Bytes (value : Nat) : List Nat :=
-  [value / 16777216, (value / 65536) % 256, (value / 256) % 256, value % 256]
+def u16Bytes (value : Nat) : Option (List Nat) :=
+  if value < 65536 then
+    some [value / 256, value % 256]
+  else
+    none
+
+def u32Bytes (value : Nat) : Option (List Nat) :=
+  if value < 4294967296 then
+    some [value / 16777216, (value / 65536) % 256, (value / 256) % 256, value % 256]
+  else
+    none
+
+def byteFitsU8 (value : Nat) : Bool :=
+  decide (value < 256)
+
+def bytesFitU8 (bytes : List Nat) : Bool :=
+  bytes.all byteFitsU8
 
 inductive TypedError where
   | invalidLength (kind len : Nat)
@@ -124,46 +142,69 @@ def decodeFrag (value : List Nat) : Except TypedError FragS :=
   else
     Except.error (invalidTypedLength kindFrag value)
 
-def encodeApcValue (option : ApcS) : List Nat :=
+def tokenBytes (token : List Nat) : Option (List Nat) :=
+  if decide (token.length = valueLenOfTotal lenReq) && bytesFitU8 token then
+    some token
+  else
+    none
+
+def encodeApcValue (option : ApcS) : Option (List Nat) :=
   u32Bytes option.crc32c
 
-def encodeMdsValue (option : MdsS) : List Nat :=
+def encodeMdsValue (option : MdsS) : Option (List Nat) :=
   u16Bytes option.maxDatagramSize
 
-def encodeMrdsValue (option : MrdsS) : List Nat :=
-  u16Bytes option.maxReassembledSize ++ [option.maxSegments]
+def encodeMrdsValue (option : MrdsS) : Option (List Nat) :=
+  match u16Bytes option.maxReassembledSize, u8Byte option.maxSegments with
+  | some maxReassembledSize, some maxSegments => some (maxReassembledSize ++ [maxSegments])
+  | _, _ => none
 
-def encodeReqValue (option : ReqS) : List Nat :=
-  option.token
+def encodeReqValue (option : ReqS) : Option (List Nat) :=
+  tokenBytes option.token
 
-def encodeResValue (option : ResS) : List Nat :=
-  option.token
+def encodeResValue (option : ResS) : Option (List Nat) :=
+  tokenBytes option.token
 
-def encodeFragValue (option : FragS) : List Nat :=
-  u16Bytes option.fragStart ++
-    u32Bytes option.identification ++
-    u16Bytes option.fragOffset ++
-    match option.rdos with
-    | none => []
-    | some rdos => u16Bytes rdos
+def encodeFragValue (option : FragS) : Option (List Nat) :=
+  match u16Bytes option.fragStart, u32Bytes option.identification, u16Bytes option.fragOffset with
+  | some fragStart, some identification, some fragOffset =>
+      match option.rdos with
+      | none => some (fragStart ++ identification ++ fragOffset)
+      | some rdos =>
+          match u16Bytes rdos with
+          | some rdosBytes => some (fragStart ++ identification ++ fragOffset ++ rdosBytes)
+          | none => none
+  | _, _, _ => none
 
-def encodeApc (option : ApcS) : List Nat :=
-  [kindApc, lenApc] ++ encodeApcValue option
+def encodeApc (option : ApcS) : Option (List Nat) :=
+  match encodeApcValue option with
+  | some value => some ([kindApc, lenApc] ++ value)
+  | none => none
 
-def encodeMds (option : MdsS) : List Nat :=
-  [kindMds, lenMds] ++ encodeMdsValue option
+def encodeMds (option : MdsS) : Option (List Nat) :=
+  match encodeMdsValue option with
+  | some value => some ([kindMds, lenMds] ++ value)
+  | none => none
 
-def encodeMrds (option : MrdsS) : List Nat :=
-  [kindMrds, lenMrds] ++ encodeMrdsValue option
+def encodeMrds (option : MrdsS) : Option (List Nat) :=
+  match encodeMrdsValue option with
+  | some value => some ([kindMrds, lenMrds] ++ value)
+  | none => none
 
-def encodeReq (option : ReqS) : List Nat :=
-  [kindReq, lenReq] ++ encodeReqValue option
+def encodeReq (option : ReqS) : Option (List Nat) :=
+  match encodeReqValue option with
+  | some value => some ([kindReq, lenReq] ++ value)
+  | none => none
 
-def encodeRes (option : ResS) : List Nat :=
-  [kindRes, lenRes] ++ encodeResValue option
+def encodeRes (option : ResS) : Option (List Nat) :=
+  match encodeResValue option with
+  | some value => some ([kindRes, lenRes] ++ value)
+  | none => none
 
-def encodeFrag (option : FragS) : List Nat :=
-  [kindFrag, if option.rdos.isSome then lenFragTerminal else lenFragNonTerminal] ++ encodeFragValue option
+def encodeFrag (option : FragS) : Option (List Nat) :=
+  match encodeFragValue option with
+  | some value => some ([kindFrag, if option.rdos.isSome then lenFragTerminal else lenFragNonTerminal] ++ value)
+  | none => none
 
 /-! ## Theorems over Step 7 invariants -/
 
@@ -219,6 +260,41 @@ theorem decodeFrag_accepts_iff (value : List Nat) :
     · simp [h8, h10, valueLenOfTotal, lenFragNonTerminal, lenFragTerminal, typedTlvHeaderLen]
     · simp [h8, h10]
 
+/-- **One-byte fields reject values outside the octet range.** -/
+theorem u8Byte_rejects_out_of_range :
+    u8Byte 256 = none := by
+  decide
+
+/-- **16-bit fields reject values that cannot be encoded as two octets.** -/
+theorem u16Bytes_rejects_out_of_range :
+    u16Bytes 65536 = none := by
+  decide
+
+/-- **32-bit fields reject values that cannot be encoded as four octets.** -/
+theorem u32Bytes_rejects_out_of_range :
+    u32Bytes 4294967296 = none := by
+  decide
+
+/-- **REQ value encoding is constrained to four token octets.** -/
+theorem req_encode_rejects_short_token :
+    encodeReqValue { token := [0xde, 0xad, 0xbe] } = none := by
+  decide
+
+/-- **REQ value encoding rejects token elements outside the octet range.** -/
+theorem req_encode_rejects_non_octet_token :
+    encodeReqValue { token := [0xde, 0xad, 0xbe, 256] } = none := by
+  decide
+
+/-- **RES value encoding is constrained to four token octets.** -/
+theorem res_encode_rejects_long_token :
+    encodeResValue { token := [0xca, 0xfe, 0xba, 0xbe, 0x00] } = none := by
+  decide
+
+/-- **RES value encoding rejects token elements outside the octet range.** -/
+theorem res_encode_rejects_non_octet_token :
+    encodeResValue { token := [0xca, 0xfe, 0xba, 256] } = none := by
+  decide
+
 /-- **Representative APC value bytes decode in big-endian order.** -/
 theorem decodeApc_big_endian_representative :
     decodeApc [0x12, 0x34, 0x56, 0x78] = Except.ok { crc32c := 0x12345678 } := by
@@ -236,13 +312,17 @@ theorem decodeMrds_big_endian_representative :
 
 /-- **Representative REQ encode-value then decode round-trips.** -/
 theorem req_encode_decode_round_trip_representative :
-    decodeReq (encodeReqValue { token := [0xde, 0xad, 0xbe, 0xef] }) =
+    (match encodeReqValue { token := [0xde, 0xad, 0xbe, 0xef] } with
+     | some value => decodeReq value
+     | none => Except.error (TypedError.invalidLength kindReq 0)) =
       Except.ok { token := [0xde, 0xad, 0xbe, 0xef] } := by
   rfl
 
 /-- **Representative RES encode-value then decode round-trips.** -/
 theorem res_encode_decode_round_trip_representative :
-    decodeRes (encodeResValue { token := [0xca, 0xfe, 0xba, 0xbe] }) =
+    (match encodeResValue { token := [0xca, 0xfe, 0xba, 0xbe] } with
+     | some value => decodeRes value
+     | none => Except.error (TypedError.invalidLength kindRes 0)) =
       Except.ok { token := [0xca, 0xfe, 0xba, 0xbe] } := by
   rfl
 
