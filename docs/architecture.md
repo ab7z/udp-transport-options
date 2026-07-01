@@ -250,19 +250,21 @@ correctness. Input: the raw IP-datagram bytes plus a mutable `ReassemblyCache`. 
 
 ### `socket/send` (privileged: Linux, root)
 
-The raw send path using `IP_HDRINCL` (RFC 9868 Sec. 15; locked decision). It builds the IP header,
-the UDP header (with UDP Length < IP Total Length, which is what creates the surplus area), and the
-surplus area; it computes the UDP checksum and the OCS by hand; and it transmits. Input: addresses,
-ports, payload, and options. Output: a sent datagram (or a `RecvError::Io` /
-`RecvError::PermissionDenied`). Needs `CAP_NET_RAW`. All `unsafe` FFI is confined here behind safe
-wrappers.
+The raw send path using `IP_HDRINCL` (RFC 9868 Sec. 15; locked decision). Its pure
+`assemble_datagram` helper builds the IP header, the UDP header (with UDP Length < IP Total Length,
+which is what creates the surplus area), and the surplus area; it computes the UDP checksum and the
+OCS by hand. The privileged `RawSender` wrapper only opens/configures the raw socket and transmits
+the assembled bytes. Input: addresses, ports, payload, and options. Output: a sent datagram (or a
+`RecvError::Io` / `RecvError::PermissionDenied`). Needs `CAP_NET_RAW`. All `unsafe` FFI is confined
+here behind safe wrappers.
 
 ### `socket/recv` (privileged: Linux, root)
 
 The raw receive path using `SOCK_RAW` `IPPROTO_UDP`. It reads full IP datagrams with the surplus area
-intact, filters by destination port in userspace, and hands the bytes to `recv::pipeline`. It
-mitigates raw-socket noise (own-source copies and ICMP port-unreachable when no normal UDP socket is
-bound). Input: the socket. Output: raw IP-datagram bytes for the pipeline. Needs `CAP_NET_RAW`.
+intact, filters by destination port and optionally source port in userspace, and returns the raw
+bytes for the later `recv::pipeline`. It mitigates raw-socket noise with an optional own-source skip
+and by holding a dummy `SOCK_DGRAM` on the destination port to absorb ICMP port-unreachable. Input:
+the socket. Output: raw IP-datagram bytes for the pipeline. Needs `CAP_NET_RAW`.
 
 ### `api` (pure orchestration over privileged I/O)
 
@@ -660,7 +662,7 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         - wire/udp::compute_checksum over pseudo-header + UDP header + user data only
         |   produces: UDP header bytes + checksum
         v
- (4) wire/ip  (build, via IpRepr)
+ (4) socket/send::assemble_datagram  (pure, via IpRepr/UdpHeader)
         - IP Total Length = IHL*4 + UDP Length + surplus-area length
         - assemble: IP header | UDP header | user data | [pad] | OCS | options
         |   produces: a full IP datagram on the stack
