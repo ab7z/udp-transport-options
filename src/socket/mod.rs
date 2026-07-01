@@ -7,3 +7,17 @@
 
 pub mod recv;
 pub mod send;
+
+#[cfg(target_os = "linux")]
+use std::io;
+
+#[cfg(target_os = "linux")]
+use crate::error::RecvError;
+
+#[cfg(target_os = "linux")]
+pub(crate) fn map_socket_error(error: io::Error) -> RecvError {
+    match error.raw_os_error() {
+        Some(libc::EPERM | libc::EACCES) => RecvError::PermissionDenied,
+        _ => RecvError::Io(error),
+    }
+}

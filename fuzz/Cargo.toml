@@ -46,5 +46,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "socket_assemble"
+path = "fuzz_targets/socket_assemble.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone workspace root: keeps the nightly-only fuzz build out of the parent crate.
 [workspace]
