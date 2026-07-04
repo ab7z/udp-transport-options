@@ -30,6 +30,10 @@ pub enum ParseError {
         offset: usize,
     },
 
+    /// FRAG appeared more than once in one options area.
+    #[error("FRAG option cannot appear more than once")]
+    DuplicateFrag,
+
     /// The single alignment pad byte that precedes an odd-offset OCS was non-zero.
     #[error("surplus-area alignment pad byte must be zero")]
     NonZeroPad,
@@ -163,9 +167,31 @@ pub enum HeaderError {
 /// Errors produced by the receive pipeline and the raw sockets.
 #[derive(Debug, Error)]
 pub enum RecvError {
+    /// The IP or UDP header invalidates the whole datagram, so nothing is delivered.
+    #[error("header error: {0}")]
+    Header(#[from] HeaderError),
+
     /// The surplus area could not be parsed (the payload is still delivered to the application).
     #[error("parse error: {0}")]
     Parse(#[from] ParseError),
+
+    /// The UDP Length field exceeds the IP transport payload length (FR-49).
+    #[error("UDP Length {udp_len} exceeds IP transport payload length {transport_payload_len}")]
+    UdpLengthExceedsIpPayload {
+        /// The UDP Length field from the datagram.
+        udp_len: u16,
+        /// The parsed IP transport-payload length.
+        transport_payload_len: usize,
+    },
+
+    /// A present UDP checksum failed validation.
+    #[error("UDP checksum mismatch: expected {expected:#06x}, actual {actual:#06x}")]
+    UdpChecksumMismatch {
+        /// The checksum computed over the pseudo-header, UDP header, and UDP user data.
+        expected: u16,
+        /// The checksum field from the wire.
+        actual: u16,
+    },
 
     /// An underlying I/O error from a raw socket.
     #[error("i/o error: {0}")]

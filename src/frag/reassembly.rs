@@ -6,6 +6,22 @@
 
 use std::net::Ipv4Addr;
 
+/// Receive-side FRAG reassembly state.
+///
+/// Step 10 stabilizes the receive-pipeline signature. Step 12 fills this type with the keyed
+/// fragment cache, timeout/GC, overlap handling, and DoS limits.
+#[derive(Debug, Default)]
+pub struct ReassemblyCache {
+    _private: (),
+}
+
+impl ReassemblyCache {
+    /// Creates an empty reassembly cache.
+    pub const fn new() -> Self {
+        Self { _private: () }
+    }
+}
+
 /// The reassembly key: the UDP 5-tuple plus the FRAG Identification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FragKey {

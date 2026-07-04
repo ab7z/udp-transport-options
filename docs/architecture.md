@@ -231,14 +231,15 @@ Root-free.
 
 ### `frag/reassembly` (pure)
 
-Reassembly on the receive side (RFC 9868 Sec. 11.4). `ReassemblyCache` keyed by `FragKey`, with
-offset-sorted insertion, overlap detection (overlap aborts), a timeout (<= 2 minutes), garbage
-collection, and per-pair plus global DoS limits. A completed datagram is returned for one re-feed
-into the pipeline; a FRAG reappearing there with non-empty reassembled data follows the RFC 9868
-Sec. 11.4 rule (all options ignored, data delivered), and a nested FRAG with empty data is rejected
-as a local anti-loop policy (the RFC does not define nested fragmentation). Input: one fragment's
-`FragKey`, `Frag` fields, and data. Output: a `ReassemblyOutcome` (`Incomplete`, `Complete(bytes)`,
-or `Abort(reason)`). Root-free.
+Reassembly on the receive side (RFC 9868 Sec. 11.4). Step 10 introduces `ReassemblyCache` as an
+empty signature-stabilizing type; Step 12 fills it with keyed state. The Step-12 cache is keyed by
+`FragKey`, with offset-sorted insertion, overlap detection (overlap aborts), a timeout (<= 2
+minutes), garbage collection, and per-pair plus global DoS limits. A completed datagram is returned
+for one re-feed into the pipeline; a FRAG reappearing there with non-empty reassembled data follows
+the RFC 9868 Sec. 11.4 rule (all options ignored, data delivered), and a nested FRAG with empty data
+is rejected as a local anti-loop policy (the RFC does not define nested fragmentation). Input: one
+fragment's `FragKey`, `Frag` fields, and data. Output: a `ReassemblyOutcome` (`Incomplete`,
+`Complete(bytes)`, or `Abort(reason)`). Root-free.
 
 ### `recv/pipeline` (pure)
 
@@ -246,7 +247,7 @@ or `Abort(reason)`). Root-free.
 (RFC 9868 Sec. 14). It takes a full IP datagram as bytes and returns a `Delivery`. It performs no I/O,
 so it is fully unit-testable without privileges; this module holds the bulk of the receive-side
 correctness. Input: the raw IP-datagram bytes plus a mutable `ReassemblyCache`. Output: a `Delivery`
-(`Payload { data, options }` or `Buffered`), or a `RecvError`. Root-free.
+(`Payload { data, options }`, `Buffered`, or `Dropped`), or a `RecvError`. Root-free.
 
 ### `socket/send` (privileged: Linux, root)
 
@@ -309,6 +310,8 @@ pub mod length {
     pub const MRDS: u8 = 5;
     pub const REQ: u8 = 6;
     pub const RES: u8 = 6;
+    pub const TIME: u8 = 10;
+    pub const EXP_MIN: u8 = 4;
     pub const OCS: u8 = 2;
 }
 
@@ -501,11 +504,13 @@ pub enum ReassemblyOutcome {
 
 pub enum AbortReason { Overlap, LimitExceeded, Timeout }
 
-// The reassembly cache (state owned by the receiver); pure, no I/O. (planned)
-pub struct ReassemblyCache { /* private: keyed partials, byte/segment counters, timers */ }
+// The reassembly cache (state owned by the receiver); pure, no I/O.
+// Step 10: empty signature-stabilizing type. Step 12: keyed partials, counters, timers.
+pub struct ReassemblyCache { /* private */ }
 
 impl ReassemblyCache {
-    pub fn new() -> ReassemblyCache;                                   // (planned)
+    pub fn new() -> ReassemblyCache;
+    // Step 12:
     // Insert one fragment; offset-sort, detect overlap, enforce caps and timeout. (planned)
     pub fn insert(&mut self, key: FragKey, frag: Frag, data: &[u8]) -> ReassemblyOutcome;
     pub fn gc(&mut self, now: Instant);  // drop timed-out partials (planned)
@@ -524,14 +529,16 @@ pub enum Delivery {
         options: Vec<RawOption>, // parsed options; empty if absent or discarded
     },
     Buffered,                    // the datagram was a fragment; nothing to deliver yet
+    Dropped,                     // fragment-local failure; no user delivery
 }
 
 // The pure receive state machine: verify UDP cksum, locate/validate surplus, validate OCS, parse,
-// then reassemble (FRAG) or deliver (RFC 9868 Sec. 14). (planned)
+// honor Frag. Start as the fragment option/data boundary, then buffer, drop, or deliver
+// (RFC 9868 Sec. 11.4, Sec. 14).
 pub fn process_datagram(
     ip_datagram: &[u8],
     cache: &mut ReassemblyCache,
-) -> Result<Delivery, RecvError>;                                      // (planned)
+) -> Result<Delivery, RecvError>;
 ```
 
 ### `error::ParseError`, `error::HeaderError`, and `error::RecvError`
@@ -540,6 +547,7 @@ pub fn process_datagram(
 pub enum ParseError {
     InvalidLength { kind: u8, len: usize }, // Length below the Kind minimum (malformed surplus)
     Overrun { offset: usize },              // option claims to extend past the surplus area
+    DuplicateFrag,                          // FRAG appeared more than once
     NonZeroPad,                             // the single odd-offset alignment pad byte was non-zero
     OcsMismatch,                            // OCS sum did not fold to the one's-complement zero
 }
@@ -556,7 +564,10 @@ pub enum HeaderError {                      // IP/UDP header invalidates the who
 }
 
 pub enum RecvError {
+    Header(HeaderError),   // whole datagram is dropped
     Parse(ParseError),     // surplus parse failed (payload is still delivered)
+    UdpLengthExceedsIpPayload { udp_len: u16, transport_payload_len: usize },
+    UdpChecksumMismatch { expected: u16, actual: u16 },
     Io(std::io::Error),    // raw-socket I/O error
     PermissionDenied,      // needs CAP_NET_RAW or root
 }
@@ -687,11 +698,11 @@ through (5) then run per fragment.
 ### 5.2 Receive walkthrough (ASCII state machine)
 
 `recv::pipeline::process_datagram` implements the RFC 9868 processing order: verify the UDP checksum,
-locate and validate the surplus area, validate the OCS, parse the options, then reassemble (FRAG) or
-deliver (RFC 9868 Sec. 14). A malformed surplus area discards the options but still delivers the
-payload; an unknown SAFE option is ignored; an unknown UNSAFE option causes the (reassembled) user
-data to be dropped, with a zero-length datagram still delivered to the user (RFC 9868 Sec. 10,
-Sec. 12, Sec. 14).
+locate and validate the surplus area, validate the OCS, parse the options, then buffer, drop, or
+deliver (RFC 9868 Sec. 11.4, Sec. 14). A malformed surplus area discards the options but still
+delivers the payload; an unknown SAFE option is ignored; an unknown UNSAFE option outside a fragment
+context drops the user data with a zero-length delivery, while a fragment-local failure produces no
+application delivery.
 
 ```
  socket/recv (privileged) -> raw IP datagram bytes
@@ -734,32 +745,42 @@ Sec. 12, Sec. 14).
  +-------------------------------------------------------------------------------+
         | Length under the Kind minimum, option underrun, or surplus overrun -> halt
         |        -------------------------------> Delivery::Payload { data, options: [] }
+        | duplicate known SAFE with sub-minimum Length -> halt before first-wins
+        |        -------------------------------> Delivery::Payload { data, options: [] }
+        | assigned but out-of-scope SAFE below its known minimum (TIME/EXP) -> halt
+        |        -------------------------------> Delivery::Payload { data, options: [] }
         | other unexpected length of a known SAFE option -> ignore that option only
         |        (Sec. 10; exception: a malformed FRAG counts as unsupported UNSAFE)
         | unknown SAFE option   -> ignore it, keep going
-        | unknown UNSAFE option -> flag it; resolved after (F): the FRAG-with-non-empty-data
-        |        rule takes precedence (options ignored, data delivered); otherwise drop the
-        |        user data, deliver a zero-length datagram (Sec. 11.4, 12, 14; with FRAG via G)
+        | unknown UNSAFE option before a valid FRAG context -> terminate option processing,
+        |        drop the user data, deliver a zero-length datagram (Sec. 10, 12, 14)
+        | sub-minimum FRAG Length -> malformed surplus, deliver payload with options discarded
+        | unknown UNSAFE option after valid empty-payload FRAG -> fragment-local failure
+        |        -------------------------------> Delivery::Dropped
+        | malformed per-fragment TLV after valid empty-payload FRAG -> Delivery::Dropped
+        | malformed FRAG at or above the minimum length -> unsupported UNSAFE, even with non-empty user data
+        | valid empty-payload FRAG -> stop option parsing at Frag. Start; bytes at or after
+        |        that offset are fragment data, not more options
         v parsed options
  +-------------------------------------------------------------------------------+
  | (F) FRAG present?                                                              |
  +-------------------------------------------------------------------------------+
         | no  -> Delivery::Payload { data, options: parsed }
-        | yes but UDP Length != 8 (user data non-empty) -> ignore ALL options
+        | yes, valid, but UDP Length != 8 (user data non-empty) -> ignore ALL options
         |        -------------------------------> Delivery::Payload { data, options: [] } (Sec. 11.4)
         | yes (UDP Length == 8, data in surplus) -> go to (G)
         v
  +-------------------------------------------------------------------------------+
- | (G) frag/reassembly: insert into ReassemblyCache keyed by FragKey             |
- |     offset-sort; detect overlap; enforce per-pair + global caps and timeout   |
- +-------------------------------------------------------------------------------+
-        | Incomplete                 -> Delivery::Buffered
-        | Abort(Overlap|LimitExceeded|Timeout) -> drop partial -> Delivery::Buffered
-        | unknown-UNSAFE seen in (E) -> drop the reassembled user data
-        |        -> Delivery::Payload { data: [], options: [] } (zero-length delivery, Sec. 12, 14)
-        | Complete(bytes)            -> re-feed ONCE into process_datagram
+| (G) Step 10 FRAG boundary                                                      |
+|     valid FRAG with empty UDP user data and no fragment-local failure returns  |
+|     Delivery::Buffered                                                         |
+|     Step 12 replaces this stub with ReassemblyCache insert/GC/limit handling   |
++-------------------------------------------------------------------------------+
+        | valid empty-payload FRAG -> Delivery::Buffered
+        | valid empty-payload FRAG plus UNSAFE/malformed per-fragment option -> Delivery::Dropped
         v
- second pass over the reassembled datagram: no FRAG lands at (F) -> Delivery::Payload
+ Step 12 completion path: Complete(bytes) is re-fed ONCE into process_datagram.
+        A reassembled datagram with no FRAG lands at (F) -> Delivery::Payload
         { data, options }; a FRAG with non-empty data hits the (F) non-empty branch (options
         ignored, data delivered, Sec. 11.4); a nested FRAG with empty data is rejected -- local
         anti-loop policy, never a second re-feed (the RFC does not define nested fragmentation)
@@ -777,12 +798,16 @@ Disposition summary:
 | OCS != 0 and validation fails              | delivered    | discarded  | `Payload { options: [] }`        |
 | Malformed TLV (sub-minimum/under/overrun)  | delivered    | discarded  | `Payload { options: [] }`        |
 | Unexpected length, known SAFE option       | delivered    | rest kept  | that option ignored (Sec. 10)    |
-| FRAG present, user data non-empty          | delivered    | discarded  | `Payload { options: [] }` (Sec. 11.4) |
+| Sub-minimum FRAG Length                    | delivered    | discarded  | generic malformed-surplus case   |
+| Malformed FRAG or invalid `Frag. Start`    | zero-length  | discarded  | treated as unsupported UNSAFE    |
+| Valid FRAG, user data non-empty            | delivered    | discarded  | `Payload { options: [] }` (Sec. 11.4) |
+| Valid FRAG, bytes after `Frag. Start`      | deferred     | not parsed  | fragment data, `Buffered`        |
 | Unknown SAFE option                        | delivered    | rest kept  | option ignored                   |
 | Unknown UNSAFE option (no FRAG)            | zero-length  | discarded  | user data dropped; zero-length delivery (Sec. 12, 14) |
-| Unknown UNSAFE option (with FRAG)          | zero-length  | discarded  | reassembled data dropped; zero-length delivery |
+| Unknown UNSAFE option (valid empty FRAG)   | not delivered| discarded  | `Dropped`; Step 12 will store this failure |
+| Malformed per-fragment option before data  | not delivered| discarded  | `Dropped`; no zero-length frame  |
 | FRAG, more fragments needed                | -            | -          | `Buffered`                       |
-| FRAG, overlap / cap / timeout              | -            | -          | partial discarded, `Buffered`    |
+| FRAG, overlap / cap / timeout              | not delivered| discarded  | `Dropped` / abort state (planned) |
 | FRAG complete                              | delivered*   | parsed*    | re-fed once, then `Payload`      |
 
 \* after the single re-feed of the reassembled datagram.
@@ -796,10 +821,11 @@ failed":
 
 - `ParseError` says *why* the surplus area or its options were rejected: `InvalidLength { kind, len }`
   (a Length wrong for its Kind), `Overrun { offset }` (an option claims to extend past the surplus
-  area), `NonZeroPad` (the single odd-offset alignment pad byte was non-zero), and `OcsMismatch` (the
-  OCS did not validate to zero). Per RFC 9868 (Sec. 14), a `ParseError` over the surplus area does not
-  fail the receive: the options are discarded but the UDP payload is still delivered. This is exactly
-  why `ParseError` is a distinct, recoverable type and not merged into `RecvError`.
+  area), `DuplicateFrag`, `NonZeroPad` (the single odd-offset alignment pad byte was non-zero), and
+  `OcsMismatch` (the OCS did not validate to zero). Per RFC 9868 (Sec. 14), a `ParseError` over the
+  surplus area does not fail the receive: the options are discarded but the UDP payload is still
+  delivered. This is exactly why `ParseError` is a distinct, recoverable type and not merged into
+  `RecvError`.
 - `HeaderError` says *why* the IP or UDP header invalidates the whole datagram: truncated headers,
   an unsupported IP version, a bad IHL, an inconsistent IP length field, an IPv4 header-checksum
   mismatch, a non-UDP protocol, or a UDP Length below 8. Unlike a `ParseError`, a `HeaderError`
@@ -819,7 +845,9 @@ from privilege/I/O failures).
 
 The FRAG reassembler is the main untrusted-input attack surface (an attacker can send fragments that
 never complete), so the limits are gathered in one place and enforced in `frag/reassembly`
-(RFC 9868 Sec. 11.4 reassembly rules, Sec. 25.4 fragmentation DoS):
+(RFC 9868 Sec. 11.4 reassembly rules, Sec. 25.4 fragmentation DoS). Receive-path warn diagnostics
+are sampled globally before logging so malformed unauthenticated datagrams cannot produce one warning
+per packet indefinitely:
 
 | Knob                            | Value         | Purpose                                              |
 |---------------------------------|---------------|-----------------------------------------------------|
@@ -832,8 +860,8 @@ Additional reassembly defenses (implemented as cache policy in `frag/reassembly`
 `AbortReason`): per-pair byte and segment caps and a global partial cap (`LimitExceeded`), overlap
 abort (`Overlap`), the timeout plus garbage collection (`Timeout`), and the rule that a completed
 datagram is re-fed exactly once so reassembly cannot loop. The `NOP_RUN_DOS_THRESHOLD` is enforced in
-the parser path: a NOP flood is logged via `log` (it does not need root, so it is covered by the pure
-tests).
+the parser path: a NOP flood is logged via the sampled `log` diagnostics (it does not need root, so
+it is covered by the pure tests).
 
 ## 7. Dependency rationale
 

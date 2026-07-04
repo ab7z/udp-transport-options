@@ -260,7 +260,9 @@ groups them by `frag::reassembly::FragKey { src, dst, src_port, dst_port, identi
 5-tuple plus the FRAG Identification). The send side (`frag::split`) carries each fragment with empty
 UDP user data (UDP Length 8) and places the fragment data in the surplus area after all of the
 fragment's options (the data follows the remainder of the UDP options, as located by `Frag. Start`,
-and runs to the end of the IP datagram).
+and runs to the end of the IP datagram). The receive pipeline uses the same boundary: for a valid
+empty-payload FRAG, bytes at or after `Frag. Start` are fragment data and are not interpreted as
+additional UDP options.
 
 ## 8. Maximum Datagram Size (MDS)
 

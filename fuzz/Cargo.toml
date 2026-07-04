@@ -53,5 +53,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "process_datagram"
+path = "fuzz_targets/process_datagram.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone workspace root: keeps the nightly-only fuzz build out of the parent crate.
 [workspace]
