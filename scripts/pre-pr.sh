@@ -19,7 +19,7 @@ cd "$(dirname "$0")/.."
 PROPTEST_CASES="${PROPTEST_CASES:-1024}"
 FUZZ_SECONDS="${PRE_PR_FUZZ_SECONDS:-60}"
 # Extend in lockstep with every new parsing surface (TLV parser, typed options, OCS, pipeline, FRAG).
-FUZZ_TARGETS=(wire_datagram options_tlv options_serialize options_ocs options_typed socket_assemble process_datagram)
+FUZZ_TARGETS=(wire_datagram options_tlv options_serialize options_ocs options_typed socket_assemble process_datagram frag_split)
 
 command -v cargo-fuzz >/dev/null || {
     echo "pre-pr: cargo-fuzz is missing — run: cargo install cargo-fuzz" >&2
@@ -58,6 +58,8 @@ for target in "${FUZZ_TARGETS[@]}"; do
         max_len=64
     elif [ "$target" = "socket_assemble" ]; then
         max_len=256
+    elif [ "$target" = "frag_split" ]; then
+        max_len=384
     fi
     lane "fuzz $target (${FUZZ_SECONDS}s)" cargo +nightly fuzz run "$target" \
         "fuzz/corpus/$target" "fuzz/seeds/$target" -- \
