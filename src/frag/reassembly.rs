@@ -62,6 +62,18 @@ impl ReassemblyCache {
         fragment_options: &[RawOption],
         now: Instant,
     ) -> ReassemblyOutcome {
+        self.insert_with_options_and_failures(key, frag, data, fragment_options, &[], now)
+    }
+
+    pub(crate) fn insert_with_options_and_failures(
+        &mut self,
+        key: FragKey,
+        frag: Frag,
+        data: &[u8],
+        fragment_options: &[RawOption],
+        fragment_option_failures: &[OptionKind],
+        now: Instant,
+    ) -> ReassemblyOutcome {
         self.gc(now);
 
         let Some(fragment) = NormalizedFragment::new(frag, data.len()) else {
@@ -79,7 +91,7 @@ impl ReassemblyCache {
 
         if !self.partials.contains_key(&key) {
             if self.partials.len() >= self.limits.max_pending_partials {
-                return self.insert_without_retaining(fragment, data, fragment_options, now);
+                return self.insert_without_retaining(fragment, data, fragment_options, fragment_option_failures, now);
             }
             self.partials.insert(key, Partial::new(now));
         }
@@ -88,18 +100,20 @@ impl ReassemblyCache {
             .partials
             .get_mut(&key)
             .expect("partial was inserted or already present");
-        match partial.insert(fragment, data, fragment_options, self.limits) {
+        match partial.insert(fragment, data, fragment_options, fragment_option_failures, self.limits) {
             InsertResult::Incomplete => ReassemblyOutcome::Incomplete,
             InsertResult::Complete {
                 tail,
                 udp_length,
                 fragment_options,
+                fragment_option_failures,
             } => {
                 self.partials.remove(&key);
                 ReassemblyOutcome::Complete {
                     tail,
                     udp_length,
                     fragment_options,
+                    fragment_option_failures,
                 }
             }
             InsertResult::Abort(reason) => {
@@ -124,18 +138,21 @@ impl ReassemblyCache {
         fragment: NormalizedFragment,
         data: &[u8],
         fragment_options: &[RawOption],
+        fragment_option_failures: &[OptionKind],
         now: Instant,
     ) -> ReassemblyOutcome {
         let mut partial = Partial::new(now);
-        match partial.insert(fragment, data, fragment_options, self.limits) {
+        match partial.insert(fragment, data, fragment_options, fragment_option_failures, self.limits) {
             InsertResult::Complete {
                 tail,
                 udp_length,
                 fragment_options,
+                fragment_option_failures,
             } => ReassemblyOutcome::Complete {
                 tail,
                 udp_length,
                 fragment_options,
+                fragment_option_failures,
             },
             InsertResult::Abort(reason) => ReassemblyOutcome::Abort(reason),
             InsertResult::Incomplete => ReassemblyOutcome::Abort(AbortReason::LimitExceeded),
@@ -208,6 +225,8 @@ pub enum ReassemblyOutcome {
         udp_length: u16,
         /// Coalesced SAFE options that were carried by the individual fragments.
         fragment_options: Vec<RawOption>,
+        /// Option kinds that failed on at least one individual fragment.
+        fragment_option_failures: Vec<OptionKind>,
     },
     /// Reassembly was aborted and the partial state discarded.
     Abort(AbortReason),
@@ -232,7 +251,9 @@ struct Partial {
     fragment_count: usize,
     byte_total: usize,
     fragment_options: FragmentOptions,
+    fragment_option_failures: FragmentOptionFailures,
     empty_terminal_options: Option<Vec<RawOption>>,
+    empty_terminal_option_failures: Option<Vec<OptionKind>>,
     received_at: Instant,
 }
 
@@ -245,7 +266,9 @@ impl Partial {
             fragment_count: 0,
             byte_total: 0,
             fragment_options: FragmentOptions::default(),
+            fragment_option_failures: FragmentOptionFailures::default(),
             empty_terminal_options: None,
+            empty_terminal_option_failures: None,
             received_at,
         }
     }
@@ -259,9 +282,10 @@ impl Partial {
         fragment: NormalizedFragment,
         data: &[u8],
         fragment_options: &[RawOption],
+        fragment_option_failures: &[OptionKind],
         limits: ReassemblyLimits,
     ) -> InsertResult {
-        if self.is_exact_duplicate(fragment, data, fragment_options) {
+        if self.is_exact_duplicate(fragment, data, fragment_options, fragment_option_failures) {
             return InsertResult::Incomplete;
         }
         let Some(fragment_count) = self.fragment_count.checked_add(1) else {
@@ -301,6 +325,7 @@ impl Partial {
                     self.udp_length = Some(udp_length);
                     if data.is_empty() {
                         self.empty_terminal_options = Some(fragment_options.to_vec());
+                        self.empty_terminal_option_failures = Some(fragment_option_failures.to_vec());
                     }
                     if self.segments.iter().any(|segment| segment.end > fragment.end) {
                         return InsertResult::Abort(AbortReason::Overlap);
@@ -309,7 +334,10 @@ impl Partial {
                 (Some(existing_end), Some(existing_udp_length))
                     if existing_end == fragment.end && existing_udp_length == udp_length =>
                 {
-                    if data.is_empty() && self.empty_terminal_options.as_deref() != Some(fragment_options) {
+                    if data.is_empty()
+                        && (self.empty_terminal_options.as_deref() != Some(fragment_options)
+                            || self.empty_terminal_option_failures.as_deref() != Some(fragment_option_failures))
+                    {
                         return InsertResult::Abort(AbortReason::Overlap);
                     }
                 }
@@ -320,6 +348,7 @@ impl Partial {
         self.fragment_count = fragment_count;
         self.byte_total = byte_total;
         self.fragment_options.observe(fragment_options);
+        self.fragment_option_failures.observe(fragment_option_failures);
         if !data.is_empty() {
             let index = self
                 .segments
@@ -332,6 +361,7 @@ impl Partial {
                     end: fragment.end,
                     data: data.to_vec(),
                     fragment_options: fragment_options.to_vec(),
+                    fragment_option_failures: fragment_option_failures.to_vec(),
                 },
             );
         }
@@ -339,13 +369,20 @@ impl Partial {
         self.complete()
     }
 
-    fn is_exact_duplicate(&self, fragment: NormalizedFragment, data: &[u8], fragment_options: &[RawOption]) -> bool {
+    fn is_exact_duplicate(
+        &self,
+        fragment: NormalizedFragment,
+        data: &[u8],
+        fragment_options: &[RawOption],
+        fragment_option_failures: &[OptionKind],
+    ) -> bool {
         if let Some(udp_length) = fragment.udp_length {
             if self.udp_length != Some(udp_length) || self.terminal_end != Some(fragment.end) {
                 return false;
             }
             if data.is_empty() {
-                return self.empty_terminal_options.as_deref() == Some(fragment_options);
+                return self.empty_terminal_options.as_deref() == Some(fragment_options)
+                    && self.empty_terminal_option_failures.as_deref() == Some(fragment_option_failures);
             }
         }
         self.segments.iter().any(|segment| {
@@ -353,6 +390,7 @@ impl Partial {
                 && segment.end == fragment.end
                 && segment.data.as_slice() == data
                 && segment.fragment_options.as_slice() == fragment_options
+                && segment.fragment_option_failures.as_slice() == fragment_option_failures
         })
     }
 
@@ -391,6 +429,7 @@ impl Partial {
             tail,
             udp_length,
             fragment_options: self.fragment_options.to_raw_options(),
+            fragment_option_failures: self.fragment_option_failures.to_vec(),
         }
     }
 }
@@ -475,12 +514,32 @@ impl FragmentOptions {
     }
 }
 
+#[derive(Debug, Default)]
+struct FragmentOptionFailures {
+    kinds: Vec<OptionKind>,
+}
+
+impl FragmentOptionFailures {
+    fn observe(&mut self, failures: &[OptionKind]) {
+        for kind in failures {
+            if !self.kinds.contains(kind) {
+                self.kinds.push(*kind);
+            }
+        }
+    }
+
+    fn to_vec(&self) -> Vec<OptionKind> {
+        self.kinds.clone()
+    }
+}
+
 #[derive(Debug)]
 struct Segment {
     start: usize,
     end: usize,
     data: Vec<u8>,
     fragment_options: Vec<RawOption>,
+    fragment_option_failures: Vec<OptionKind>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -512,6 +571,7 @@ enum InsertResult {
         tail: Vec<u8>,
         udp_length: u16,
         fragment_options: Vec<RawOption>,
+        fragment_option_failures: Vec<OptionKind>,
     },
     Abort(AbortReason),
 }

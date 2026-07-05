@@ -261,13 +261,22 @@ fn process_datagram_inner(
             cache.discard(key);
             return Ok(Delivery::Dropped);
         };
-        return match cache.insert_with_options(key, frag, fragment_data, &options, now) {
+        let fragment_option_failures = fragment_option_failures(&reports);
+        return match cache.insert_with_options_and_failures(
+            key,
+            frag,
+            fragment_data,
+            &options,
+            &fragment_option_failures,
+            now,
+        ) {
             ReassemblyOutcome::Incomplete => Ok(Delivery::Buffered),
             ReassemblyOutcome::Abort(_) => Ok(Delivery::Dropped),
             ReassemblyOutcome::Complete {
                 tail,
                 udp_length,
                 fragment_options,
+                fragment_option_failures,
             } => {
                 let Some(reassembled) = reassembled_datagram(&ip, &udp, udp_length, &tail) else {
                     return Ok(Delivery::Dropped);
@@ -280,9 +289,9 @@ fn process_datagram_inner(
                         reports,
                     } => Ok(Delivery::Payload {
                         data,
-                        options: merge_fragment_options(fragment_options.clone(), options),
+                        options: merge_fragment_options(fragment_options.clone(), &fragment_option_failures, options),
                         option_bearing,
-                        reports: merge_fragment_reports(fragment_options, reports),
+                        reports: merge_fragment_reports(fragment_options, fragment_option_failures, reports),
                     }),
                     delivery => Ok(delivery),
                 }
@@ -308,22 +317,51 @@ fn frag_key(ip: &IpRepr, udp: &UdpHeader, frag: Frag) -> FragKey {
     }
 }
 
-fn merge_fragment_options(mut fragment_options: Vec<RawOption>, datagram_options: Vec<RawOption>) -> Vec<RawOption> {
+fn merge_fragment_options(
+    mut fragment_options: Vec<RawOption>,
+    fragment_option_failures: &[OptionKind],
+    datagram_options: Vec<RawOption>,
+) -> Vec<RawOption> {
+    fragment_options.retain(|option| !fragment_option_failures.contains(&option.kind));
     fragment_options.extend(datagram_options);
     fragment_options
 }
 
-fn merge_fragment_reports(fragment_options: Vec<RawOption>, datagram_reports: Vec<OptionReport>) -> Vec<OptionReport> {
-    let mut reports: Vec<_> = fragment_options
+fn merge_fragment_reports(
+    fragment_options: Vec<RawOption>,
+    fragment_option_failures: Vec<OptionKind>,
+    datagram_reports: Vec<OptionReport>,
+) -> Vec<OptionReport> {
+    let mut reports: Vec<_> = fragment_option_failures
         .into_iter()
-        .map(|option| OptionReport {
-            kind: option.kind,
-            status: OptionStatus::Success,
+        .map(|kind| OptionReport {
+            kind,
+            status: OptionStatus::Failed,
             source: OptionSource::FragmentSet,
         })
         .collect();
+    for option in fragment_options {
+        if reports.iter().any(|report| report.kind == option.kind) {
+            continue;
+        }
+        reports.push(OptionReport {
+            kind: option.kind,
+            status: OptionStatus::Success,
+            source: OptionSource::FragmentSet,
+        });
+    }
     reports.extend(datagram_reports);
     reports
+}
+
+fn fragment_option_failures(reports: &[OptionReport]) -> Vec<OptionKind> {
+    let mut failures = Vec::new();
+    for report in reports {
+        if report.status == OptionStatus::Failed && !failures.contains(&report.kind) {
+            failures.push(report.kind);
+        }
+    }
+    failures
 }
 
 fn reassembled_datagram(ip: &IpRepr, udp: &UdpHeader, udp_length: u16, tail: &[u8]) -> Option<Vec<u8>> {

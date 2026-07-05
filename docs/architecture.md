@@ -587,7 +587,7 @@ pub enum Delivery {
         data: Vec<u8>,              // the UDP user data handed to the application
         options: Vec<RawOption>,    // successfully processed options
         option_bearing: bool,       // true when a surplus area was present, even if discarded
-        reports: Vec<OptionReport>, // datagram status; FragmentSet reports are coalesced successes
+        reports: Vec<OptionReport>, // datagram status plus coalesced FragmentSet status
     },
     Buffered,                    // the datagram was a fragment; nothing to deliver yet
     Dropped,                     // fragment-local failure; no user delivery

@@ -8,10 +8,11 @@ use udp_transport_options::api::{
 use udp_transport_options::error::{ReceivePolicyError, SendError, SplitError};
 use udp_transport_options::frag::reassembly::{ReassemblyCache, ReassemblyLimits};
 use udp_transport_options::frag::split::PeerFragmentLimits;
-use udp_transport_options::model::length;
+use udp_transport_options::model::{kind, length};
 use udp_transport_options::options::RawOption;
 use udp_transport_options::options::kind::OptionKind;
-use udp_transport_options::options::typed::{Apc, Req};
+use udp_transport_options::options::typed::{Apc, Frag, Mds, Req, TypedOption};
+use udp_transport_options::socket::send::assemble_datagram;
 use udp_transport_options::wire::ip::IpRepr;
 use udp_transport_options::wire::surplus::locate_surplus;
 use udp_transport_options::wire::udp::UdpHeader;
@@ -35,6 +36,31 @@ fn raw(kind: OptionKind, value: &[u8]) -> RawOption {
         kind,
         value: value.to_vec(),
     }
+}
+
+fn encode<T: TypedOption>(option: T) -> Vec<u8> {
+    let mut out = Vec::new();
+    option.encode(&mut out);
+    out
+}
+
+fn option_body(option_bytes: &[u8]) -> Vec<u8> {
+    let mut body = vec![0, 0];
+    body.extend_from_slice(option_bytes);
+    body
+}
+
+fn fragment_datagram(frag: Frag, fragment_options: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut options = encode(frag);
+    options.extend_from_slice(fragment_options);
+    options.extend_from_slice(data);
+    assemble_datagram(SRC, DST, SRC_PORT, DST_PORT, b"", &option_body(&options))
+}
+
+fn frag_start(fragment_option_area_len: usize) -> u16 {
+    (usize::from(length::UDP_HEADER) + usize::from(length::OCS) + fragment_option_area_len)
+        .try_into()
+        .expect("test fragment option area fits u16")
 }
 
 fn decode_one(datagram: &[u8]) -> ApiDelivery {
@@ -122,6 +148,58 @@ fn required_option_policy_filters_missing_or_failed_options() {
     let failed = build_datagram(addrs(), b"payload", &[bad_apc]).unwrap();
     assert_eq!(
         decode_datagram(&failed, &mut ReassemblyCache::new(), Instant::now(), &policy).unwrap(),
+        ApiDelivery::Filtered
+    );
+}
+
+#[test]
+fn required_policy_filters_fragment_option_if_any_fragment_failed() {
+    let good_mds = encode(Mds {
+        max_datagram_size: 1500,
+    });
+    let bad_mds = [kind::MDS, length::MDS + 1, 0, 0, 0];
+    let first = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_NON_TERMINAL) + good_mds.len()),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER),
+        rdos: None,
+    };
+    let second = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_TERMINAL) + bad_mds.len()),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER) + 3,
+        rdos: Some(u16::from(length::UDP_HEADER) + 6),
+    };
+    let policy = ReceivePolicy::new().require_option(OptionKind::Mds).unwrap();
+    let first_datagram = fragment_datagram(first, &good_mds, b"abc");
+    let second_datagram = fragment_datagram(second, &bad_mds, b"def");
+    let mut default_cache = ReassemblyCache::new();
+    let mut cache = ReassemblyCache::new();
+    let now = Instant::now();
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut default_cache, now, &ReceivePolicy::default()).unwrap(),
+        ApiDelivery::Buffered
+    );
+    let ApiDelivery::Received(received) =
+        decode_datagram(&second_datagram, &mut default_cache, now, &ReceivePolicy::default()).unwrap()
+    else {
+        panic!("failed fragment option should not drop reassembled payload by default");
+    };
+    assert_eq!(received.data, b"abcdef");
+    assert!(!received.options.iter().any(|option| option.kind == OptionKind::Mds));
+    assert!(received.reports.iter().any(|report| {
+        report.kind == OptionKind::Mds
+            && report.status == OptionStatus::Failed
+            && report.source == OptionSource::FragmentSet
+    }));
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut cache, now, &policy).unwrap(),
+        ApiDelivery::Buffered
+    );
+    assert_eq!(
+        decode_datagram(&second_datagram, &mut cache, now, &policy).unwrap(),
         ApiDelivery::Filtered
     );
 }
