@@ -56,6 +56,10 @@ pub mod length {
     pub const REQ: u8 = 6;
     /// RES: Kind + Length + 4-byte token.
     pub const RES: u8 = 6;
+    /// TIME: Kind + Length + two 4-byte timestamp fields.
+    pub const TIME: u8 = 10;
+    /// EXP minimum: Kind + Length + 16-bit UDP ExID.
+    pub const EXP_MIN: u8 = 4;
     /// The OCS occupies a fixed 2-byte checksum at the start of the surplus area.
     pub const OCS: u8 = 2;
     /// UDP header length, used by FRAG pointers that are relative to the UDP header start.

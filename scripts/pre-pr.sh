@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.."
 PROPTEST_CASES="${PROPTEST_CASES:-1024}"
 FUZZ_SECONDS="${PRE_PR_FUZZ_SECONDS:-60}"
 # Extend in lockstep with every new parsing surface (TLV parser, typed options, OCS, pipeline, FRAG).
-FUZZ_TARGETS=(wire_datagram options_tlv options_serialize options_ocs options_typed socket_assemble)
+FUZZ_TARGETS=(wire_datagram options_tlv options_serialize options_ocs options_typed socket_assemble process_datagram)
 
 command -v cargo-fuzz >/dev/null || {
     echo "pre-pr: cargo-fuzz is missing — run: cargo install cargo-fuzz" >&2
@@ -48,7 +48,7 @@ lane "test host ($PROPTEST_CASES proptest cases)" env PROPTEST_CASES="$PROPTEST_
 lane "lean gate (build + axiom audit)" scripts/lean-gate.sh
 lane "achim verify" scripts/vm-ubuntu-server.sh verify
 for target in "${FUZZ_TARGETS[@]}"; do
-    mkdir -p "fuzz/corpus/$target"
+    mkdir -p "fuzz/corpus/$target" "fuzz/seeds/$target"
     max_len=2048
     if [ "$target" = "options_serialize" ]; then
         max_len=512

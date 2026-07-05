@@ -7,6 +7,7 @@
 use std::net::Ipv4Addr;
 
 use udp_transport_options::error::ParseError;
+use udp_transport_options::model::kind;
 use udp_transport_options::options::kind::OptionKind;
 use udp_transport_options::options::ocs::{self, OcsCheck};
 use udp_transport_options::options::serialize::OptionsBuilder;
@@ -17,6 +18,60 @@ use udp_transport_options::wire::udp::{self, UdpHeader};
 
 #[allow(dead_code)]
 pub fn options_body_from_fuzz_bytes(data: &[u8]) -> Vec<u8> {
+    if let Some(selector) = data.first().map(|byte| byte % 8) {
+        match selector {
+            1 => {
+                return body_with(&[
+                    10,
+                    2,
+                    kind::REQ,
+                    6,
+                    byte(data, 1),
+                    byte(data, 2),
+                    byte(data, 3),
+                    byte(data, 4),
+                ]);
+            }
+            2 => {
+                return body_with(&[
+                    192,
+                    2,
+                    kind::REQ,
+                    6,
+                    byte(data, 1),
+                    byte(data, 2),
+                    byte(data, 3),
+                    byte(data, 4),
+                ]);
+            }
+            3 => return body_with(&valid_frag_bytes(data)),
+            4 => return body_with(&malformed_frag_bytes(data)),
+            5 => {
+                return body_with(&[
+                    kind::REQ,
+                    6,
+                    byte(data, 1),
+                    byte(data, 2),
+                    byte(data, 3),
+                    byte(data, 4),
+                    kind::REQ,
+                    6,
+                    byte(data, 5),
+                    byte(data, 6),
+                    byte(data, 7),
+                    byte(data, 8),
+                ]);
+            }
+            6 => {
+                let mut options = valid_frag_bytes(data);
+                options.extend(valid_frag_bytes(&data[1..]));
+                return body_with(&options);
+            }
+            7 => return body_with(&[192, 2, kind::APC, 6]),
+            _ => {}
+        }
+    }
+
     let mut builder = OptionsBuilder::new();
     if data.len() >= 4 {
         builder.push(OptionKind::Req, data[0..4].to_vec());
@@ -37,6 +92,45 @@ pub fn options_body_from_fuzz_bytes(data: &[u8]) -> Vec<u8> {
         builder.push(OptionKind::Other(10), data[17..data.len().min(49)].to_vec());
     }
     builder.finish().expect("fixed fuzz-derived options are serializable")
+}
+
+fn body_with(options: &[u8]) -> Vec<u8> {
+    let mut body = vec![0, 0];
+    body.extend_from_slice(options);
+    body
+}
+
+fn byte(data: &[u8], index: usize) -> u8 {
+    data.get(index).copied().unwrap_or(index as u8)
+}
+
+fn valid_frag_bytes(data: &[u8]) -> Vec<u8> {
+    let mut options = vec![kind::FRAG, 12, 0, 20];
+    options.extend_from_slice(&[
+        byte(data, 1),
+        byte(data, 2),
+        byte(data, 3),
+        byte(data, 4),
+        byte(data, 5),
+        byte(data, 6),
+        byte(data, 7),
+        byte(data, 8),
+    ]);
+    options
+}
+
+fn malformed_frag_bytes(data: &[u8]) -> Vec<u8> {
+    let mut options = vec![kind::FRAG, 11, 0, 20];
+    options.extend_from_slice(&[
+        byte(data, 1),
+        byte(data, 2),
+        byte(data, 3),
+        byte(data, 4),
+        byte(data, 5),
+        byte(data, 6),
+        byte(data, 7),
+    ]);
+    options
 }
 
 #[allow(dead_code)]

@@ -64,7 +64,7 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 7 | Typed options: APC (CRC32C), FRAG, MDS, MRDS, REQ, RES | each round-trips encode->parse->decode; APC vs `crc32c` + vector; FRAG length selects terminal; wrong length -> `ParseError` | [x] |
 | 8 | Raw socket send/recv path (`IP_HDRINCL` send + `SOCK_RAW` receive) | root-gated loopback: serializer bytes hit the socket unchanged; UDP Length < IP Total Length on wire; **surplus bytes arrive intact** (premise smoke-tested at Step 0.5); ports filtered; no spurious ICMP | [x] |
 | 9 | Merged into Step 8: raw receive is validated with raw send as one kernel-facing socket step | Step 8 carries the send/recv implementation and round-trip DoD; this row is kept only to avoid renumbering later steps | [-] |
-| 10 | Receive pipeline (pure) | table-driven tests cover deliver/discard, unknown SAFE/UNSAFE, cksum0 x OCS matrix, NOP flood (no root) | [ ] |
+| 10 | Receive pipeline (pure) | table-driven tests cover deliver/discard, unknown SAFE/UNSAFE, cksum0 x OCS matrix, NOP flood (no root) | [x] |
 | 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [ ] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [ ] |
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [ ] |
