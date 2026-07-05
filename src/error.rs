@@ -183,6 +183,61 @@ pub enum SplitError {
     Serialize(#[from] SerializeError),
 }
 
+/// Errors produced by the raw socket wrappers.
+#[derive(Debug, Error)]
+pub enum SocketError {
+    /// An underlying I/O error from a raw socket.
+    #[error("i/o error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// A raw-socket operation needs `CAP_NET_RAW` (or root) and the process lacks it.
+    #[error("operation requires CAP_NET_RAW or root privileges")]
+    PermissionDenied,
+}
+
+/// Errors produced while building and sending UDP-options datagrams.
+#[derive(Debug, Error)]
+pub enum SendError {
+    /// The underlying options serializer rejected the requested options.
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
+
+    /// The FRAG splitter rejected the requested datagram.
+    #[error(transparent)]
+    Split(#[from] SplitError),
+
+    /// A raw-socket operation failed.
+    #[error(transparent)]
+    Socket(#[from] SocketError),
+
+    /// The requested datagram cannot fit in the configured size limit.
+    #[error("datagram is too large: {len} bytes, max {max} bytes")]
+    DatagramTooLarge {
+        /// The computed datagram length.
+        len: usize,
+        /// The configured or protocol maximum.
+        max: usize,
+    },
+
+    /// The send configuration is internally inconsistent.
+    #[error("invalid send configuration: {reason}")]
+    InvalidConfig {
+        /// Human-readable explanation of the rejected configuration.
+        reason: &'static str,
+    },
+}
+
+/// Errors produced while configuring receive-side API policy.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum ReceivePolicyError {
+    /// The API can only require options it reports to users.
+    #[error("option kind {kind:#04x} cannot be required by the API")]
+    UnsupportedRequiredOption {
+        /// The rejected option Kind byte.
+        kind: u8,
+    },
+}
+
 /// Errors that invalidate the whole IP datagram.
 ///
 /// Unlike [`ParseError`], which rejects the options while the UDP user data is still delivered, a
@@ -266,11 +321,7 @@ pub enum RecvError {
         actual: u16,
     },
 
-    /// An underlying I/O error from a raw socket.
-    #[error("i/o error: {0}")]
-    Io(#[from] std::io::Error),
-
-    /// A raw-socket operation needs `CAP_NET_RAW` (or root) and the process lacks it.
-    #[error("operation requires CAP_NET_RAW or root privileges")]
-    PermissionDenied,
+    /// A raw-socket operation failed.
+    #[error("socket error: {0}")]
+    Socket(#[from] SocketError),
 }

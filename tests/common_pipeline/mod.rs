@@ -65,19 +65,26 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
                     delivery,
                     Delivery::Payload {
                         data: user_data.to_vec(),
-                        options: Vec::new()
+                        options: Vec::new(),
+                        option_bearing: true,
+                        reports: Vec::new(),
                     }
                 );
                 return;
             }
             ExpectedDisposition::ZeroPayload => {
-                assert_eq!(
-                    delivery,
-                    Delivery::Payload {
-                        data: Vec::new(),
-                        options: Vec::new()
-                    }
-                );
+                let Delivery::Payload {
+                    data,
+                    options,
+                    option_bearing,
+                    ..
+                } = delivery
+                else {
+                    panic!("expected zero-length payload delivery");
+                };
+                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(options, Vec::new());
+                assert!(option_bearing);
                 return;
             }
             ExpectedDisposition::Buffered => {
@@ -97,8 +104,18 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
     }
 
     match delivery {
-        Delivery::Payload { data, options } => {
+        Delivery::Payload {
+            data,
+            options,
+            option_bearing: _,
+            reports,
+        } => {
             assert_eq!(data, user_data);
+            assert!(
+                reports
+                    .iter()
+                    .all(|report| !matches!(report.kind, OptionKind::Frag | OptionKind::Nop | OptionKind::Eol))
+            );
             for option in options {
                 assert!(matches!(
                     option.kind,

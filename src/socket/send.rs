@@ -86,7 +86,7 @@ mod platform {
 
     use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-    use crate::error::RecvError;
+    use crate::error::SocketError;
     use crate::socket::map_socket_error;
 
     /// Raw IPv4 sender for UDP-options datagrams.
@@ -97,7 +97,7 @@ mod platform {
 
     impl RawSender {
         /// Opens an `AF_INET SOCK_RAW IPPROTO_UDP` socket and enables `IP_HDRINCL`.
-        pub fn new() -> Result<Self, RecvError> {
+        pub fn new() -> Result<Self, SocketError> {
             let socket =
                 Socket::new(Domain::IPV4, Type::from(libc::SOCK_RAW), Some(Protocol::UDP)).map_err(map_socket_error)?;
             set_hdrincl(&socket).map_err(map_socket_error)?;
@@ -105,7 +105,7 @@ mod platform {
         }
 
         /// Sends one already assembled IPv4 datagram.
-        pub fn send(&self, dst: Ipv4Addr, datagram: &[u8]) -> Result<usize, RecvError> {
+        pub fn send(&self, dst: Ipv4Addr, datagram: &[u8]) -> Result<usize, SocketError> {
             let addr = SockAddr::from(SocketAddrV4::new(dst, 0));
             self.socket.send_to(datagram, &addr).map_err(map_socket_error)
         }
@@ -137,7 +137,7 @@ mod platform {
     use std::io;
     use std::net::Ipv4Addr;
 
-    use crate::error::RecvError;
+    use crate::error::SocketError;
 
     /// Raw IPv4 sender for UDP-options datagrams.
     #[derive(Debug, Default)]
@@ -145,16 +145,16 @@ mod platform {
 
     impl RawSender {
         /// Returns [`io::ErrorKind::Unsupported`] on non-Linux hosts.
-        pub fn new() -> Result<Self, RecvError> {
-            Err(RecvError::Io(io::Error::new(
+        pub fn new() -> Result<Self, SocketError> {
+            Err(SocketError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "raw UDP-options send is supported on Linux only",
             )))
         }
 
         /// Returns [`io::ErrorKind::Unsupported`] on non-Linux hosts.
-        pub fn send(&self, _dst: Ipv4Addr, _datagram: &[u8]) -> Result<usize, RecvError> {
-            Err(RecvError::Io(io::Error::new(
+        pub fn send(&self, _dst: Ipv4Addr, _datagram: &[u8]) -> Result<usize, SocketError> {
+            Err(SocketError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "raw UDP-options send is supported on Linux only",
             )))

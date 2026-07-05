@@ -12,12 +12,12 @@ pub mod send;
 use std::io;
 
 #[cfg(target_os = "linux")]
-use crate::error::RecvError;
+use crate::error::SocketError;
 
 #[cfg(target_os = "linux")]
-pub(crate) fn map_socket_error(error: io::Error) -> RecvError {
+pub(crate) fn map_socket_error(error: io::Error) -> SocketError {
     match error.raw_os_error() {
-        Some(libc::EPERM | libc::EACCES) => RecvError::PermissionDenied,
-        _ => RecvError::Io(error),
+        Some(libc::EPERM | libc::EACCES) => SocketError::PermissionDenied,
+        _ => SocketError::Io(error),
     }
 }
