@@ -110,6 +110,79 @@ pub enum SerializeError {
     },
 }
 
+/// Errors produced while splitting one logical UDP datagram into FRAG fragments.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum SplitError {
+    /// The reassembled datagram would exceed the peer's advertised MRDS size.
+    #[error("reassembled UDP datagram is too large: {len} bytes, max {max} bytes")]
+    ReassembledDatagramTooLarge {
+        /// The computed reassembled datagram length, including the UDP header.
+        len: usize,
+        /// The peer's maximum reassembled datagram size.
+        max: usize,
+    },
+
+    /// The fragment count would exceed the peer's advertised MRDS segment count.
+    #[error("fragment count {needed} exceeds peer segment limit {max}")]
+    SegmentLimitExceeded {
+        /// The number of fragments needed for this split.
+        needed: usize,
+        /// The peer's maximum segment count.
+        max: u8,
+    },
+
+    /// The configured fragment surplus budget is too small to carry a required fragment body.
+    #[error("fragment surplus budget is too small: need at least {required} bytes, max {max} bytes")]
+    FragmentCapacityTooSmall {
+        /// The minimum required surplus bytes.
+        required: usize,
+        /// The configured maximum surplus bytes per fragment.
+        max: usize,
+    },
+
+    /// The configured fragment surplus budget cannot fit in one IPv4 datagram.
+    #[error("fragment surplus budget is too large for IPv4: {len} bytes, max {max} bytes")]
+    FragmentSurplusTooLarge {
+        /// The configured surplus byte budget.
+        len: usize,
+        /// The largest surplus body that can be sent with empty UDP user data in IPv4.
+        max: usize,
+    },
+
+    /// The terminal RDOS pointer cannot be represented in the 16-bit FRAG field.
+    #[error("terminal RDOS {rdos} exceeds the 16-bit FRAG field max {max}")]
+    RdosTooLarge {
+        /// The computed RDOS pointer.
+        rdos: usize,
+        /// The largest representable RDOS pointer.
+        max: usize,
+    },
+
+    /// A fragment offset cannot be represented in the 16-bit FRAG field.
+    #[error("fragment offset {offset} exceeds the 16-bit FRAG field max {max}")]
+    FragmentOffsetTooLarge {
+        /// The computed offset.
+        offset: usize,
+        /// The largest representable offset.
+        max: usize,
+    },
+
+    /// The supplied per-datagram options body is too short to be OCS-led.
+    #[error("per-datagram options body is too short: {len} bytes")]
+    OptionsBodyTooShort {
+        /// The supplied body length.
+        len: usize,
+    },
+
+    /// The identification generator has reached the end of the 32-bit space.
+    #[error("FRAG identification generator is exhausted")]
+    IdentificationExhausted,
+
+    /// The underlying options serializer rejected a fragment option body.
+    #[error(transparent)]
+    Serialize(#[from] SerializeError),
+}
+
 /// Errors that invalidate the whole IP datagram.
 ///
 /// Unlike [`ParseError`], which rejects the options while the UDP user data is still delivered, a

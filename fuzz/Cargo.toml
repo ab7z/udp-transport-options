@@ -60,5 +60,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "frag_split"
+path = "fuzz_targets/frag_split.rs"
+test = false
+doc = false
+bench = false
+
 # Standalone workspace root: keeps the nightly-only fuzz build out of the parent crate.
 [workspace]

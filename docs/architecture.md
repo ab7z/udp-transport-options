@@ -225,9 +225,13 @@ is the type that crosses the public API boundary, so the parser's borrow never e
 Fragmentation on the send side (RFC 9868 Sec. 11.4). Splits an oversized datagram into FRAG fragments,
 each carried with empty UDP user data (UDP Length 8) and the fragment data in the surplus area after
 the FRAG option. Non-terminal fragments use the 10-byte FRAG form; the terminal fragment uses the
-12-byte form (carrying the RDOS). The single-fragment (atomic) case is supported; sizing respects MDS
-and MRDS. Input: a datagram plus size constraints. Output: an ordered list of fragment surplus areas.
-Root-free.
+12-byte form (carrying the RDOS). The single-fragment (atomic) case is supported with `Frag.Offset =
+0`; multi-fragment payload bytes use offsets relative to the original UDP header. MDS/path MTU
+selects the per-fragment surplus budget; minimal OCS+FRAG fragment bodies provide S-12/S-14 data
+budgets; MRDS caps the reassembled datagram size and segment count.
+Input: original UDP user data, an optional OCS-led per-datagram options body, and size/ID config.
+Output: an ordered list of OCS-led fragment surplus bodies ready for `assemble_datagram(..., b"",
+body)`. Root-free.
 
 ### `frag/reassembly` (pure)
 
@@ -485,6 +489,36 @@ The `Frag` wire layout (RFC 9868 Sec. 11.4, Figs. 10/11):
 
 Length is 10 for a non-terminal fragment (no RDOS) and 12 for the terminal fragment (with RDOS).
 
+### `frag::split` types
+
+```rust
+pub struct PeerFragmentLimits {
+    pub max_reassembled_size: u16, // MRDS size, default IPv4 2926
+    pub max_segments: u8,          // MRDS segs, default 2
+}
+
+pub struct SplitConfig {
+    pub max_fragment_surplus_len: usize, // OCS-led fragment options + fragment data
+    pub peer: PeerFragmentLimits,
+    pub identification: u32,
+}
+
+pub struct Fragment {
+    pub frag_offset: u16,      // atomic single-fragment uses 0
+    pub terminal: bool,
+    pub rdos: Option<u16>,
+    pub surplus_body: Vec<u8>, // OCS placeholder still zero; raw send patches OCS
+}
+
+pub struct IdentificationGenerator { /* private */ }
+
+pub fn split_datagram(
+    payload: &[u8],
+    per_datagram_options_body: &[u8],
+    config: SplitConfig,
+) -> Result<Vec<Fragment>, SplitError>;
+```
+
 ### `frag::reassembly` types
 
 ```rust
@@ -541,7 +575,7 @@ pub fn process_datagram(
 ) -> Result<Delivery, RecvError>;
 ```
 
-### `error::ParseError`, `error::HeaderError`, and `error::RecvError`
+### `error::ParseError`, `error::SplitError`, `error::HeaderError`, and `error::RecvError`
 
 ```rust
 pub enum ParseError {
@@ -550,6 +584,17 @@ pub enum ParseError {
     DuplicateFrag,                          // FRAG appeared more than once
     NonZeroPad,                             // the single odd-offset alignment pad byte was non-zero
     OcsMismatch,                            // OCS sum did not fold to the one's-complement zero
+}
+
+pub enum SplitError {
+    ReassembledDatagramTooLarge { len: usize, max: usize },
+    SegmentLimitExceeded { needed: usize, max: u8 },
+    FragmentCapacityTooSmall { required: usize, max: usize },
+    RdosTooLarge { rdos: usize, max: usize },
+    FragmentOffsetTooLarge { offset: usize, max: usize },
+    OptionsBodyTooShort { len: usize },
+    IdentificationExhausted,
+    Serialize(SerializeError),
 }
 
 pub enum HeaderError {                      // IP/UDP header invalidates the whole datagram (drop)

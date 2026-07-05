@@ -1,6 +1,6 @@
 # Step 11: FRAG fragmentation (send)
 
-Status: pending
+Status: done
 
 ## Goal
 
@@ -43,14 +43,28 @@ N bytes reassembled); the sizing bound holds; the offset/RDOS arithmetic is corr
 3. Handle the atomic single-fragment (terminal-only) case.
 4. Tests: fragmenting N bytes reassembles to N; sizing respects the MRDS cap.
 
+## Implementation notes
+
+- `frag::split::split_datagram` is pure and socket-free. It emits one OCS-led surplus body per
+  fragment; callers pass that body to the raw send assembler with empty UDP user data.
+- Fragment bodies are minimal: OCS plus exactly one FRAG TLV before fragment data. That keeps the
+  measured budgets at S-12 for non-terminal fragments and S-14 for terminal fragments.
+- `Frag.Offset` is measured from the original UDP header. Multi-fragment splits therefore emit the
+  first payload byte at offset 8, while the RFC standalone/atomic FRAG variant emits offset 0.
+- `PeerFragmentLimits::default_ipv4()` captures the no-MRDS default (2926 bytes, 2 segments).
+
 ## Tasks
 
-- [ ] Fragment-splitting logic and per-fragment surplus assembly.
-- [ ] Identification generation.
-- [ ] Atomic single-fragment case.
-- [ ] Tests: fragmenting N bytes reassembles to N; sizing respects MRDS.
+- [x] Fragment-splitting logic and per-fragment surplus assembly.
+- [x] Identification generation.
+- [x] Atomic single-fragment case.
+- [x] Tests: fragmenting N bytes reassembles to N; sizing respects MRDS.
 
 ## Definition of Done
 
 - Fragmenting an N-byte payload produces fragments whose offsets and terminal RDOS reassemble to N;
   the atomic case is valid; the MRDS cap is respected.
+
+Verification: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and
+`scripts/lean-gate.sh` passed during implementation. The mandatory full `scripts/pre-pr.sh` gate is
+run before PR publication.

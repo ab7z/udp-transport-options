@@ -66,7 +66,7 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 9 | Merged into Step 8: raw receive is validated with raw send as one kernel-facing socket step | Step 8 carries the send/recv implementation and round-trip DoD; this row is kept only to avoid renumbering later steps | [-] |
 | 10 | Receive pipeline (pure) | table-driven tests cover deliver/discard, unknown SAFE/UNSAFE, cksum0 x OCS matrix, NOP flood (no root) | [x] |
 | 10.5 | Wire-verification lane: tcpdump capture on `achim` + independent python pcap checker (own RFC 1071/CRC32C, goldens from `wire-format.md`) + tshark L3/L4 cross-check -- a second oracle for the send-path wire image that breaks the sender/receiver self-reference of the in-process tests | `scripts/vm-ubuntu-server.sh wire` exits 0 (10/10 scenarios); flipping a single captured surplus byte makes the checker fail | [x] |
-| 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [ ] |
+| 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [x] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [ ] |
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [ ] |
 | 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [ ] |
