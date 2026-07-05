@@ -280,6 +280,8 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 
 - **low-level:** `build_datagram()` builds an individual datagram from explicit `RawOption`s, and
   `decode_datagram()` runs one raw datagram through the receive pipeline and receive policy.
+  `build_datagram()` still enforces the RFC rule that FRAG cannot be combined with non-empty UDP
+  user data.
 - **high-level:** `Peer` wraps `RawSender`, `RawReceiver`, `ReassemblyCache`, and an
   `IdentificationGenerator`. `Peer::send()` applies the OCS through the existing serializer/send
   path and auto-fragments when the payload exceeds the configured single-datagram capacity;
@@ -585,7 +587,7 @@ pub enum Delivery {
         data: Vec<u8>,              // the UDP user data handed to the application
         options: Vec<RawOption>,    // successfully processed options
         option_bearing: bool,       // true when a surplus area was present, even if discarded
-        reports: Vec<OptionReport>, // success/fail/ignored status for API consumers
+        reports: Vec<OptionReport>, // datagram status; FragmentSet reports are coalesced successes
     },
     Buffered,                    // the datagram was a fragment; nothing to deliver yet
     Dropped,                     // fragment-local failure; no user delivery

@@ -63,6 +63,15 @@ fn low_level_raw_option_round_trip() {
 }
 
 #[test]
+fn low_level_rejects_frag_with_user_data() {
+    let frag = raw(OptionKind::Frag, &[0; 8]);
+    assert!(matches!(
+        build_datagram(addrs(), b"payload", &[frag]),
+        Err(SendError::InvalidConfig { .. })
+    ));
+}
+
+#[test]
 fn typed_send_options_and_apc_are_reported() {
     let mut options = SendOptions::new().with_apc();
     options.push_typed(Req { token: [9, 8, 7, 6] });

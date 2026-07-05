@@ -299,6 +299,7 @@ impl Peer {
 
 /// Builds one IPv4 datagram from explicit raw options.
 pub fn build_datagram(addrs: DatagramAddrs, payload: &[u8], raw_options: &[RawOption]) -> Result<Vec<u8>, SendError> {
+    validate_low_level_options(payload, raw_options)?;
     let mut builder = OptionsBuilder::new();
     builder.extend_raw(raw_options.iter().cloned());
     let body = builder.finish()?;
@@ -477,6 +478,15 @@ fn validate_send_options(options: &SendOptions) -> Result<(), SendError> {
     if options.include_apc && options.raw_options.iter().any(|option| option.kind == OptionKind::Apc) {
         return Err(SendError::InvalidConfig {
             reason: "automatic APC cannot be combined with a raw APC option",
+        });
+    }
+    Ok(())
+}
+
+fn validate_low_level_options(payload: &[u8], raw_options: &[RawOption]) -> Result<(), SendError> {
+    if !payload.is_empty() && raw_options.iter().any(|option| option.kind == OptionKind::Frag) {
+        return Err(SendError::InvalidConfig {
+            reason: "FRAG requires empty UDP user data",
         });
     }
     Ok(())
