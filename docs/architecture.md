@@ -288,9 +288,10 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
   `Peer::recv()` reassembles transparently and returns only completed user datagrams.
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
-`ReceivePolicy` can require successfully processed APC/MDS/MRDS/REQ/RES options or drop all
-option-bearing datagrams. `SendOptions` selects typed/raw options and automatic APC generation, while
-`SendConfig` controls the datagram size budget, peer MRDS, FRAG enablement, and FRAG Identification.
+`ReceivePolicy` can require successfully processed datagram-level APC/MDS/MRDS/REQ/RES options or drop
+all option-bearing datagrams after the UDP checksum boundary. `SendOptions` selects typed/raw options
+and automatic APC generation, while `SendConfig` controls the datagram size budget, peer MRDS, FRAG
+enablement, and FRAG Identification.
 The API deliberately does not expose option ordering or per-fragment boundary control.
 
 ## 3. The data model
@@ -905,9 +906,11 @@ application delivery.
         | Abort(_) -> Delivery::Dropped
         | valid empty-payload FRAG plus UNSAFE/malformed per-fragment option -> Delivery::Dropped
         v
- Completion path: Complete { tail, udp_length, fragment_options } is re-fed ONCE into process_datagram.
+ Completion path: Complete { tail, udp_length, fragment_options, fragment_option_failures }
+        is re-fed ONCE into process_datagram.
         A reassembled datagram with no FRAG lands at (F) -> Delivery::Payload
-        { data, options }; coalesced per-fragment SAFE options are prepended to the delivered options.
+        { data, options }; coalesced per-fragment SAFE options are prepended only when no fragment
+        failed that option kind.
         A FRAG with non-empty data hits the (F) non-empty branch (options ignored, data delivered,
         Sec. 11.4); a nested FRAG with empty data is rejected -- local anti-loop policy, never a
         second re-feed (the RFC does not define nested fragmentation)

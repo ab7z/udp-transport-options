@@ -5,7 +5,7 @@ use udp_transport_options::api::{
     ApiDelivery, DatagramAddrs, FragmentationMode, OptionSource, OptionStatus, ReceivePolicy, SendConfig, SendOptions,
     build_datagram, build_outgoing_datagrams, decode_datagram,
 };
-use udp_transport_options::error::{ReceivePolicyError, SendError, SplitError};
+use udp_transport_options::error::{ReceivePolicyError, RecvError, SendError, SplitError};
 use udp_transport_options::frag::reassembly::{ReassemblyCache, ReassemblyLimits};
 use udp_transport_options::frag::split::PeerFragmentLimits;
 use udp_transport_options::model::{kind, length};
@@ -205,6 +205,55 @@ fn required_policy_filters_fragment_option_if_any_fragment_failed() {
 }
 
 #[test]
+fn required_policy_does_not_accept_fragment_set_success_as_datagram_success() {
+    let mds = encode(Mds {
+        max_datagram_size: 1500,
+    });
+    let first = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_NON_TERMINAL) + mds.len()),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER),
+        rdos: None,
+    };
+    let second = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_TERMINAL) + mds.len()),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER) + 3,
+        rdos: Some(u16::from(length::UDP_HEADER) + 6),
+    };
+    let first_datagram = fragment_datagram(first, &mds, b"abc");
+    let second_datagram = fragment_datagram(second, &mds, b"def");
+    let mut default_cache = ReassemblyCache::new();
+    let mut cache = ReassemblyCache::new();
+    let policy = ReceivePolicy::new().require_option(OptionKind::Mds).unwrap();
+    let now = Instant::now();
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut default_cache, now, &ReceivePolicy::default()).unwrap(),
+        ApiDelivery::Buffered
+    );
+    let ApiDelivery::Received(received) =
+        decode_datagram(&second_datagram, &mut default_cache, now, &ReceivePolicy::default()).unwrap()
+    else {
+        panic!("fragment-set success should deliver with default policy");
+    };
+    assert!(received.reports.iter().any(|report| {
+        report.kind == OptionKind::Mds
+            && report.status == OptionStatus::Success
+            && report.source == OptionSource::FragmentSet
+    }));
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut cache, now, &policy).unwrap(),
+        ApiDelivery::Buffered
+    );
+    assert_eq!(
+        decode_datagram(&second_datagram, &mut cache, now, &policy).unwrap(),
+        ApiDelivery::Filtered
+    );
+}
+
+#[test]
 fn drop_all_option_bearing_filters_even_discarded_options() {
     let mut datagram = build_datagram(addrs(), b"payload", &[raw(OptionKind::Req, &[1, 2, 3, 4])]).unwrap();
     let (ip, udp_at) = IpRepr::parse(&datagram).unwrap();
@@ -217,6 +266,18 @@ fn drop_all_option_bearing_filters_even_discarded_options() {
         decode_datagram(&datagram, &mut ReassemblyCache::new(), Instant::now(), &policy).unwrap(),
         ApiDelivery::Filtered
     );
+}
+
+#[test]
+fn drop_all_option_bearing_preserves_udp_checksum_errors() {
+    let mut datagram = build_datagram(addrs(), b"payload", &[raw(OptionKind::Req, &[1, 2, 3, 4])]).unwrap();
+    datagram[20 + 6] ^= 0xff;
+    let policy = ReceivePolicy::new().drop_all_option_bearing(true);
+
+    assert!(matches!(
+        decode_datagram(&datagram, &mut ReassemblyCache::new(), Instant::now(), &policy),
+        Err(RecvError::UdpChecksumMismatch { .. })
+    ));
 }
 
 #[test]

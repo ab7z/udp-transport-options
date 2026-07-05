@@ -355,7 +355,7 @@ pub fn decode_datagram(
     now: Instant,
     policy: &ReceivePolicy,
 ) -> Result<ApiDelivery, RecvError> {
-    if policy.drop_all_option_bearing && wire_option_bearing(datagram).unwrap_or(false) {
+    if policy.drop_all_option_bearing && wire_option_bearing(datagram)? {
         warn_policy_sampled(
             &DROP_ALL_WARNINGS,
             "dropping UDP datagram because receive policy rejects all option-bearing packets",
@@ -503,20 +503,38 @@ fn fragment_surplus_budget(config: SendConfig) -> Result<usize, SendError> {
 
 fn missing_required_option(policy: &ReceivePolicy, reports: &[OptionReport]) -> Option<OptionKind> {
     policy.required_options.iter().copied().find(|required| {
-        !reports
-            .iter()
-            .any(|report| report.kind == *required && report.status == OptionStatus::Success)
+        !reports.iter().any(|report| {
+            report.kind == *required
+                && report.status == OptionStatus::Success
+                && report.source == OptionSource::Datagram
+        })
     })
 }
 
-fn wire_option_bearing(datagram: &[u8]) -> Option<bool> {
-    let (ip, udp_at) = IpRepr::parse(datagram).ok()?;
-    let ip_end = ip.header_len().checked_add(ip.transport_payload_len())?;
-    if datagram.len() < ip_end {
-        return None;
+fn wire_option_bearing(datagram: &[u8]) -> Result<bool, RecvError> {
+    let (ip, udp_at) = IpRepr::parse(datagram)?;
+    let ip_end = ip.header_len() + ip.transport_payload_len();
+    let udp = UdpHeader::parse(&datagram[udp_at..ip_end])?;
+    let udp_len = usize::from(udp.length);
+    if udp_len > ip.transport_payload_len() {
+        return Err(RecvError::UdpLengthExceedsIpPayload {
+            udp_len: udp.length,
+            transport_payload_len: ip.transport_payload_len(),
+        });
     }
-    let udp = UdpHeader::parse(&datagram[udp_at..ip_end]).ok()?;
-    Some(usize::from(udp.length) < ip.transport_payload_len())
+    let user_data_at = udp_at + UDP_HEADER_LEN;
+    let surplus_start = udp_at + udp_len;
+    let user_data = &datagram[user_data_at..surplus_start];
+    if udp.checksum != 0 {
+        let expected = UdpHeader { checksum: 0, ..udp }.compute_checksum(&ip, user_data);
+        if expected != udp.checksum {
+            return Err(RecvError::UdpChecksumMismatch {
+                expected,
+                actual: udp.checksum,
+            });
+        }
+    }
+    Ok(udp_len < ip.transport_payload_len())
 }
 
 fn is_required_reportable_kind(kind: OptionKind) -> bool {
