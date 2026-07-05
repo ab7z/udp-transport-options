@@ -292,6 +292,9 @@ The API logic is pure orchestration; the privileged work happens inside the sock
 all option-bearing datagrams after the UDP checksum boundary. `SendOptions` selects typed/raw options
 and automatic APC generation, while `SendConfig` controls the datagram size budget, peer MRDS, FRAG
 enablement, and FRAG Identification.
+Raw option guards are based on the canonical wire Kind byte: `OptionKind::Other(3)` is still FRAG
+and `OptionKind::Other(2)` is still APC for API validation, even though callers should normally use
+the named variants.
 The API deliberately does not expose option ordering or per-fragment boundary control.
 
 ## 3. The data model
@@ -460,6 +463,10 @@ pub struct RawOption {
 
 impl<'a> From<OptionRef<'a>> for RawOption { /* copies value into a Vec */ }
 ```
+
+The wire Kind byte is canonical for both serialization and public API guard checks. For example,
+`OptionKind::Other(3)` serializes as a FRAG option and is rejected by API paths that forbid
+caller-supplied FRAG.
 
 ### `options::typed::TypedOption` and the typed structs
 

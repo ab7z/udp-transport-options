@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use crate::error::{ReceivePolicyError, RecvError, SendError};
 use crate::frag::reassembly::ReassemblyCache;
 use crate::frag::split::{IdentificationGenerator, PeerFragmentLimits, SplitConfig, split_datagram};
-use crate::model::length;
+use crate::model::{kind, length};
 use crate::options::RawOption;
 use crate::options::kind::OptionKind;
 use crate::options::parse::OptionsIter;
@@ -141,6 +141,7 @@ impl ReceivePolicy {
 
     /// Requires a reportable option to be present and successfully processed.
     pub fn require_option(mut self, kind: OptionKind) -> Result<Self, ReceivePolicyError> {
+        let kind = OptionKind::from_byte(kind.to_byte());
         if !is_required_reportable_kind(kind) {
             return Err(ReceivePolicyError::UnsupportedRequiredOption { kind: kind.to_byte() });
         }
@@ -470,12 +471,12 @@ fn validate_send_config(config: SendConfig) -> Result<(), SendError> {
 }
 
 fn validate_send_options(options: &SendOptions) -> Result<(), SendError> {
-    if options.raw_options.iter().any(|option| option.kind == OptionKind::Frag) {
+    if raw_options_contain_kind(&options.raw_options, kind::FRAG) {
         return Err(SendError::InvalidConfig {
             reason: "high-level send options cannot include FRAG",
         });
     }
-    if options.include_apc && options.raw_options.iter().any(|option| option.kind == OptionKind::Apc) {
+    if options.include_apc && raw_options_contain_kind(&options.raw_options, kind::APC) {
         return Err(SendError::InvalidConfig {
             reason: "automatic APC cannot be combined with a raw APC option",
         });
@@ -484,12 +485,16 @@ fn validate_send_options(options: &SendOptions) -> Result<(), SendError> {
 }
 
 fn validate_low_level_options(payload: &[u8], raw_options: &[RawOption]) -> Result<(), SendError> {
-    if !payload.is_empty() && raw_options.iter().any(|option| option.kind == OptionKind::Frag) {
+    if !payload.is_empty() && raw_options_contain_kind(raw_options, kind::FRAG) {
         return Err(SendError::InvalidConfig {
             reason: "FRAG requires empty UDP user data",
         });
     }
     Ok(())
+}
+
+fn raw_options_contain_kind(raw_options: &[RawOption], raw_kind: u8) -> bool {
+    raw_options.iter().any(|option| option.kind.to_byte() == raw_kind)
 }
 
 fn fragment_surplus_budget(config: SendConfig) -> Result<usize, SendError> {

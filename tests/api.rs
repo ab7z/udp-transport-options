@@ -98,6 +98,15 @@ fn low_level_rejects_frag_with_user_data() {
 }
 
 #[test]
+fn low_level_rejects_frag_wire_kind_alias_with_user_data() {
+    let frag = raw(OptionKind::Other(kind::FRAG), &[0; 8]);
+    assert!(matches!(
+        build_datagram(addrs(), b"payload", &[frag]),
+        Err(SendError::InvalidConfig { .. })
+    ));
+}
+
+#[test]
 fn typed_send_options_and_apc_are_reported() {
     let mut options = SendOptions::new().with_apc();
     options.push_typed(Req { token: [9, 8, 7, 6] });
@@ -304,6 +313,11 @@ fn drop_all_option_bearing_filters_fragments_before_buffering() {
 
 #[test]
 fn required_policy_rejects_internal_or_unreportable_options() {
+    let policy = ReceivePolicy::new()
+        .require_option(OptionKind::Other(kind::APC))
+        .unwrap();
+    assert_eq!(policy.required_options(), &[OptionKind::Apc]);
+
     assert!(matches!(
         ReceivePolicy::new().require_option(OptionKind::Frag),
         Err(ReceivePolicyError::UnsupportedRequiredOption { kind: 3 })
@@ -319,10 +333,24 @@ fn high_level_send_rejects_raw_frag_and_duplicate_apc() {
         Err(SendError::InvalidConfig { .. })
     ));
 
+    let mut with_frag_alias = SendOptions::new();
+    with_frag_alias.push_raw(raw(OptionKind::Other(kind::FRAG), &[0; 8]));
+    assert!(matches!(
+        build_outgoing_datagrams(addrs(), b"payload", with_frag_alias, SendConfig::default()),
+        Err(SendError::InvalidConfig { .. })
+    ));
+
     let mut with_raw_apc = SendOptions::new().with_apc();
     with_raw_apc.push_raw(raw(OptionKind::Apc, &0u32.to_be_bytes()));
     assert!(matches!(
         build_outgoing_datagrams(addrs(), b"payload", with_raw_apc, SendConfig::default()),
+        Err(SendError::InvalidConfig { .. })
+    ));
+
+    let mut with_raw_apc_alias = SendOptions::new().with_apc();
+    with_raw_apc_alias.push_raw(raw(OptionKind::Other(kind::APC), &0u32.to_be_bytes()));
+    assert!(matches!(
+        build_outgoing_datagrams(addrs(), b"payload", with_raw_apc_alias, SendConfig::default()),
         Err(SendError::InvalidConfig { .. })
     ));
 }
