@@ -9,6 +9,13 @@ set -euo pipefail
 # Repo root: .cargo/config.toml and the relative runner path only resolve from here.
 cd "$(dirname "$0")/.."
 
+# Nested checkouts (e.g. git worktrees under .claude/worktrees/) see BOTH this checkout's
+# .cargo/config.toml and the parent checkout's; cargo joins array values when merging config
+# files, which would invoke the runner with itself as its first argument (it then ships itself
+# and fails on achim with "Host key verification failed"). The environment variable takes
+# precedence over all config files and keeps the runner single.
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUNNER="$PWD/scripts/achim-runner.sh"
+
 HOST="${VM_UBUNTU_SERVER_HOST:-achim}"
 REMOTE_DIR="${VM_UBUNTU_SERVER_DIR:-udp-transport-options}"
 TARGET=aarch64-unknown-linux-musl
@@ -29,6 +36,7 @@ Commands:
   verify      Run build, test, fmt, and clippy (default)
   ignored     Root-gated test lane: test binaries run under sudo on achim (ACHIM_SUDO=1)
   spike       Cross-build the spike examples, sync, and run the Step 0.5 spike on achim
+  wire        Cross-build, sync, and run the tcpdump wire-verification lane on achim (root)
   shell       Open a shell in the remote run directory on achim
   run <cmd>   Run an arbitrary command in the remote run directory on achim
 
@@ -48,8 +56,14 @@ bootstrap() {
     rustup target add "$TARGET"
     ssh "$HOST" 'set -eu
 echo "ssh: ok ($(uname -sm))"
-command -v rsync >/dev/null && echo "rsync: ok"
-sudo -n true && echo "sudo -n: ok"'
+command -v rsync >/dev/null || { echo "rsync: MISSING" >&2; exit 1; }
+echo "rsync: ok"
+sudo -n true || { echo "sudo -n: FAILED (the root-gated lanes need passwordless sudo)" >&2; exit 1; }
+echo "sudo -n: ok"
+# Informational only: the wire lane re-checks these itself with a hard error.
+for tool in tcpdump tshark python3; do
+    command -v "$tool" >/dev/null && echo "$tool: ok" || echo "$tool: MISSING (wire lane needs it: sudo apt-get install -y $tool)"
+done'
 }
 
 sync_bins() {
@@ -58,8 +72,9 @@ sync_bins() {
     rsync -az \
         "$TARGET_DIR/udpopt-send" "$TARGET_DIR/udpopt-recv" \
         "$TARGET_DIR/examples/spike_server" "$TARGET_DIR/examples/spike_client" \
+        "$TARGET_DIR/examples/wire_probe" \
         "$HOST:$REMOTE_DIR/bin/"
-    rsync -az scripts/spike.sh "$HOST:$REMOTE_DIR/scripts/"
+    rsync -az scripts/spike.sh scripts/wire-check.sh scripts/wire-check.py "$HOST:$REMOTE_DIR/scripts/"
 }
 
 cmd="${1:-verify}"
@@ -94,6 +109,10 @@ case "$cmd" in
     spike)
         sync_bins
         ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); SPIKE_SKIP_BUILD=1 SPIKE_BIN_DIR=bin scripts/spike.sh"
+        ;;
+    wire)
+        sync_bins
+        ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); WIRE_SKIP_BUILD=1 WIRE_BIN_DIR=bin scripts/wire-check.sh"
         ;;
     shell)
         ssh -t "$HOST" "cd $(remote_dir_q) 2>/dev/null || cd; exec \${SHELL:-/bin/bash}"

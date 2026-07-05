@@ -24,10 +24,13 @@ The library and binaries **compile** on any platform, but the raw-socket paths o
 **`scripts/pre-pr.sh` is mandatory before opening or updating any PR.** Its lanes, fail-fast in
 order: `cargo fmt --check`, host clippy (`-D warnings`), host `cargo test` with `PROPTEST_CASES`
 (default 1024), `scripts/lean-gate.sh` (Lean spec build + theorem axiom audit),
-`scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy), and a time-boxed
+`scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy),
+`scripts/vm-ubuntu-server.sh wire` (root-gated tcpdump wire verification on achim,
+`scripts/wire-check.sh`), and a time-boxed
 libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host. One-time
 prerequisites: `rustup toolchain install nightly` and `cargo install cargo-fuzz`; the Lean lane uses
-the repo-pinned toolchain under `formal/lean-rfc9868/`. The achim ssh runner forwards no
+the repo-pinned toolchain under `formal/lean-rfc9868/`; the wire lane needs `tshark` on achim
+(`sudo apt-get install -y tshark`). The achim ssh runner forwards no
 environment, so the cross-target property tests always run the proptest default of 256 cases.
 
 ## Scope
@@ -136,7 +139,8 @@ On macOS, develop locally and **cross-compile** for `aarch64-unknown-linux-musl`
 via `rust-lld`, see `.cargo/config.toml`); binaries only *run* on the `achim` SSH host, driven by
 `scripts/vm-ubuntu-server.sh <cmd>`. `cargo test --target ...` executes every test binary on `achim`
 through the cargo runner `scripts/achim-runner.sh`; the root-gated lanes run them under sudo there
-(`scripts/vm-ubuntu-server.sh ignored`, `scripts/vm-ubuntu-server.sh spike`). achim carries no Rust
+(`scripts/vm-ubuntu-server.sh ignored`, `scripts/vm-ubuntu-server.sh spike`,
+`scripts/vm-ubuntu-server.sh wire`). achim carries no Rust
 toolchain. See the README "Cross-compiling and the achim Linux test host" section.
 
 ## Git workflow

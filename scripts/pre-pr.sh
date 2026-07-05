@@ -4,8 +4,9 @@
 # Lanes, fail-fast in order: host fmt/clippy/tests (property tests at PROPTEST_CASES, default
 # 1024), the Lean gate (formal specs build + kernel axiom audit, scripts/lean-gate.sh), the achim
 # cross verify (build + test + fmt + clippy for aarch64-unknown-linux-musl; the ssh runner
-# forwards no environment, so proptest runs its default 256 cases there), and a time-boxed
-# libFuzzer smoke per fuzz target on this host.
+# forwards no environment, so proptest runs its default 256 cases there), the achim wire lane
+# (tcpdump capture + independent checker; needs passwordless sudo on achim, see
+# scripts/wire-check.sh), and a time-boxed libFuzzer smoke per fuzz target on this host.
 #
 # One-time prerequisites:  rustup toolchain install nightly && cargo install cargo-fuzz
 # (cargo +nightly overrides the rust-toolchain.toml pin for the fuzz lane only.)
@@ -47,6 +48,7 @@ lane "clippy host" cargo clippy --all-targets -- -D warnings
 lane "test host ($PROPTEST_CASES proptest cases)" env PROPTEST_CASES="$PROPTEST_CASES" cargo test
 lane "lean gate (build + axiom audit)" scripts/lean-gate.sh
 lane "achim verify" scripts/vm-ubuntu-server.sh verify
+lane "achim wire (tcpdump + tshark second oracle)" scripts/vm-ubuntu-server.sh wire
 for target in "${FUZZ_TARGETS[@]}"; do
     mkdir -p "fuzz/corpus/$target" "fuzz/seeds/$target"
     max_len=2048

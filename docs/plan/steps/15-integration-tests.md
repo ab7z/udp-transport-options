@@ -20,6 +20,10 @@ Not applicable: tests are oracles and regressions, not verification targets. The
 the empirical complement to the Lean track -- it checks the system path that Lean deliberately
 excludes (sockets, kernel, privileges). See `LEAN_RFC9868_VALIDATION.md`.
 
+Note: this suite validates implementation-against-implementation through real sockets. Byte-level
+independence from the implementation is the Step 10.5 wire lane (`scripts/vm-ubuntu-server.sh
+wire`, `docs/plan/steps/10b-wire-check.md`), which stays alive alongside this suite.
+
 ## Plan
 
 1. Add a `tests/` harness with a privilege preflight that skips (does not fail) without

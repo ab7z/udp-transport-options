@@ -13,8 +13,8 @@ that tracks status.
   method signatures, the send/receive data flows, and the design rules.
 - [`wire-format.md`](../wire-format.md) - byte-level reference: surplus-area layout, the OCS
   algorithm, the option TLV/extended forms, the option-kind registry, and the FRAG layouts.
-- [`steps/`](steps/) - one file per step (0-15, 17; 16 removed with IPv6; 9 merged into 8)
-  with Requirements / Plan / Tasks / DoD.
+- [`steps/`](steps/) - one file per step (0-15 including the letter-suffixed 0.5 and 10.5, 17;
+  16 removed with IPv6; 9 merged into 8) with Requirements / Plan / Tasks / DoD.
 - The repo-root [`CLAUDE.md`](../../CLAUDE.md) holds the working conventions and a condensed overview.
 
 ## Goal
@@ -65,6 +65,7 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 8 | Raw socket send/recv path (`IP_HDRINCL` send + `SOCK_RAW` receive) | root-gated loopback: serializer bytes hit the socket unchanged; UDP Length < IP Total Length on wire; **surplus bytes arrive intact** (premise smoke-tested at Step 0.5); ports filtered; no spurious ICMP | [x] |
 | 9 | Merged into Step 8: raw receive is validated with raw send as one kernel-facing socket step | Step 8 carries the send/recv implementation and round-trip DoD; this row is kept only to avoid renumbering later steps | [-] |
 | 10 | Receive pipeline (pure) | table-driven tests cover deliver/discard, unknown SAFE/UNSAFE, cksum0 x OCS matrix, NOP flood (no root) | [x] |
+| 10.5 | Wire-verification lane: tcpdump capture on `achim` + independent python pcap checker (own RFC 1071/CRC32C, goldens from `wire-format.md`) + tshark L3/L4 cross-check -- a second oracle for the send-path wire image that breaks the sender/receiver self-reference of the in-process tests | `scripts/vm-ubuntu-server.sh wire` exits 0 (10/10 scenarios); flipping a single captured surplus byte makes the checker fail | [x] |
 | 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [ ] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [ ] |
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [ ] |
@@ -110,9 +111,9 @@ stable (no renumbering).
   `LEAN_RFC9868_VALIDATION.md` define the scope. Socket I/O and middlebox behavior stay outside
   the Lean claim (empirical lanes above).
 - Before every PR (opening and updating): the mandatory local gate `scripts/pre-pr.sh` (host
-  fmt/clippy/test with 1024 proptest cases, Lean spec build + axiom audit, achim cross verify, and
-  a time-boxed libFuzzer smoke). Every step that adds a parsing surface extends the property tests
-  and fuzz targets in the same commit.
+  fmt/clippy/test with 1024 proptest cases, Lean spec build + axiom audit, achim cross verify, the
+  achim wire lane, and a time-boxed libFuzzer smoke). Every step that adds a parsing surface
+  extends the property tests and fuzz targets in the same commit.
 - Functional (root-free): `cargo test` locally, plus `scripts/vm-ubuntu-server.sh test`
   (cross-compiled test binaries execute on `achim` via the cargo runner).
 - Integration (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh ignored` (the runner executes
@@ -120,6 +121,11 @@ stable (no renumbering).
 - On macOS, all Linux runtime steps are cross-compiled for `aarch64-unknown-linux-musl` and only
   *executed* on `achim` via `scripts/vm-ubuntu-server.sh`, e.g. `verify` for the normal lane and
   `ignored` for root-gated tests; `achim` carries no Rust toolchain.
+- Wire (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh wire` (Step 10.5) -- tcpdump captures
+  the `wire_probe` scenario set on loopback; `scripts/wire-check.py` independently re-derives the
+  IP/UDP checksums, the OCS, and the APC CRC32C, checks golden surplus bytes typed from
+  `wire-format.md`, and cross-checks the L3/L4 fields against tshark.
 - End-to-end: the `udpopt-send`/`udpopt-recv` CLIs over loopback, confirmed with a `tcpdump`/Wireshark
-  capture showing the surplus area on the wire.
+  capture showing the surplus area on the wire (the byte-level capture check itself is automated by
+  the Step 10.5 wire lane).
 - Empirical (Step 17): the netns/veth runbook for the thesis's staged environments.

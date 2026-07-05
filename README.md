@@ -71,7 +71,8 @@ transparently by the cargo runner `scripts/achim-runner.sh` (wired up in
 toolchain.
 
 ```sh
-scripts/vm-ubuntu-server.sh bootstrap      # one-time: add the local musl target; check ssh/sudo/rsync on achim
+scripts/vm-ubuntu-server.sh bootstrap      # one-time: add the local musl target; check ssh/sudo/rsync
+                                           # and tcpdump/tshark/python3 (wire lane) on achim
 scripts/vm-ubuntu-server.sh build          # cargo build --target aarch64-unknown-linux-musl (local)
 scripts/vm-ubuntu-server.sh test           # cargo test --target ...; test binaries execute on achim
 scripts/vm-ubuntu-server.sh fmt
@@ -86,6 +87,11 @@ scripts/vm-ubuntu-server.sh shell
 # Step 0.5 spike: surplus-area survival over a staged 1500-MTU veth link across two netns;
 # cross-builds the spike examples, syncs the binaries, and runs scripts/spike.sh on achim
 scripts/vm-ubuntu-server.sh spike
+
+# Step 10.5 wire-verification lane: tcpdump captures the wire_probe scenario set on loopback and
+# the independent checker scripts/wire-check.py verifies the post-kernel bytes (plus a tshark
+# L3/L4 cross-check; one-time prerequisite on achim: sudo apt-get install -y tshark)
+scripts/vm-ubuntu-server.sh wire
 ```
 
 Set `VM_UBUNTU_SERVER_HOST` to use a different SSH alias, or `VM_UBUNTU_SERVER_DIR` to use another
