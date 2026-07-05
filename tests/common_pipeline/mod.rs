@@ -4,7 +4,8 @@
 // target via `include!`. Keep this file free of inner attributes so both contexts compile the same
 // assertions.
 
-use udp_transport_options::frag::reassembly::ReassemblyCache;
+use std::time::Instant;
+use udp_transport_options::frag::reassembly::{FragKey, ReassemblyCache, ReassemblyOutcome};
 use udp_transport_options::model::{kind, length};
 use udp_transport_options::options::kind::OptionKind;
 use udp_transport_options::options::ocs::{self, OcsCheck};
@@ -23,12 +24,14 @@ enum ExpectedDisposition {
     ZeroPayload,
     Buffered,
     Dropped,
+    ReassembledComplete,
     Continue,
 }
 
 pub fn check_pipeline_invariants(buf: &[u8]) {
     let mut cache = ReassemblyCache::new();
-    let result = process_datagram(buf, &mut cache);
+    let now = Instant::now();
+    let result = process_datagram(buf, &mut cache, now);
 
     let Ok((ip, udp_at)) = IpRepr::parse(buf) else {
         assert!(result.is_err());
@@ -55,7 +58,7 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
     }
 
     let delivery = result.expect("valid header and checksum should not be dropped");
-    if let Some(expected) = expected_options_disposition(datagram, &ip, &udp, user_data) {
+    if let Some(expected) = expected_options_disposition(datagram, &ip, &udp, user_data, now) {
         match expected {
             ExpectedDisposition::DeliverWithoutOptions => {
                 assert_eq!(
@@ -83,6 +86,10 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
             }
             ExpectedDisposition::Dropped => {
                 assert_eq!(delivery, Delivery::Dropped);
+                return;
+            }
+            ExpectedDisposition::ReassembledComplete => {
+                assert_ne!(delivery, Delivery::Buffered);
                 return;
             }
             ExpectedDisposition::Continue => {}
@@ -117,6 +124,7 @@ fn expected_options_disposition(
     ip: &IpRepr,
     udp: &UdpHeader,
     user_data: &[u8],
+    now: Instant,
 ) -> Option<ExpectedDisposition> {
     let layout = locate_surplus(ip, udp)?;
     if ocs::check_pad(datagram[layout.starts_at], layout.needs_pad).is_err() {
@@ -131,29 +139,38 @@ fn expected_options_disposition(
     }
 
     Some(classify_trusted_options(
+        ip,
+        udp,
         &body[usize::from(length::OCS)..],
         user_data.is_empty(),
         layout.ocs_at() + usize::from(length::OCS) - ip.header_len(),
+        now,
     ))
 }
 
 fn classify_trusted_options(
+    ip: &IpRepr,
+    udp: &UdpHeader,
     options_bytes: &[u8],
     user_data_empty: bool,
     options_offset_from_udp_header: usize,
+    now: Instant,
 ) -> ExpectedDisposition {
-    let options_bytes = match fragment_option_limit(options_bytes, user_data_empty, options_offset_from_udp_header) {
-        FragmentOptionLimit::Full => options_bytes,
-        FragmentOptionLimit::End(end) => &options_bytes[..end],
-        FragmentOptionLimit::MalformedFrag => return ExpectedDisposition::ZeroPayload,
-    };
+    let full_options_bytes = options_bytes;
+    let (options_bytes, fragment_data) =
+        match fragment_option_limit(options_bytes, user_data_empty, options_offset_from_udp_header) {
+            FragmentOptionLimit::Full => (options_bytes, &[][..]),
+            FragmentOptionLimit::End(end) => (&options_bytes[..end], &full_options_bytes[end..]),
+            FragmentOptionLimit::MalformedFrag => return ExpectedDisposition::Dropped,
+            FragmentOptionLimit::UnsupportedUnsafeBeforeFrag => return ExpectedDisposition::Dropped,
+        };
     let mut iter = OptionsIter::new(options_bytes);
     let mut seen = [false; 256];
-    let mut valid_frag_seen = false;
+    let mut valid_frag_seen = None;
 
     for item in iter.by_ref() {
         let Ok(option) = item else {
-            if valid_frag_seen && user_data_empty {
+            if valid_frag_seen.is_some() && user_data_empty {
                 return ExpectedDisposition::Dropped;
             }
             return ExpectedDisposition::DeliverWithoutOptions;
@@ -168,15 +185,15 @@ fn classify_trusted_options(
                 }
                 let seen_frag = &mut seen[usize::from(raw_kind)];
                 if *seen_frag {
-                    return if valid_frag_seen && user_data_empty {
+                    return if valid_frag_seen.is_some() && user_data_empty {
                         ExpectedDisposition::Dropped
                     } else {
                         ExpectedDisposition::DeliverWithoutOptions
                     };
                 }
                 *seen_frag = true;
-                if Frag::decode(option.value).is_ok() {
-                    valid_frag_seen = true;
+                if let Ok(frag) = Frag::decode(option.value) {
+                    valid_frag_seen = Some(frag);
                 } else {
                     return ExpectedDisposition::ZeroPayload;
                 }
@@ -196,7 +213,7 @@ fn classify_trusted_options(
                 }
             }
             OptionKind::Other(_) => {
-                if valid_frag_seen {
+                if valid_frag_seen.is_some() {
                     return if user_data_empty {
                         ExpectedDisposition::Dropped
                     } else {
@@ -208,9 +225,9 @@ fn classify_trusted_options(
         }
     }
 
-    if valid_frag_seen {
+    if let Some(frag) = valid_frag_seen {
         if user_data_empty {
-            ExpectedDisposition::Buffered
+            classify_reassembly_fragment(ip, udp, frag, fragment_data, now)
         } else {
             ExpectedDisposition::DeliverWithoutOptions
         }
@@ -219,11 +236,34 @@ fn classify_trusted_options(
     }
 }
 
+fn classify_reassembly_fragment(
+    ip: &IpRepr,
+    udp: &UdpHeader,
+    frag: Frag,
+    fragment_data: &[u8],
+    now: Instant,
+) -> ExpectedDisposition {
+    let mut cache = ReassemblyCache::new();
+    let key = FragKey {
+        src: ip.src,
+        dst: ip.dst,
+        src_port: udp.src_port,
+        dst_port: udp.dst_port,
+        identification: frag.identification,
+    };
+    match cache.insert(key, frag, fragment_data, now) {
+        ReassemblyOutcome::Incomplete => ExpectedDisposition::Buffered,
+        ReassemblyOutcome::Abort(_) => ExpectedDisposition::Dropped,
+        ReassemblyOutcome::Complete { .. } => ExpectedDisposition::ReassembledComplete,
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum FragmentOptionLimit {
     Full,
     End(usize),
     MalformedFrag,
+    UnsupportedUnsafeBeforeFrag,
 }
 
 fn fragment_option_limit(
@@ -236,6 +276,7 @@ fn fragment_option_limit(
     }
 
     let mut iter = OptionsIter::new(options_bytes);
+    let mut unsupported_unsafe_before_frag = false;
     for item in iter.by_ref() {
         let Ok(option) = item else {
             return FragmentOptionLimit::Full;
@@ -252,9 +293,14 @@ fn fragment_option_limit(
                 if end > options_bytes.len() || end < option_end_offset(options_bytes, option) {
                     return FragmentOptionLimit::MalformedFrag;
                 }
+                if unsupported_unsafe_before_frag {
+                    return FragmentOptionLimit::UnsupportedUnsafeBeforeFrag;
+                }
                 return FragmentOptionLimit::End(end);
             }
-            OptionKind::Other(_) if option.kind.is_unsafe() => return FragmentOptionLimit::Full,
+            OptionKind::Other(_) if option.kind.is_unsafe() => {
+                unsupported_unsafe_before_frag = true;
+            }
             OptionKind::Eol => return FragmentOptionLimit::Full,
             _ => {}
         }

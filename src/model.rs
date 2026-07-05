@@ -76,6 +76,8 @@ pub mod limits {
     pub const MIN_REASSEMBLY_SEGMENTS: u8 = 2;
     /// Upper bound on the fragment-reassembly timeout.
     pub const REASSEMBLY_TIMEOUT_MAX: Duration = Duration::from_secs(120);
+    /// Maximum number of incomplete FRAG datagrams kept by one receiver.
+    pub const REASSEMBLY_MAX_PENDING_PARTIALS: usize = 64;
     /// Number of consecutive NOP options beyond which a receiver should log a possible DoS.
     pub const NOP_RUN_DOS_THRESHOLD: usize = 7;
 }

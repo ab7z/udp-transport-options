@@ -1,6 +1,6 @@
 # Step 12: FRAG reassembly (recv)
 
-Status: pending
+Status: implemented
 
 ## Goal
 
@@ -37,21 +37,24 @@ timestamps.
 
 1. `ReassemblyCache` keyed by `FragKey`, with a per-key partial holding offset-sorted segments, the
    terminal flag, the RDOS, a byte total, and a receive timestamp.
-2. Insert with overlap detection (overlap -> `Abort(Overlap)`); enforce per-pair byte and segment
-   caps plus a global pending-partial cap.
+2. Insert with overlap detection (overlap -> `Abort(Overlap)`; exact duplicate fragments are ignored
+   as packet duplicates only when bytes and per-fragment options match); enforce per-datagram byte and
+   segment caps plus a global pending-partial cap for retained incomplete state.
 3. Timeout and garbage-collect partials (<= 2 minutes); on completion reconstruct the datagram
-   (`Complete(bytes)`) and re-pass once: FRAG with non-empty data -> options ignored, data delivered
-   (Sec. 11.4); nested FRAG with empty data -> rejected (local policy).
+   (`Complete { tail, udp_length, fragment_options }`) and re-pass once. Coalesced per-fragment
+   MDS/MRDS minima and latest REQ/RES tokens are prepended to the delivered options; FRAG with
+   non-empty data -> options ignored, data delivered (Sec. 11.4); nested FRAG with empty data ->
+   rejected (local policy).
 4. Tests: in-order and out-of-order success; overlap abort; each cap firing; GC; pair isolation; no
    re-process loop.
 
 ## Tasks
 
-- [ ] Cache structure, insertion, overlap detection.
-- [ ] Timeout + GC.
-- [ ] Per-pair and global limits.
-- [ ] Completion + single re-pass (RFC rule for non-empty data; empty-data nested FRAG rejected).
-- [ ] Tests for each behavior.
+- [x] Cache structure, insertion, overlap detection.
+- [x] Timeout + GC.
+- [x] Per-datagram and global limits.
+- [x] Completion + single re-pass (RFC rule for non-empty data; empty-data nested FRAG rejected).
+- [x] Tests for each behavior.
 
 ## Definition of Done
 
