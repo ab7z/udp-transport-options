@@ -74,6 +74,13 @@ checker re-derives from the captured layout instead of trusting the golden.
   with checksum 0x0000 on the wire), consistent with Step 0.5 Finding A: only IP Total Length and
   the IP header checksum are rewritten.
 - Linux `lo` captures as `LINKTYPE_EN10MB` with a fake all-zero Ethernet header (not `DLT_NULL`).
+- **A byte-palindrome checksum can mask an alignment bug.** The checker's first odd-pad OCS
+  re-derivation grouped the RFC 1071 words one byte off (pad byte prepended) -- a one-byte shift
+  byte-swaps a one's-complement sum. The scenario still passed because the `deadbeef` REQ body
+  folds to exactly `0xA3A3`, whose byte-swap equals itself. Caught by cross-model review; the
+  grouping now starts at the OCS (which is what the Sec. 8 alignment rule exists for) and the
+  pad-odd token is chosen non-palindromic (`c0ffee01`), so a sender-side shift regression is
+  detectable too.
 
 ## Lean verification
 

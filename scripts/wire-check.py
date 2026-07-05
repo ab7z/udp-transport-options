@@ -207,8 +207,10 @@ def walk_tlvs(region):
             if offset + 4 > len(region):
                 raise ValueError(f"extended length truncated at offset {offset}")
             length = (region[offset + 2] << 8) | region[offset + 3]
-            if length < 5:
-                raise ValueError(f"extended length {length} below minimum at offset {offset}")
+            # Minimal encoding: the default form carries totals up to 254 (value <= 252), so the
+            # first canonical extended case is a 253-byte value = total 257 (Sec. 4.1).
+            if length < 257:
+                raise ValueError(f"non-minimal extended length {length} at offset {offset}")
             value = region[offset + 4 : offset + length]
         else:
             if length < 2:
@@ -232,6 +234,10 @@ def canonical_rank(kind):
 # --- Scenario table (mirror of examples/wire_probe.rs) ----------------------------------------
 
 REQ_TLV = bytes.fromhex("0606deadbeef")  # REQ, Sec. 10
+# The pad-odd scenario uses its own token: the deadbeef REQ body folds to 0xA3A3, a byte
+# palindrome whose byte-swap equals itself, which would mask word-alignment regressions in the
+# odd-start OCS. c0ffee01 folds to a non-palindromic sum.
+PAD_REQ_TLV = bytes.fromhex("0606c0ffee01")
 RES_TLV = bytes.fromhex("0706feedface")  # RES, Sec. 10
 EOL_FILL = bytes.fromhex("0000")  # EOL (Sec. 4.2) + zero-fill to even length (Sec. 4)
 
@@ -255,7 +261,7 @@ def canon_even_tlv(user):
 SCENARIOS = [
     {"name": "baseline", "user": b"plain", "no_surplus": True},
     {"name": "canon-even", "user": b"wire", "ocs": "normal", "tlv": canon_even_tlv},
-    {"name": "pad-odd", "user": b"odd", "ocs": "normal", "tlv": REQ_TLV + EOL_FILL},
+    {"name": "pad-odd", "user": b"odd", "ocs": "normal", "tlv": PAD_REQ_TLV + EOL_FILL},
     {
         "name": "frag-nonterm",
         "user": b"",
@@ -299,15 +305,19 @@ SCENARIOS = [
         "user": b"",
         "ocs": "normal",
         # Frag.Start 0x001c = 8 + 20-byte body; 64 bytes of fragment data follow the options.
-        "tlv": bytes.fromhex("030a001c112233440000") + REQ_TLV + EOL_FILL + pattern(64),
+        # Frag.Offset 8: the first fragment's data belongs right after the original UDP header
+        # (both offsets are measured from the original UDP header start, Sec. 7), covering [8, 72).
+        "tlv": bytes.fromhex("030a001c112233440008") + REQ_TLV + EOL_FILL + pattern(64),
         "frag_data_len": 64,
     },
     {
         "name": "frag-data-term",
         "user": b"",
         "ocs": "normal",
-        # Frag.Start 0x001e = 8 + 22-byte body; Frag.Offset 64, RDOS 0x0088 = 8 + 128.
-        "tlv": bytes.fromhex("030c001e112233440040" + "0088") + REQ_TLV + EOL_FILL + pattern(64),
+        # Frag.Start 0x001e = 8 + 22-byte body; the coherent terminal half of the pair above:
+        # Frag.Offset 0x0048 = 72 covers [72, 136), and RDOS 0x0088 = 136 points right past the
+        # reassembled data to the per-datagram option start.
+        "tlv": bytes.fromhex("030c001e112233440048" + "0088") + REQ_TLV + EOL_FILL + pattern(64),
         "frag_data_len": 64,
     },
 ]
@@ -347,10 +357,12 @@ def check_scenario(spec, pkt, err):
     if pad and pkt.surplus[0] != 0:
         err(f"pad byte 0x{pkt.surplus[0]:02x} is not zero")
 
-    # OCS re-derivation (Sec. 9): sum over the whole surplus area with the OCS field zeroed, plus
-    # the surplus length; the pad byte is zero, so including it matches the body-only sum.
+    # OCS re-derivation (Sec. 9): the RFC 1071 word grouping starts at the OCS -- Sec. 8 aligns
+    # the OCS to a 2-byte boundary precisely so the sum is word-aligned. Prepending the (zero)
+    # pad byte would shift the grouping by one and byte-swap the sum; the pad is checked above
+    # and enters the sum only through the full surplus length.
     stored_ocs = (pkt.surplus[pad] << 8) | pkt.surplus[pad + 1]
-    zeroed = bytes(pad) + b"\x00\x00" + pkt.surplus[pad + 2 :]
+    zeroed = b"\x00\x00" + pkt.surplus[pad + 2 :]
     derived = ~fold16(zeroed, len(pkt.surplus)) & 0xFFFF
     mode = spec.get("ocs", "normal")
     if mode == "zero":

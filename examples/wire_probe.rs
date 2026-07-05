@@ -34,6 +34,10 @@ const SRC_PORT: u16 = 0x9a00;
 const PORT_BASE: u16 = 0x9a68;
 
 const REQ_TOKEN: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
+/// Token for the pad-odd scenario: the `deadbeef` REQ body folds to `0xA3A3`, a byte palindrome
+/// whose byte-swap equals itself, which would mask word-alignment regressions in the odd-start
+/// OCS. `c0ffee01` folds to a non-palindromic sum.
+const PAD_TOKEN: [u8; 4] = [0xc0, 0xff, 0xee, 0x01];
 const RES_TOKEN: [u8; 4] = [0xfe, 0xed, 0xfa, 0xce];
 const FRAG_ID: u32 = 0x1122_3344;
 /// Fragment-data length for the data-carrying FRAG scenarios.
@@ -136,17 +140,20 @@ fn scenarios() -> Vec<Scenario> {
     let req = Req { token: REQ_TOKEN };
     let port = |index: u16| PORT_BASE + index;
 
+    // A coherent two-fragment pair: Frag.Offset and RDOS are both measured from the start of the
+    // original UDP header, so the first fragment's data belongs at offset 8 (right after the
+    // 8-byte header) and covers [8, 72).
     let mut frag_data_nonterm = body(vec![
-        (OptionKind::Frag, typed_value(&frag(0, None))),
+        (OptionKind::Frag, typed_value(&frag(8, None))),
         (OptionKind::Req, typed_value(&req)),
     ]);
     frag_data_nonterm.extend_from_slice(&pattern(FRAG_DATA_LEN));
-    // Terminal counterpart, as if it carried the second 64-byte half of a 128-byte payload: RDOS
-    // points past the reassembled data (8-byte UDP header + 128 bytes).
+    // The terminal half carries [72, 136); RDOS = 8 + 128 = 136 points right past the reassembled
+    // data to the per-datagram option start.
     let mut frag_data_term = body(vec![
         (
             OptionKind::Frag,
-            typed_value(&frag(64, Some(8 + 2 * FRAG_DATA_LEN as u16))),
+            typed_value(&frag(8 + FRAG_DATA_LEN as u16, Some(8 + 2 * FRAG_DATA_LEN as u16))),
         ),
         (OptionKind::Req, typed_value(&req)),
     ]);
@@ -193,7 +200,7 @@ fn scenarios() -> Vec<Scenario> {
                 SRC_PORT,
                 port(2),
                 b"odd",
-                &body(vec![(OptionKind::Req, typed_value(&req))]),
+                &body(vec![(OptionKind::Req, typed_value(&Req { token: PAD_TOKEN }))]),
             ),
         },
         Scenario {
