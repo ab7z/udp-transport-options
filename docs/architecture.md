@@ -126,7 +126,7 @@ Single source of truth for the protocol constants and limits taken from RFC 9868
   `RES = 6`) plus `OCS = 2`.
 - `model::limits`: the reassembly defaults and the DoS knobs (`MRDS_DEFAULT_IPV4 = 2926`,
   `MIN_REASSEMBLY_SEGMENTS = 2`, `REASSEMBLY_TIMEOUT_MAX = 120 s`,
-  `NOP_RUN_DOS_THRESHOLD = 7`).
+  `REASSEMBLY_MAX_PENDING_PARTIALS = 64`, `NOP_RUN_DOS_THRESHOLD = 7`).
 
 Inputs: none (compile-time constants). Outputs: constants consumed by every higher layer.
 
@@ -235,23 +235,27 @@ body)`. Root-free.
 
 ### `frag/reassembly` (pure)
 
-Reassembly on the receive side (RFC 9868 Sec. 11.4). Step 10 introduces `ReassemblyCache` as an
-empty signature-stabilizing type; Step 12 fills it with keyed state. The Step-12 cache is keyed by
-`FragKey`, with offset-sorted insertion, overlap detection (overlap aborts), a timeout (<= 2
-minutes), garbage collection, and per-pair plus global DoS limits. A completed datagram is returned
-for one re-feed into the pipeline; a FRAG reappearing there with non-empty reassembled data follows
-the RFC 9868 Sec. 11.4 rule (all options ignored, data delivered), and a nested FRAG with empty data
-is rejected as a local anti-loop policy (the RFC does not define nested fragmentation). Input: one
-fragment's `FragKey`, `Frag` fields, and data. Output: a `ReassemblyOutcome` (`Incomplete`,
-`Complete(bytes)`, or `Abort(reason)`). Root-free.
+Reassembly on the receive side (RFC 9868 Sec. 11.4). The cache is keyed by `FragKey`, with
+offset-sorted insertion, overlap detection (overlap aborts), exact duplicate suppression (bytes and
+per-fragment options must both match), a timeout (<= 2 minutes), garbage collection, and per-datagram
+plus global DoS limits. The global pending-partial cap limits retained incomplete state, not
+immediately complete atomic fragments. A completed datagram tail is returned for one re-feed into the
+pipeline together with coalesced SAFE per-fragment options
+(currently MDS/MRDS minima and the most recently received REQ/RES tokens). A FRAG reappearing there
+with non-empty reassembled data follows the RFC 9868 Sec. 11.4 rule (all options ignored, data
+delivered), and a nested FRAG with empty data is rejected as a local anti-loop policy (the RFC does not
+define nested fragmentation). Input: one fragment's `FragKey`, `Frag` fields, fragment data, optional
+validated per-fragment options, and caller-supplied timestamp. Output: a `ReassemblyOutcome`
+(`Incomplete`, `Complete { tail, udp_length, fragment_options }`, or `Abort(reason)`). Root-free.
 
 ### `recv/pipeline` (pure)
 
 `process_datagram`: the pure receive state machine that implements the RFC 9868 processing order
 (RFC 9868 Sec. 14). It takes a full IP datagram as bytes and returns a `Delivery`. It performs no I/O,
 so it is fully unit-testable without privileges; this module holds the bulk of the receive-side
-correctness. Input: the raw IP-datagram bytes plus a mutable `ReassemblyCache`. Output: a `Delivery`
-(`Payload { data, options }`, `Buffered`, or `Dropped`), or a `RecvError`. Root-free.
+correctness. Input: the raw IP-datagram bytes plus a mutable `ReassemblyCache` and caller-supplied
+`Instant`. Output: a `Delivery` (`Payload { data, options }`, `Buffered`, or `Dropped`), or a
+`RecvError`. Root-free.
 
 ### `socket/send` (privileged: Linux, root)
 
@@ -324,6 +328,7 @@ pub mod limits {
     pub const MRDS_DEFAULT_IPV4: u16 = 2926;
     pub const MIN_REASSEMBLY_SEGMENTS: u8 = 2;
     pub const REASSEMBLY_TIMEOUT_MAX: Duration = Duration::from_secs(120);
+    pub const REASSEMBLY_MAX_PENDING_PARTIALS: usize = 64;
     pub const NOP_RUN_DOS_THRESHOLD: usize = 7;
 }
 ```
@@ -531,23 +536,39 @@ pub struct FragKey {
 }
 
 pub enum ReassemblyOutcome {
-    Incomplete,         // more fragments needed; nothing to deliver yet
-    Complete(Vec<u8>),  // reconstructed datagram, returned for one re-feed into the pipeline
-    Abort(AbortReason), // partial state discarded
+    Incomplete,
+    Complete { tail: Vec<u8>, udp_length: u16, fragment_options: Vec<RawOption> },
+    Abort(AbortReason),
 }
 
 pub enum AbortReason { Overlap, LimitExceeded, Timeout }
 
+pub struct ReassemblyLimits {
+    pub max_reassembled_size: usize, // default IPv4 MRDS 2926, including UDP header
+    pub max_segments: usize,         // default 2
+    pub max_pending_partials: usize, // default REASSEMBLY_MAX_PENDING_PARTIALS
+    pub timeout: Duration,           // default REASSEMBLY_TIMEOUT_MAX
+}
+
 // The reassembly cache (state owned by the receiver); pure, no I/O.
-// Step 10: empty signature-stabilizing type. Step 12: keyed partials, counters, timers.
 pub struct ReassemblyCache { /* private */ }
 
 impl ReassemblyCache {
     pub fn new() -> ReassemblyCache;
-    // Step 12:
-    // Insert one fragment; offset-sort, detect overlap, enforce caps and timeout. (planned)
-    pub fn insert(&mut self, key: FragKey, frag: Frag, data: &[u8]) -> ReassemblyOutcome;
-    pub fn gc(&mut self, now: Instant);  // drop timed-out partials (planned)
+    pub fn with_limits(limits: ReassemblyLimits) -> ReassemblyCache;
+    pub fn insert(&mut self, key: FragKey, frag: Frag, data: &[u8], now: Instant) -> ReassemblyOutcome;
+    pub fn insert_with_options(
+        &mut self,
+        key: FragKey,
+        frag: Frag,
+        data: &[u8],
+        fragment_options: &[RawOption],
+        now: Instant,
+    ) -> ReassemblyOutcome;
+    pub fn discard(&mut self, key: FragKey);
+    pub fn gc(&mut self, now: Instant);
+    pub fn len(&self) -> usize;
+    pub fn is_empty(&self) -> bool;
 }
 ```
 
@@ -572,6 +593,7 @@ pub enum Delivery {
 pub fn process_datagram(
     ip_datagram: &[u8],
     cache: &mut ReassemblyCache,
+    now: Instant,
 ) -> Result<Delivery, RecvError>;
 ```
 
@@ -816,19 +838,20 @@ application delivery.
         | yes (UDP Length == 8, data in surplus) -> go to (G)
         v
  +-------------------------------------------------------------------------------+
-| (G) Step 10 FRAG boundary                                                      |
-|     valid FRAG with empty UDP user data and no fragment-local failure returns  |
-|     Delivery::Buffered                                                         |
-|     Step 12 replaces this stub with ReassemblyCache insert/GC/limit handling   |
+| (G) FRAG reassembly cache                                                      |
+|     insert by FragKey, offset-sort, suppress exact duplicates (bytes+options), |
+|     abort overlap and enforce timeout plus per-datagram/global limits          |
 +-------------------------------------------------------------------------------+
-        | valid empty-payload FRAG -> Delivery::Buffered
+        | Incomplete -> Delivery::Buffered
+        | Abort(_) -> Delivery::Dropped
         | valid empty-payload FRAG plus UNSAFE/malformed per-fragment option -> Delivery::Dropped
         v
- Step 12 completion path: Complete(bytes) is re-fed ONCE into process_datagram.
+ Completion path: Complete { tail, udp_length, fragment_options } is re-fed ONCE into process_datagram.
         A reassembled datagram with no FRAG lands at (F) -> Delivery::Payload
-        { data, options }; a FRAG with non-empty data hits the (F) non-empty branch (options
-        ignored, data delivered, Sec. 11.4); a nested FRAG with empty data is rejected -- local
-        anti-loop policy, never a second re-feed (the RFC does not define nested fragmentation)
+        { data, options }; coalesced per-fragment SAFE options are prepended to the delivered options.
+        A FRAG with non-empty data hits the (F) non-empty branch (options ignored, data delivered,
+        Sec. 11.4); a nested FRAG with empty data is rejected -- local anti-loop policy, never a
+        second re-feed (the RFC does not define nested fragmentation)
 ```
 
 Disposition summary:
@@ -849,10 +872,10 @@ Disposition summary:
 | Valid FRAG, bytes after `Frag. Start`      | deferred     | not parsed  | fragment data, `Buffered`        |
 | Unknown SAFE option                        | delivered    | rest kept  | option ignored                   |
 | Unknown UNSAFE option (no FRAG)            | zero-length  | discarded  | user data dropped; zero-length delivery (Sec. 12, 14) |
-| Unknown UNSAFE option (valid empty FRAG)   | not delivered| discarded  | `Dropped`; Step 12 will store this failure |
+| Unknown UNSAFE option (valid empty FRAG, before or after FRAG) | not delivered| discarded  | `Dropped`; not inserted into reassembly    |
 | Malformed per-fragment option before data  | not delivered| discarded  | `Dropped`; no zero-length frame  |
 | FRAG, more fragments needed                | -            | -          | `Buffered`                       |
-| FRAG, overlap / cap / timeout              | not delivered| discarded  | `Dropped` / abort state (planned) |
+| FRAG, overlap / cap / timeout              | not delivered| discarded  | `Dropped` / abort state          |
 | FRAG complete                              | delivered*   | parsed*    | re-fed once, then `Payload`      |
 
 \* after the single re-feed of the reassembled datagram.
@@ -899,11 +922,12 @@ per packet indefinitely:
 | `MRDS_DEFAULT_IPV4`             | 2926 bytes    | reassembled-size cap when no MRDS option was seen    |
 | `MIN_REASSEMBLY_SEGMENTS`       | 2             | the minimum fragment count an implementation supports|
 | `REASSEMBLY_TIMEOUT_MAX`        | 120 s         | upper bound on how long a partial may live           |
+| `REASSEMBLY_MAX_PENDING_PARTIALS` | 64          | global incomplete-datagram cap per cache             |
 | `NOP_RUN_DOS_THRESHOLD`         | 7             | a run of NOPs beyond this is logged as a possible DoS |
 
 Additional reassembly defenses (implemented as cache policy in `frag/reassembly`, surfaced as
-`AbortReason`): per-pair byte and segment caps and a global partial cap (`LimitExceeded`), overlap
-abort (`Overlap`), the timeout plus garbage collection (`Timeout`), and the rule that a completed
+`AbortReason`): per-datagram byte and segment caps and a global partial cap (`LimitExceeded`), overlap
+abort with exact duplicate suppression (`Overlap`), the timeout plus garbage collection, and the rule that a completed
 datagram is re-fed exactly once so reassembly cannot loop. The `NOP_RUN_DOS_THRESHOLD` is enforced in
 the parser path: a NOP flood is logged via the sampled `log` diagnostics (it does not need root, so
 it is covered by the pure tests).

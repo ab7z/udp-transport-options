@@ -467,9 +467,17 @@ Risiko:
 
 ### `src/frag/*`
 
-Lean-Eignung: mittel bis hoch, sobald implementiert.
+Lean-Eignung: mittel bis hoch.
 
-Spaetere Beweisziele:
+Aktueller Stand:
+
+- `Rfc9868/FragSplit.lean` modelliert die sendeseitige FRAG-Aufteilung, RDOS,
+  Padding vor reassemblierten Optionen und Segment-/MRDS-Grenzen.
+- `Rfc9868/Reassembly.lean` modelliert die empfangsseitigen Reassembly-Kanten:
+  Offset-Normalisierung, Overlap-Erkennung, terminale RDOS-Grenzen,
+  lueckenlose Completion und explizite Timeout-/Cap-Konstanten.
+
+Beweisziele:
 
 - Split-Chunks respektieren MDS/MRDS.
 - Non-terminal/terminal FRAG-Laengen.

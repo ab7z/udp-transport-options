@@ -6,7 +6,7 @@
 //! Step-12 fragment or deliver the payload).
 
 use crate::error::{HeaderError, ParseError, RecvError};
-use crate::frag::reassembly::ReassemblyCache;
+use crate::frag::reassembly::{FragKey, ReassemblyCache, ReassemblyOutcome};
 use crate::model::{kind, length, limits};
 use crate::options::RawOption;
 use crate::options::kind::OptionKind;
@@ -18,6 +18,7 @@ use crate::wire::surplus::locate_surplus;
 use crate::wire::udp::{self, UdpHeader};
 
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 const TLV_HEADER_LEN: usize = 2;
 const WARN_SAMPLE_INTERVAL: u64 = 64;
@@ -62,7 +63,7 @@ pub enum Delivery {
 #[derive(Debug)]
 struct ParsedOptions {
     options: Vec<RawOption>,
-    valid_frag_seen: bool,
+    frag: Option<Frag>,
     unsupported_unsafe_seen: bool,
     fragment_failed: bool,
 }
@@ -70,15 +71,26 @@ struct ParsedOptions {
 #[derive(Debug, PartialEq, Eq)]
 enum FragmentOptionLimit {
     Full,
-    End(usize),
-    MalformedFrag,
+    End { end: usize },
+    MalformedFrag { frag: Frag },
+    UnsupportedUnsafeBeforeFrag { frag: Frag },
 }
 
 /// Processes one received IPv4 datagram according to the RFC 9868 receive order.
 ///
 /// This function is deliberately pure: malformed IP/UDP input returns a drop error, malformed or
-/// untrusted surplus contents discard only the options, and no socket or clock state is touched.
-pub fn process_datagram(ip_datagram: &[u8], _cache: &mut ReassemblyCache) -> Result<Delivery, RecvError> {
+/// untrusted surplus contents discard only the options, and time-dependent reassembly state is driven
+/// by the caller-provided `now`.
+pub fn process_datagram(ip_datagram: &[u8], cache: &mut ReassemblyCache, now: Instant) -> Result<Delivery, RecvError> {
+    process_datagram_inner(ip_datagram, cache, now, true)
+}
+
+fn process_datagram_inner(
+    ip_datagram: &[u8],
+    cache: &mut ReassemblyCache,
+    now: Instant,
+    reassembly_allowed: bool,
+) -> Result<Delivery, RecvError> {
     let (ip, udp_at) = IpRepr::parse(ip_datagram)?;
     let ip_end = ip.header_len() + ip.transport_payload_len();
     let datagram = &ip_datagram[..ip_end];
@@ -163,7 +175,7 @@ pub fn process_datagram(ip_datagram: &[u8], _cache: &mut ReassemblyCache) -> Res
     let options_offset_from_udp_header = layout.ocs_at() + usize::from(length::OCS) - udp_at;
     let ParsedOptions {
         options,
-        valid_frag_seen,
+        frag,
         unsupported_unsafe_seen,
         fragment_failed,
     } = match parse_options(
@@ -177,11 +189,18 @@ pub fn process_datagram(ip_datagram: &[u8], _cache: &mut ReassemblyCache) -> Res
             return deliver_without_options();
         }
     };
+    let valid_frag_seen = frag.is_some();
 
     if valid_frag_seen && !user_data.is_empty() {
         return deliver_without_options();
     }
-    if fragment_failed || (valid_frag_seen && user_data.is_empty() && unsupported_unsafe_seen) {
+    let fragment_key = frag
+        .filter(|_| user_data.is_empty())
+        .map(|frag| frag_key(&ip, &udp, frag));
+    if fragment_failed || (fragment_key.is_some() && unsupported_unsafe_seen) {
+        if let Some(key) = fragment_key {
+            cache.discard(key);
+        }
         return Ok(Delivery::Dropped);
     }
     if unsupported_unsafe_seen {
@@ -190,14 +209,86 @@ pub fn process_datagram(ip_datagram: &[u8], _cache: &mut ReassemblyCache) -> Res
             options: Vec::new(),
         });
     }
-    if valid_frag_seen && user_data.is_empty() {
-        return Ok(Delivery::Buffered);
+    if let Some(frag) = frag.filter(|_| user_data.is_empty()) {
+        if !reassembly_allowed {
+            return Ok(Delivery::Dropped);
+        }
+        let key = fragment_key.expect("fragment key exists for empty-payload FRAG");
+        let fragment_data_at = udp_at + usize::from(frag.frag_start);
+        let Some(fragment_data) = datagram.get(fragment_data_at..ip_end) else {
+            cache.discard(key);
+            return Ok(Delivery::Dropped);
+        };
+        return match cache.insert_with_options(key, frag, fragment_data, &options, now) {
+            ReassemblyOutcome::Incomplete => Ok(Delivery::Buffered),
+            ReassemblyOutcome::Abort(_) => Ok(Delivery::Dropped),
+            ReassemblyOutcome::Complete {
+                tail,
+                udp_length,
+                fragment_options,
+            } => {
+                let Some(reassembled) = reassembled_datagram(&ip, &udp, udp_length, &tail) else {
+                    return Ok(Delivery::Dropped);
+                };
+                match process_datagram_inner(&reassembled, cache, now, false)? {
+                    Delivery::Payload { data, options } => Ok(Delivery::Payload {
+                        data,
+                        options: merge_fragment_options(fragment_options, options),
+                    }),
+                    delivery => Ok(delivery),
+                }
+            }
+        };
     }
 
     Ok(Delivery::Payload {
         data: user_data.to_vec(),
         options,
     })
+}
+
+fn frag_key(ip: &IpRepr, udp: &UdpHeader, frag: Frag) -> FragKey {
+    FragKey {
+        src: ip.src,
+        dst: ip.dst,
+        src_port: udp.src_port,
+        dst_port: udp.dst_port,
+        identification: frag.identification,
+    }
+}
+
+fn merge_fragment_options(mut fragment_options: Vec<RawOption>, datagram_options: Vec<RawOption>) -> Vec<RawOption> {
+    fragment_options.extend(datagram_options);
+    fragment_options
+}
+
+fn reassembled_datagram(ip: &IpRepr, udp: &UdpHeader, udp_length: u16, tail: &[u8]) -> Option<Vec<u8>> {
+    let udp_len = usize::from(udp_length);
+    let user_len = udp_len.checked_sub(udp::HEADER_LEN)?;
+    if tail.len() < user_len {
+        return None;
+    }
+
+    let total_len = 20usize.checked_add(udp::HEADER_LEN)?.checked_add(tail.len())?;
+    let total_len = u16::try_from(total_len).ok()?;
+    let reassembled_ip = IpRepr {
+        src: ip.src,
+        dst: ip.dst,
+        ihl: 5,
+        total_len,
+    };
+    let reassembled_udp = UdpHeader {
+        src_port: udp.src_port,
+        dst_port: udp.dst_port,
+        length: udp_length,
+        checksum: 0,
+    };
+
+    let mut datagram = vec![0u8; usize::from(total_len)];
+    reassembled_ip.write(&mut datagram[..20]);
+    reassembled_udp.write(&mut datagram[20..20 + udp::HEADER_LEN]);
+    datagram[20 + udp::HEADER_LEN..].copy_from_slice(tail);
+    Some(datagram)
 }
 
 fn parse_options(
@@ -208,13 +299,21 @@ fn parse_options(
     let options_bytes = match fragment_option_limit(options_bytes, user_data.is_empty(), options_offset_from_udp_header)
     {
         FragmentOptionLimit::Full => options_bytes,
-        FragmentOptionLimit::End(end) => &options_bytes[..end],
-        FragmentOptionLimit::MalformedFrag => {
+        FragmentOptionLimit::End { end } => &options_bytes[..end],
+        FragmentOptionLimit::MalformedFrag { frag } => {
             return Ok(ParsedOptions {
                 options: Vec::new(),
-                valid_frag_seen: false,
+                frag: Some(frag),
                 unsupported_unsafe_seen: true,
-                fragment_failed: false,
+                fragment_failed: true,
+            });
+        }
+        FragmentOptionLimit::UnsupportedUnsafeBeforeFrag { frag } => {
+            return Ok(ParsedOptions {
+                options: Vec::new(),
+                frag: Some(frag),
+                unsupported_unsafe_seen: true,
+                fragment_failed: true,
             });
         }
     };
@@ -222,7 +321,7 @@ fn parse_options(
     let mut options = Vec::new();
     let mut seen = [false; 256];
     let mut seen_non_must_support_safe = false;
-    let mut valid_frag_seen = false;
+    let mut frag = None;
     let mut unsupported_unsafe_seen = false;
 
     for item in iter.by_ref() {
@@ -232,14 +331,14 @@ fn parse_options(
                 return if unsupported_unsafe_seen {
                     Ok(ParsedOptions {
                         options: Vec::new(),
-                        valid_frag_seen,
+                        frag,
                         unsupported_unsafe_seen,
                         fragment_failed: false,
                     })
-                } else if valid_frag_seen && user_data.is_empty() {
+                } else if frag.is_some() && user_data.is_empty() {
                     Ok(ParsedOptions {
                         options: Vec::new(),
-                        valid_frag_seen,
+                        frag,
                         unsupported_unsafe_seen: false,
                         fragment_failed: true,
                     })
@@ -267,10 +366,10 @@ fn parse_options(
             OptionKind::Frag => {
                 reject_sub_minimum(option)?;
                 if seen[usize::from(raw_kind)] {
-                    if valid_frag_seen && user_data.is_empty() {
+                    if frag.is_some() && user_data.is_empty() {
                         return Ok(ParsedOptions {
                             options: Vec::new(),
-                            valid_frag_seen,
+                            frag,
                             unsupported_unsafe_seen: false,
                             fragment_failed: true,
                         });
@@ -278,8 +377,8 @@ fn parse_options(
                     return Err(ParseError::DuplicateFrag);
                 }
                 seen[usize::from(raw_kind)] = true;
-                if Frag::decode(option.value).is_ok() {
-                    valid_frag_seen = true;
+                if let Ok(parsed_frag) = Frag::decode(option.value) {
+                    frag = Some(parsed_frag);
                 } else {
                     unsupported_unsafe_seen = true;
                     break;
@@ -336,7 +435,7 @@ fn parse_options(
 
     Ok(ParsedOptions {
         options,
-        valid_frag_seen,
+        frag,
         unsupported_unsafe_seen,
         fragment_failed: false,
     })
@@ -352,6 +451,7 @@ fn fragment_option_limit(
     }
 
     let mut iter = OptionsIter::new(options_bytes);
+    let mut unsupported_unsafe_before_frag = false;
     for item in iter.by_ref() {
         let Ok(option) = item else {
             return FragmentOptionLimit::Full;
@@ -363,14 +463,19 @@ fn fragment_option_limit(
                     return FragmentOptionLimit::Full;
                 };
                 let Some(end) = usize::from(frag.frag_start).checked_sub(options_offset_from_udp_header) else {
-                    return FragmentOptionLimit::MalformedFrag;
+                    return FragmentOptionLimit::MalformedFrag { frag };
                 };
                 if end > options_bytes.len() || end < option_end_offset(options_bytes, option) {
-                    return FragmentOptionLimit::MalformedFrag;
+                    return FragmentOptionLimit::MalformedFrag { frag };
                 }
-                return FragmentOptionLimit::End(end);
+                if unsupported_unsafe_before_frag {
+                    return FragmentOptionLimit::UnsupportedUnsafeBeforeFrag { frag };
+                }
+                return FragmentOptionLimit::End { end };
             }
-            OptionKind::Other(_) if option.kind.is_unsafe() => return FragmentOptionLimit::Full,
+            OptionKind::Other(_) if option.kind.is_unsafe() => {
+                unsupported_unsafe_before_frag = true;
+            }
             OptionKind::Eol => return FragmentOptionLimit::Full,
             _ => {}
         }
@@ -434,16 +539,19 @@ mod tests {
     use std::net::Ipv4Addr;
     use std::sync::Once;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::time::Instant;
 
     use log::{LevelFilter, Log, Metadata, Record};
 
     use super::{Delivery, WARN_SAMPLE_INTERVAL, process_datagram, should_log_sampled};
     use crate::error::{HeaderError, RecvError};
     use crate::frag::reassembly::ReassemblyCache;
+    use crate::frag::split::{PeerFragmentLimits, SplitConfig, split_datagram};
     use crate::model::{kind, length, limits};
     use crate::options::RawOption;
     use crate::options::kind::OptionKind;
-    use crate::options::typed::{Apc, Frag, Mds, Req, TypedOption};
+    use crate::options::serialize::OptionsBuilder;
+    use crate::options::typed::{Apc, Frag, Mds, Mrds, Req, Res, TypedOption};
     use crate::socket::send::assemble_datagram;
     use crate::wire::ip::IpRepr;
     use crate::wire::surplus::locate_surplus;
@@ -507,6 +615,13 @@ mod tests {
         assemble_datagram(SRC, DST, SRC_PORT, DST_PORT, user_data, &option_body(option_bytes))
     }
 
+    fn fragment_datagram(frag: Frag, fragment_options: &[u8], data: &[u8]) -> Vec<u8> {
+        let mut options = encode(frag);
+        options.extend_from_slice(fragment_options);
+        options.extend_from_slice(data);
+        datagram(b"", &options)
+    }
+
     fn datagram_with_raw_surplus(user_data: &[u8], raw_surplus: &[u8], checksum_zero: bool) -> Vec<u8> {
         let udp_len = udp::HEADER_LEN + user_data.len();
         let total_len = 20 + udp_len + raw_surplus.len();
@@ -535,7 +650,11 @@ mod tests {
     }
 
     fn process(datagram: &[u8]) -> Result<Delivery, RecvError> {
-        process_datagram(datagram, &mut ReassemblyCache::new())
+        process_datagram(datagram, &mut ReassemblyCache::new(), Instant::now())
+    }
+
+    fn process_with_cache(datagram: &[u8], cache: &mut ReassemblyCache, now: Instant) -> Result<Delivery, RecvError> {
+        process_datagram(datagram, cache, now)
     }
 
     fn payload(data: &[u8], options: Vec<RawOption>) -> Delivery {
@@ -559,6 +678,34 @@ mod tests {
         (udp_len + usize::from(needs_pad) + usize::from(length::OCS) + fragment_options_len)
             .try_into()
             .expect("test fragment option area fits u16")
+    }
+
+    fn split_fragment_datagrams(payload: &[u8], per_datagram_options_body: &[u8]) -> Vec<Vec<u8>> {
+        split_fragment_datagrams_with_budget(payload, per_datagram_options_body, 24)
+    }
+
+    fn split_fragment_datagrams_with_budget(
+        payload: &[u8],
+        per_datagram_options_body: &[u8],
+        max_fragment_surplus_len: usize,
+    ) -> Vec<Vec<u8>> {
+        let fragments = split_datagram(
+            payload,
+            per_datagram_options_body,
+            SplitConfig {
+                max_fragment_surplus_len,
+                peer: PeerFragmentLimits {
+                    max_reassembled_size: u16::MAX,
+                    max_segments: u8::MAX,
+                },
+                identification: 0x0102_0304,
+            },
+        )
+        .expect("test payload should split");
+        fragments
+            .iter()
+            .map(|fragment| assemble_datagram(SRC, DST, SRC_PORT, DST_PORT, b"", &fragment.surplus_body))
+            .collect()
     }
 
     #[test]
@@ -777,12 +924,12 @@ mod tests {
     }
 
     #[test]
-    fn valid_empty_payload_frag_buffers_until_step_12() {
+    fn valid_empty_payload_non_terminal_frag_buffers() {
         let frag = Frag {
-            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
             identification: 0x0102_0304,
-            frag_offset: 0,
-            rdos: Some(32),
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
         };
         assert_eq!(process(&datagram(b"", &encode(frag))).unwrap(), Delivery::Buffered);
     }
@@ -803,15 +950,239 @@ mod tests {
     #[test]
     fn empty_payload_frag_does_not_parse_fragment_data_as_options() {
         let frag = Frag {
-            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
             identification: 0x0102_0304,
-            frag_offset: 0,
-            rdos: Some(32),
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
         };
         let mut options = encode(frag);
         options.extend(encode(frag));
 
         assert_eq!(process(&datagram(b"", &options)).unwrap(), Delivery::Buffered);
+    }
+
+    #[test]
+    fn reassembles_split_fragments_and_reprocesses_options() {
+        let mut options = OptionsBuilder::new();
+        options.push(OptionKind::Req, vec![1, 2, 3, 4]);
+        let datagrams = split_fragment_datagrams(b"abcdefghij", &options.finish().unwrap());
+        assert_eq!(datagrams.len(), 2);
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&datagrams[1], &mut cache, now).unwrap(),
+            payload(b"abcdefghij", vec![raw(OptionKind::Req, &[1, 2, 3, 4])])
+        );
+    }
+
+    #[test]
+    fn reassembles_out_of_order_split_fragments() {
+        let datagrams = split_fragment_datagrams(b"abcdefghijk", &[]);
+        assert_eq!(datagrams.len(), 2);
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&datagrams[1], &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
+            payload(b"abcdefghijk", Vec::new())
+        );
+    }
+
+    #[test]
+    fn fragment_local_safe_options_are_reported_after_reassembly() {
+        let mut first_options = Vec::new();
+        first_options.extend(encode(Mds {
+            max_datagram_size: 1500,
+        }));
+        first_options.extend(encode(Mrds {
+            max_reassembled_size: 4000,
+            max_segments: 4,
+        }));
+        first_options.extend(encode(Req { token: [1, 1, 1, 1] }));
+        first_options.extend(encode(Res { token: [2, 2, 2, 2] }));
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL) + first_options.len()),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+
+        let mut second_options = Vec::new();
+        second_options.extend(encode(Mds {
+            max_datagram_size: 1200,
+        }));
+        second_options.extend(encode(Mrds {
+            max_reassembled_size: 3000,
+            max_segments: 2,
+        }));
+        second_options.extend(encode(Req { token: [3, 3, 3, 3] }));
+        second_options.extend(encode(Res { token: [4, 4, 4, 4] }));
+        let second = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL) + second_options.len()),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&fragment_datagram(first, &first_options, b"abc"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&fragment_datagram(second, &second_options, b"def"), &mut cache, now).unwrap(),
+            payload(
+                b"abcdef",
+                vec![
+                    raw(OptionKind::Mds, &1200u16.to_be_bytes()),
+                    raw(OptionKind::Mrds, &[0x0b, 0xb8, 2]),
+                    raw(OptionKind::Req, &[3, 3, 3, 3]),
+                    raw(OptionKind::Res, &[4, 4, 4, 4]),
+                ],
+            )
+        );
+    }
+
+    #[test]
+    fn fragment_local_unsafe_discards_existing_partial() {
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+        let mut second_options = vec![kind::UNSAFE_MIN, 2];
+        let second = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL) + second_options.len()),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&fragment_datagram(first, &[], b"abc"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&fragment_datagram(second, &second_options, b"def"), &mut cache, now).unwrap(),
+            Delivery::Dropped
+        );
+        assert!(cache.is_empty());
+
+        second_options.clear();
+        let second = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            ..second
+        };
+        assert_eq!(
+            process_with_cache(&fragment_datagram(second, &second_options, b"def"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+    }
+
+    #[test]
+    fn unsafe_before_frag_discards_existing_partial() {
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+        let second = Frag {
+            frag_start: frag_start_for(b"", 2 + usize::from(length::FRAG_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+        let valid_terminal = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            ..second
+        };
+        let mut unsafe_then_frag = vec![kind::UNSAFE_MIN, 2];
+        second.encode(&mut unsafe_then_frag);
+        unsafe_then_frag.extend_from_slice(b"def");
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&fragment_datagram(first, &[], b"abc"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&datagram(b"", &unsafe_then_frag), &mut cache, now).unwrap(),
+            Delivery::Dropped
+        );
+        assert!(cache.is_empty());
+        assert_eq!(
+            process_with_cache(&fragment_datagram(valid_terminal, &[], b"def"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+    }
+
+    #[test]
+    fn malformed_frag_start_discards_existing_partial() {
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+        let malformed = Frag {
+            frag_start: u16::from(length::UDP_HEADER) + u16::from(length::OCS),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+        let valid_terminal = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&fragment_datagram(first, &[], b"abc"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&fragment_datagram(malformed, &[], b""), &mut cache, now).unwrap(),
+            Delivery::Dropped
+        );
+        assert!(cache.is_empty());
+        assert_eq!(
+            process_with_cache(&fragment_datagram(valid_terminal, &[], b"def"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+    }
+
+    #[test]
+    fn reprocess_drops_nested_empty_payload_frag() {
+        let nested = Frag {
+            frag_start: u16::from(length::UDP_HEADER) + u16::from(length::OCS) + u16::from(length::FRAG_TERMINAL),
+            identification: 0x1111_2222,
+            frag_offset: 0,
+            rdos: Some(u16::from(length::UDP_HEADER)),
+        };
+        let mut nested_body = vec![0, 0];
+        nested.encode(&mut nested_body);
+        let datagrams = split_fragment_datagrams_with_budget(b"", &nested_body, 64);
+        assert_eq!(datagrams.len(), 1);
+
+        assert_eq!(process(&datagrams[0]).unwrap(), Delivery::Dropped);
     }
 
     #[test]

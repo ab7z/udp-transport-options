@@ -262,7 +262,11 @@ UDP user data (UDP Length 8) and places the fragment data in the surplus area af
 fragment's options (the data follows the remainder of the UDP options, as located by `Frag. Start`,
 and runs to the end of the IP datagram). The receive pipeline uses the same boundary: for a valid
 empty-payload FRAG, bytes at or after `Frag. Start` are fragment data and are not interpreted as
-additional UDP options.
+additional UDP options. The receive-side reassembler stores those bytes by `FragKey`, coalesces
+validated per-fragment MDS/MRDS/REQ/RES values, suppresses exact duplicate fragments only when both
+the fragment data and per-fragment options match, aborts conflicting overlap or fragment-local
+UNSAFE/malformed failures, and re-feeds the reconstructed datagram once when terminal coverage is
+gap-free.
 
 ## 8. Maximum Datagram Size (MDS)
 
