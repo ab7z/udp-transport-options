@@ -128,6 +128,13 @@ fn empty_options_emit_plain_datagram() {
     assert_eq!(received.data, b"plain");
     assert!(received.options.is_empty());
     assert!(received.reports.is_empty());
+
+    let min_config = SendConfig {
+        max_datagram_len: 20 + usize::from(length::UDP_HEADER),
+        ..SendConfig::default()
+    };
+    let min_datagram = build_outgoing_datagrams(addrs(), b"", SendOptions::new(), min_config).unwrap();
+    assert_eq!(min_datagram[0].len(), 20 + usize::from(length::UDP_HEADER));
 }
 
 #[test]
@@ -201,6 +208,15 @@ fn required_option_policy_filters_missing_or_failed_options() {
         decode_datagram(&failed, &mut ReassemblyCache::new(), Instant::now(), &policy).unwrap(),
         ApiDelivery::Filtered
     );
+
+    let good_apc = raw(OptionKind::Apc, &Apc::compute(b"payload").crc32c.to_be_bytes());
+    let good = build_datagram(addrs(), b"payload", &[good_apc]).unwrap();
+    let ApiDelivery::Received(received) =
+        decode_datagram(&good, &mut ReassemblyCache::new(), Instant::now(), &policy).unwrap()
+    else {
+        panic!("successful datagram-level APC should satisfy required option policy");
+    };
+    assert_eq!(received.data, b"payload");
 }
 
 #[test]
@@ -243,6 +259,54 @@ fn required_policy_filters_fragment_option_if_any_fragment_failed() {
         report.kind == OptionKind::Mds
             && report.status == OptionStatus::Failed
             && report.source == OptionSource::FragmentSet
+    }));
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut cache, now, &policy).unwrap(),
+        ApiDelivery::Buffered
+    );
+    assert_eq!(
+        decode_datagram(&second_datagram, &mut cache, now, &policy).unwrap(),
+        ApiDelivery::Filtered
+    );
+
+    let first = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_NON_TERMINAL) + bad_mds.len()),
+        identification: 0x0506_0708,
+        frag_offset: u16::from(length::UDP_HEADER),
+        rdos: None,
+    };
+    let second = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_TERMINAL)),
+        identification: 0x0506_0708,
+        frag_offset: u16::from(length::UDP_HEADER) + 3,
+        rdos: Some(u16::from(length::UDP_HEADER) + 6),
+    };
+    let mut terminal_data = b"def".to_vec();
+    terminal_data.extend_from_slice(&option_body(&good_mds));
+    let first_datagram = fragment_datagram(first, &bad_mds, b"abc");
+    let second_datagram = fragment_datagram(second, &[], &terminal_data);
+    let mut default_cache = ReassemblyCache::new();
+    let mut cache = ReassemblyCache::new();
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut default_cache, now, &ReceivePolicy::default()).unwrap(),
+        ApiDelivery::Buffered
+    );
+    let ApiDelivery::Received(received) =
+        decode_datagram(&second_datagram, &mut default_cache, now, &ReceivePolicy::default()).unwrap()
+    else {
+        panic!("fragment failure plus datagram success should still deliver by default");
+    };
+    assert!(received.reports.iter().any(|report| {
+        report.kind == OptionKind::Mds
+            && report.status == OptionStatus::Failed
+            && report.source == OptionSource::FragmentSet
+    }));
+    assert!(received.reports.iter().any(|report| {
+        report.kind == OptionKind::Mds
+            && report.status == OptionStatus::Success
+            && report.source == OptionSource::Datagram
     }));
 
     assert_eq!(
@@ -424,7 +488,7 @@ fn required_policy_rejects_internal_or_unreportable_options() {
 }
 
 #[test]
-fn high_level_send_rejects_raw_frag_and_duplicate_apc() {
+fn high_level_send_rejects_raw_frag_and_duplicate_reportable_options() {
     let mut with_frag = SendOptions::new();
     with_frag.push_raw(raw(OptionKind::Frag, &[0; 8]));
     assert!(matches!(
@@ -453,13 +517,22 @@ fn high_level_send_rejects_raw_frag_and_duplicate_apc() {
         Err(SendError::InvalidConfig { .. })
     ));
 
-    let mut duplicate_req = SendOptions::new();
-    duplicate_req.push_raw(raw(OptionKind::Req, &[1, 2, 3, 4]));
-    duplicate_req.push_raw(raw(OptionKind::Other(kind::REQ), &[5, 6, 7, 8]));
-    assert!(matches!(
-        build_outgoing_datagrams(addrs(), b"payload", duplicate_req, SendConfig::default()),
-        Err(SendError::InvalidConfig { .. })
-    ));
+    let duplicate_cases = [
+        (OptionKind::Apc, OptionKind::Other(kind::APC), vec![0, 0, 0, 0]),
+        (OptionKind::Mds, OptionKind::Other(kind::MDS), vec![0, 64]),
+        (OptionKind::Mrds, OptionKind::Other(kind::MRDS), vec![0, 64, 2]),
+        (OptionKind::Req, OptionKind::Other(kind::REQ), vec![1, 2, 3, 4]),
+        (OptionKind::Res, OptionKind::Other(kind::RES), vec![5, 6, 7, 8]),
+    ];
+    for (first, second, value) in duplicate_cases {
+        let mut duplicate = SendOptions::new();
+        duplicate.push_raw(raw(first, &value));
+        duplicate.push_raw(raw(second, &value));
+        assert!(matches!(
+            build_outgoing_datagrams(addrs(), b"payload", duplicate, SendConfig::default()),
+            Err(SendError::InvalidConfig { .. })
+        ));
+    }
 }
 
 #[test]

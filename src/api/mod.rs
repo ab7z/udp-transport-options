@@ -476,9 +476,9 @@ fn validate_send_config(config: SendConfig) -> Result<(), SendError> {
             reason: "max_datagram_len exceeds IPv4 Total Length",
         });
     }
-    if config.max_datagram_len < IPV4_HEADER_LEN + UDP_HEADER_LEN + usize::from(length::OCS) {
+    if config.max_datagram_len < IPV4_HEADER_LEN + UDP_HEADER_LEN {
         return Err(SendError::InvalidConfig {
-            reason: "max_datagram_len cannot fit IPv4, UDP, and OCS",
+            reason: "max_datagram_len cannot fit IPv4 and UDP",
         });
     }
     Ok(())
@@ -546,6 +546,14 @@ fn fragment_surplus_budget(config: SendConfig) -> Result<usize, SendError> {
 
 fn missing_required_option(policy: &ReceivePolicy, reports: &[OptionReport]) -> Option<OptionKind> {
     policy.required_options.iter().copied().find(|required| {
+        let failed_fragment_set = reports.iter().any(|report| {
+            report.kind == *required
+                && report.status == OptionStatus::Failed
+                && report.source == OptionSource::FragmentSet
+        });
+        if failed_fragment_set {
+            return true;
+        }
         !reports
             .iter()
             .any(|report| report.kind == *required && report.status == OptionStatus::Success)
