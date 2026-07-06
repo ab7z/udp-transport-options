@@ -212,8 +212,9 @@ the surplus-area bytes (and length). Output: the OCS value, or a pass/fail verdi
 
 The `TypedOption` trait and the fixed-length `Copy` structs `Apc`, `Mds`, `Mrds`, `Req`, `Res`,
 `Frag`. Each decodes from, and encodes to, its wire bytes. APC carries a CRC32C over the UDP user
-data (RFC 9868 Sec. 11.3, Fig. 9). Input (decode): an option's value bytes. Output: an owned typed
-value, or a `ParseError` on a wrong length. Root-free.
+data and is reported only per-datagram, not per-fragment (RFC 9868 Sec. 11.3, Fig. 9). Input
+(decode): an option's value bytes. Output: an owned typed value, or a `ParseError` on a wrong length.
+Root-free.
 
 ### `options` (mod.rs) (pure)
 
@@ -289,9 +290,10 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
 `ReceivePolicy` can require successfully processed datagram-level APC/MDS/MRDS/REQ/RES options or drop
-all option-bearing datagrams after the UDP checksum boundary. `SendOptions` selects typed/raw options
-and automatic APC generation, while `SendConfig` controls the datagram size budget, peer MRDS, FRAG
-enablement, and FRAG Identification.
+all datagrams with a usable option-bearing surplus layout after the UDP checksum boundary. Tails too
+short to hold the aligned OCS are delivered without options, matching `process_datagram`.
+`SendOptions` selects typed/raw options and automatic APC generation, while `SendConfig` controls the
+datagram size budget, peer MRDS, FRAG enablement, and FRAG Identification.
 Raw option guards are based on the canonical wire Kind byte: `OptionKind::Other(3)` is still FRAG
 and `OptionKind::Other(2)` is still APC for API validation, even though callers should normally use
 the named variants.
@@ -594,7 +596,7 @@ pub enum Delivery {
     Payload {
         data: Vec<u8>,              // the UDP user data handed to the application
         options: Vec<RawOption>,    // successfully processed options
-        option_bearing: bool,       // true when a surplus area was present, even if discarded
+        option_bearing: bool,       // true when a usable UDP-options surplus layout was present
         reports: Vec<OptionReport>, // datagram status plus coalesced FragmentSet status
     },
     Buffered,                    // the datagram was a fragment; nothing to deliver yet
@@ -916,8 +918,8 @@ application delivery.
  Completion path: Complete { tail, udp_length, fragment_options, fragment_option_failures }
         is re-fed ONCE into process_datagram.
         A reassembled datagram with no FRAG lands at (F) -> Delivery::Payload
-        { data, options }; coalesced per-fragment SAFE options are prepended only when no fragment
-        failed that option kind.
+        { data, options }; coalesced per-fragment SAFE options are prepended only when the option is
+        usable per-fragment and no fragment failed that option kind. APC is per-datagram only.
         A FRAG with non-empty data hits the (F) non-empty branch (options ignored, data delivered,
         Sec. 11.4); a nested FRAG with empty data is rejected -- local anti-loop policy, never a
         second re-feed (the RFC does not define nested fragmentation)

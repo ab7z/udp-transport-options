@@ -205,6 +205,9 @@ re-emits only unassigned SAFE `Other` Kinds `10..=126`. SAFE `Other` options may
 CRC32c computed over the UDP user data (the bytes covered by the UDP Length field, excluding the UDP
 header), letting a receiver detect corruption of the user data independently of the UDP header
 checksum (RFC 9868 Sec. 11.3). The typed value is `options::typed::Apc { crc32c }`.
+RFC 9868 reports APC as useful only per-datagram because UDP fragments have no UDP user data; a
+fragment-local APC is therefore treated like an unusable SAFE per-fragment option and is not
+coalesced into `FragmentSet` status.
 
 ```
 +--------+--------+--------+--------+--------+--------+

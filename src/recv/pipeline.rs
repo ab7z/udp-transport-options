@@ -398,8 +398,9 @@ fn parse_options(
     user_data: &[u8],
     options_offset_from_udp_header: usize,
 ) -> Result<ParsedOptions, crate::error::ParseError> {
-    let options_bytes = match fragment_option_limit(options_bytes, user_data.is_empty(), options_offset_from_udp_header)
-    {
+    let option_limit = fragment_option_limit(options_bytes, user_data.is_empty(), options_offset_from_udp_header);
+    let fragment_option_context = matches!(option_limit, FragmentOptionLimit::End { .. });
+    let options_bytes = match option_limit {
         FragmentOptionLimit::Full => options_bytes,
         FragmentOptionLimit::End { end } => &options_bytes[..end],
         FragmentOptionLimit::MalformedFrag { frag } => {
@@ -493,6 +494,10 @@ fn parse_options(
                 }
             }
             OptionKind::Apc => {
+                if fragment_option_context {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
+                    continue;
+                }
                 reject_sub_minimum(option)?;
                 if mark_seen_once(&mut seen, raw_kind) {
                     match accepts_apc(option, user_data) {

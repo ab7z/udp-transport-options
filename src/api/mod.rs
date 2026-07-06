@@ -22,6 +22,7 @@ use crate::recv::pipeline::{Delivery, process_datagram};
 use crate::socket::recv::RawReceiver;
 use crate::socket::send::{RawSender, assemble_datagram};
 use crate::wire::ip::IpRepr;
+use crate::wire::surplus::locate_surplus;
 use crate::wire::udp::UdpHeader;
 
 pub use crate::recv::pipeline::{OptionReport, OptionSource, OptionStatus};
@@ -539,7 +540,7 @@ fn wire_option_bearing(datagram: &[u8]) -> Result<bool, RecvError> {
             });
         }
     }
-    Ok(udp_len < ip.transport_payload_len())
+    Ok(locate_surplus(&ip, &udp).is_some())
 }
 
 fn is_required_reportable_kind(kind: OptionKind) -> bool {

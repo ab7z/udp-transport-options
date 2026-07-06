@@ -57,6 +57,31 @@ fn fragment_datagram(frag: Frag, fragment_options: &[u8], data: &[u8]) -> Vec<u8
     assemble_datagram(SRC, DST, SRC_PORT, DST_PORT, b"", &option_body(&options))
 }
 
+fn datagram_with_raw_surplus(user_data: &[u8], raw_surplus: &[u8]) -> Vec<u8> {
+    let udp_len = usize::from(length::UDP_HEADER) + user_data.len();
+    let total_len = 20 + udp_len + raw_surplus.len();
+    let ip = IpRepr {
+        src: SRC,
+        dst: DST,
+        ihl: 5,
+        total_len: total_len.try_into().expect("test datagram fits IPv4 length"),
+    };
+    let mut datagram = vec![0; total_len];
+    ip.write(&mut datagram[..20]);
+
+    let mut udp = UdpHeader {
+        src_port: SRC_PORT,
+        dst_port: DST_PORT,
+        length: udp_len.try_into().expect("test UDP length fits"),
+        checksum: 0,
+    };
+    udp.checksum = udp.compute_checksum(&ip, user_data);
+    udp.write(&mut datagram[20..20 + usize::from(length::UDP_HEADER)]);
+    datagram[20 + usize::from(length::UDP_HEADER)..20 + udp_len].copy_from_slice(user_data);
+    datagram[20 + udp_len..].copy_from_slice(raw_surplus);
+    datagram
+}
+
 fn frag_start(fragment_option_area_len: usize) -> u16 {
     (usize::from(length::UDP_HEADER) + usize::from(length::OCS) + fragment_option_area_len)
         .try_into()
@@ -214,6 +239,45 @@ fn required_policy_filters_fragment_option_if_any_fragment_failed() {
 }
 
 #[test]
+fn fragment_local_apc_is_ignored() {
+    let bad_apc = encode(Apc { crc32c: 0x1234_5678 });
+    let first = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_NON_TERMINAL) + bad_apc.len()),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER),
+        rdos: None,
+    };
+    let second = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_TERMINAL)),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER) + 3,
+        rdos: Some(u16::from(length::UDP_HEADER) + 6),
+    };
+    let first_datagram = fragment_datagram(first, &bad_apc, b"abc");
+    let second_datagram = fragment_datagram(second, &[], b"def");
+    let mut cache = ReassemblyCache::new();
+    let now = Instant::now();
+
+    assert_eq!(
+        decode_datagram(&first_datagram, &mut cache, now, &ReceivePolicy::default()).unwrap(),
+        ApiDelivery::Buffered
+    );
+    let ApiDelivery::Received(received) =
+        decode_datagram(&second_datagram, &mut cache, now, &ReceivePolicy::default()).unwrap()
+    else {
+        panic!("fragment-local APC must not drop the reassembled payload");
+    };
+    assert_eq!(received.data, b"abcdef");
+    assert!(!received.options.iter().any(|option| option.kind == OptionKind::Apc));
+    assert!(
+        !received
+            .reports
+            .iter()
+            .any(|report| report.kind == OptionKind::Apc && report.source == OptionSource::FragmentSet)
+    );
+}
+
+#[test]
 fn required_policy_does_not_accept_fragment_set_success_as_datagram_success() {
     let mds = encode(Mds {
         max_datagram_size: 1500,
@@ -287,6 +351,24 @@ fn drop_all_option_bearing_preserves_udp_checksum_errors() {
         decode_datagram(&datagram, &mut ReassemblyCache::new(), Instant::now(), &policy),
         Err(RecvError::UdpChecksumMismatch { .. })
     ));
+}
+
+#[test]
+fn drop_all_option_bearing_delivers_unusable_surplus() {
+    let datagram = datagram_with_raw_surplus(b"hi", &[0]);
+    let (ip, udp_at) = IpRepr::parse(&datagram).unwrap();
+    let udp = UdpHeader::parse(&datagram[udp_at..]).unwrap();
+    assert!(locate_surplus(&ip, &udp).is_none());
+
+    let policy = ReceivePolicy::new().drop_all_option_bearing(true);
+    let ApiDelivery::Received(received) =
+        decode_datagram(&datagram, &mut ReassemblyCache::new(), Instant::now(), &policy).unwrap()
+    else {
+        panic!("unusable surplus is not an option-bearing datagram");
+    };
+    assert_eq!(received.data, b"hi");
+    assert!(received.options.is_empty());
+    assert!(received.reports.is_empty());
 }
 
 #[test]
