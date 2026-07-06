@@ -1,10 +1,11 @@
 //! Example sender peer.
 
-use std::fs::OpenOptions;
-use std::io::{self, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{self, Read, Write};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use udp_transport_options::api::{DatagramAddrs, FragmentationMode, SendConfig, SendOptions, build_outgoing_datagrams};
@@ -56,7 +57,7 @@ struct Args {
     #[arg(long)]
     apc: bool,
 
-    /// Add an MDS option with the given maximum datagram size.
+    /// Add an MDS option with the given UDP payload capacity (IP MTU minus fixed IPv4/UDP headers).
     #[arg(long)]
     mds: Option<u16>,
 
@@ -92,9 +93,9 @@ struct Args {
     #[arg(long, default_value_t = udp_transport_options::model::limits::MIN_REASSEMBLY_SEGMENTS)]
     peer_mrds_segments: u8,
 
-    /// First FRAG Identification value.
-    #[arg(long, default_value_t = 1)]
-    identification: u32,
+    /// First FRAG Identification value. Defaults to an OS-random seed.
+    #[arg(long)]
+    identification: Option<u32>,
 
     /// Print each emitted IPv4 datagram as hex.
     #[arg(long)]
@@ -130,6 +131,7 @@ fn run(args: Args) -> Result<(), CliError> {
         src_port: args.src_port,
         dst_port: args.dst_port,
     };
+    let first_identification = args.identification.unwrap_or_else(|| default_identification(&addrs));
     let base_config = SendConfig {
         max_datagram_len: args.max_datagram_len,
         peer: PeerFragmentLimits {
@@ -141,10 +143,10 @@ fn run(args: Args) -> Result<(), CliError> {
         } else {
             FragmentationMode::Auto
         },
-        identification: args.identification,
+        identification: first_identification,
     };
     let sender = RawSender::new().map_err(CliError::from_socket)?;
-    let mut identifications = IdentificationGenerator::new(args.identification);
+    let mut identifications = IdentificationGenerator::new(first_identification);
     let mut manifest = match &args.manifest {
         Some(path) => Some(OpenOptions::new().create(true).append(true).open(path)?),
         None => None,
@@ -185,11 +187,12 @@ fn run(args: Args) -> Result<(), CliError> {
         if let Some(file) = &mut manifest {
             writeln!(
                 file,
-                "{{\"seq\":{seq},\"src\":\"{}\",\"dst\":\"{}\",\"src_port\":{},\"dst_port\":{},\"payload_len\":{},\"datagrams\":{},\"bytes\":{}}}",
+                "{{\"seq\":{seq},\"src\":\"{}\",\"dst\":\"{}\",\"src_port\":{},\"dst_port\":{},\"identification\":{},\"payload_len\":{},\"datagrams\":{},\"bytes\":{}}}",
                 args.src,
                 args.dst,
                 args.src_port,
                 args.dst_port,
+                identification,
                 payload.len(),
                 datagrams.len(),
                 sent_bytes
@@ -198,6 +201,39 @@ fn run(args: Args) -> Result<(), CliError> {
     }
 
     Ok(())
+}
+
+fn default_identification(addrs: &DatagramAddrs) -> u32 {
+    read_random_identification().unwrap_or_else(|_| fallback_identification(addrs))
+}
+
+fn read_random_identification() -> io::Result<u32> {
+    let mut bytes = [0u8; 4];
+    File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(usable_identification(u32::from_ne_bytes(bytes)))
+}
+
+fn fallback_identification(addrs: &DatagramAddrs) -> u32 {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default();
+    let mut seed = now.as_secs() ^ u64::from(now.subsec_nanos());
+    seed ^= u64::from(std::process::id()) << 32;
+    seed ^= u64::from(u32::from(addrs.src)) << 16;
+    seed ^= u64::from(u32::from(addrs.dst));
+    seed ^= u64::from(addrs.src_port) << 48;
+    seed ^= u64::from(addrs.dst_port);
+    usable_identification(mix64(seed) as u32)
+}
+
+fn mix64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51afd7ed558ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ceb9fe1a85ec53);
+    value ^ (value >> 33)
+}
+
+fn usable_identification(identification: u32) -> u32 {
+    if identification == u32::MAX { 0 } else { identification }
 }
 
 fn payload_for(args: &Args, seq: u64) -> Result<Vec<u8>, CliError> {

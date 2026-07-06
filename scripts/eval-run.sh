@@ -12,6 +12,7 @@ RUN_DIR="${EVAL_RUN_DIR:-/tmp/uoe-$(date +%s)}"
 PORT_BASE=41000
 CANARY_PORT=40999
 SCENARIOS=5
+MDS_SIZE=1472
 EVAL_REQUIRE_INTACT="${EVAL_REQUIRE_INTACT:-}"
 
 case "$TOPOLOGY" in
@@ -154,9 +155,9 @@ run_scenario() {
 }
 
 run_scenario baseline 41000 1 --payload plain
-run_scenario typed 41001 1 --payload wire --apc --mds 1500 --mrds-size 2926 --req deadbeef
+run_scenario typed 41001 1 --payload wire --apc --mds "$MDS_SIZE" --mrds-size 2926 --req deadbeef
 run_scenario pad 41002 1 --payload odd --req c0ffee01
-run_scenario near-mtu 41003 1 --payload-size 1392 --apc --mds 1500
+run_scenario near-mtu 41003 1 --payload-size 1392 --apc --mds "$MDS_SIZE"
 run_scenario frag 41004 8 --payload-size 256 --max-datagram-len 96 --peer-mrds-segments 8
 
 stop_captures

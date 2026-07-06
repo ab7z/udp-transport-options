@@ -47,7 +47,7 @@ In another shell:
 
 ```sh
 ./bin/udpopt-send --src 127.0.0.1 --dst 127.0.0.1 --src-port 40000 --dst-port 41001 \
-  --payload wire --apc --mds 1500 --mrds-size 2926 --req deadbeef --hexdump
+  --payload wire --apc --mds 1472 --mrds-size 2926 --req deadbeef --hexdump
 ```
 
 Through the repository driver, use `scripts/vm-ubuntu-server.sh eval veth` for the same CLI pair as

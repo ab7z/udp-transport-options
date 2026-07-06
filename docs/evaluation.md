@@ -74,9 +74,9 @@ The run uses one destination port per scenario, starting at 41000:
 | Port | Scenario | Purpose |
 |---:|---|---|
 | 41000 | baseline, no options | path liveness with no surplus |
-| 41001 | APC + MDS + MRDS + REQ | typed must-support options |
+| 41001 | APC + MDS(1472) + MRDS + REQ | typed must-support options |
 | 41002 | odd payload + REQ | odd surplus start and pre-OCS pad |
-| 41003 | near-MTU payload + APC/MDS | MTU-adjacent surplus survival |
+| 41003 | near-MTU payload + APC/MDS(1472) | MTU-adjacent surplus survival |
 | 41004 | auto-FRAG payload | fragment surplus survival and reassembly input |
 
 Large logical payloads are sent with RFC 9868 FRAG, not IP fragmentation. This follows the Step 0.5
