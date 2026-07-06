@@ -69,9 +69,9 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [x] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [x] |
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [x] |
-| 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [ ] |
-| 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [ ] |
-| 17 | Evaluation runbook + netns/veth/tunnel scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the staged env on Linux; runbook reproduces integration results; quick-start verified | [ ] |
+| 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [x] |
+| 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [x] |
+| 17 | Evaluation runbook + netns/veth/tunnel scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the staged env on Linux; runbook reproduces integration results; quick-start verified | [x] |
 
 The 15 -> 17 numbering gap is intentional: **step 16 removed from scope (IPv6), 2026-06** -- the
 mechanism is IP-version-neutral and fully demonstrated on IPv4; IPv6 raw-socket semantics

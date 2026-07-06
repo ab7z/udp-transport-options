@@ -87,10 +87,10 @@ impl TypedOption for Apc {
     }
 }
 
-/// Maximum Datagram Size: the largest datagram the sender can receive without IP fragmentation.
+/// Maximum Datagram Size: IP MTU minus the fixed IP and UDP headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Mds {
-    /// Maximum datagram size, in bytes.
+    /// Maximum UDP payload or UDP fragment size, in bytes.
     pub max_datagram_size: u16,
 }
 

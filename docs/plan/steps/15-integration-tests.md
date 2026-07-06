@@ -1,6 +1,6 @@
 # Step 15: Loopback integration suite
 
-Status: pending (Linux, requires CAP_NET_RAW)
+Status: done; verified on achim (Linux, requires CAP_NET_RAW)
 
 ## Goal
 
@@ -34,11 +34,11 @@ wire`, `docs/plan/steps/10b-wire-check.md`), which stays alive alongside this su
 
 ## Tasks
 
-- [ ] Integration test harness + privilege preflight.
-- [ ] Per-option and OCS cases.
-- [ ] Fragmentation cases.
-- [ ] Malformed-input cases.
-- [ ] README documentation of the privileged lane.
+- [x] Integration test harness + privilege preflight.
+- [x] Per-option and OCS cases.
+- [x] Fragmentation cases.
+- [x] Malformed-input cases.
+- [x] README documentation of the privileged lane.
 
 ## Definition of Done
 

@@ -37,6 +37,7 @@ Commands:
   ignored     Root-gated test lane: test binaries run under sudo on achim (ACHIM_SUDO=1)
   spike       Cross-build the spike examples, sync, and run the Step 0.5 spike on achim
   wire        Cross-build, sync, and run the tcpdump wire-verification lane on achim (root)
+  eval [topo] Cross-build, sync, and run the Step 17 FF2 eval lane on achim (root)
   shell       Open a shell in the remote run directory on achim
   run <cmd>   Run an arbitrary command in the remote run directory on achim
 
@@ -60,8 +61,8 @@ command -v rsync >/dev/null || { echo "rsync: MISSING" >&2; exit 1; }
 echo "rsync: ok"
 sudo -n true || { echo "sudo -n: FAILED (the root-gated lanes need passwordless sudo)" >&2; exit 1; }
 echo "sudo -n: ok"
-# Informational only: the wire lane re-checks these itself with a hard error.
-for tool in tcpdump tshark python3; do
+# Informational only: the privileged lanes re-check required tools themselves with hard errors.
+for tool in tcpdump tshark python3 ethtool nft; do
     command -v "$tool" >/dev/null && echo "$tool: ok" || echo "$tool: MISSING (wire lane needs it: sudo apt-get install -y $tool)"
 done'
 }
@@ -74,7 +75,10 @@ sync_bins() {
         "$TARGET_DIR/examples/spike_server" "$TARGET_DIR/examples/spike_client" \
         "$TARGET_DIR/examples/wire_probe" \
         "$HOST:$REMOTE_DIR/bin/"
-    rsync -az scripts/spike.sh scripts/wire-check.sh scripts/wire-check.py "$HOST:$REMOTE_DIR/scripts/"
+    rsync -az \
+        scripts/spike.sh scripts/wire-check.sh scripts/wire-check.py \
+        scripts/eval-env.sh scripts/eval-run.sh scripts/eval-check.py \
+        "$HOST:$REMOTE_DIR/scripts/"
 }
 
 cmd="${1:-verify}"
@@ -113,6 +117,19 @@ case "$cmd" in
     wire)
         sync_bins
         ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); WIRE_SKIP_BUILD=1 WIRE_BIN_DIR=bin scripts/wire-check.sh"
+        ;;
+    eval)
+        topo="${2:-veth}"
+        case "$topo" in
+            veth|router|nat|filter) ;;
+            *)
+                echo "usage: scripts/vm-ubuntu-server.sh eval [veth|router|nat|filter]" >&2
+                exit 64
+                ;;
+        esac
+        sync_bins
+        topo_q="$(printf "%q" "$topo")"
+        ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); EVAL_SKIP_BUILD=1 EVAL_BIN_DIR=bin scripts/eval-run.sh $topo_q"
         ;;
     shell)
         ssh -t "$HOST" "cd $(remote_dir_q) 2>/dev/null || cd; exec \${SHELL:-/bin/bash}"

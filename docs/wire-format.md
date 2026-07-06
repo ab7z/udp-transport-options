@@ -276,8 +276,8 @@ gap-free.
 ## 8. Maximum Datagram Size (MDS)
 
 `Kind` 4 (`model::kind::MDS` -> `OptionKind::Mds`), `Length` 4 (`model::length::MDS`). MDS advertises
-the largest datagram the sender can receive without IP fragmentation, as a single 16-bit size
-(RFC 9868 Sec. 11.5). The typed value is `options::typed::Mds { max_datagram_size }`.
+the IP-layer MTU minus the fixed IP and UDP headers, as a single 16-bit size (RFC 9868 Sec. 11.5).
+The typed value is `options::typed::Mds { max_datagram_size }`.
 
 ```
 +--------+--------+--------+--------+
