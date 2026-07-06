@@ -119,9 +119,17 @@ case "$cmd" in
         ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); WIRE_SKIP_BUILD=1 WIRE_BIN_DIR=bin scripts/wire-check.sh"
         ;;
     eval)
-        sync_bins
         topo="${2:-veth}"
-        ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); EVAL_SKIP_BUILD=1 EVAL_BIN_DIR=bin scripts/eval-run.sh $topo"
+        case "$topo" in
+            veth|router|nat|filter) ;;
+            *)
+                echo "usage: scripts/vm-ubuntu-server.sh eval [veth|router|nat|filter]" >&2
+                exit 64
+                ;;
+        esac
+        sync_bins
+        topo_q="$(printf "%q" "$topo")"
+        ssh "$HOST" "set -euo pipefail; cd $(remote_dir_q); EVAL_SKIP_BUILD=1 EVAL_BIN_DIR=bin scripts/eval-run.sh $topo_q"
         ;;
     shell)
         ssh -t "$HOST" "cd $(remote_dir_q) 2>/dev/null || cd; exec \${SHELL:-/bin/bash}"
