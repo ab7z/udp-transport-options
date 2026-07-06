@@ -21,6 +21,6 @@ rsync -az "$bin" "$HOST:$RUN_DIR/$name"
 # remote shell; the achim login shell is bash, which understands %q quoting.
 cmd="$(printf "%q " "$RUN_DIR/$name" "$@")"
 if [ "${ACHIM_SUDO:-0}" = "1" ]; then
-    cmd="sudo $cmd"
+    cmd="sudo env ACHIM_SUDO=1 $cmd"
 fi
 exec ssh "$HOST" "$cmd"

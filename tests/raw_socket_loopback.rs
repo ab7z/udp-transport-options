@@ -3,9 +3,11 @@
 mod common_assemble;
 
 use std::error::Error;
+use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::{Duration, Instant};
 
+use udp_transport_options::error::SocketError;
 use udp_transport_options::options::kind::OptionKind;
 use udp_transport_options::options::serialize::OptionsBuilder;
 use udp_transport_options::socket::recv::RawReceiver;
@@ -17,7 +19,9 @@ const RECV_TIMEOUT: Duration = Duration::from_millis(100);
 #[test]
 #[ignore = "requires Linux CAP_NET_RAW/root; run through scripts/vm-ubuntu-server.sh ignored"]
 fn loopback_round_trip_preserves_surplus_and_filters_ports() -> Result<(), Box<dyn Error>> {
-    let sender = RawSender::new()?;
+    let Some(sender) = raw_sender_or_skip()? else {
+        return Ok(());
+    };
     let options_body = options_body();
 
     let (src_port, dst_port, _) = distinct_ports();
@@ -90,6 +94,23 @@ fn loopback_round_trip_preserves_surplus_and_filters_ports() -> Result<(), Box<d
     assert!(recv_until(&own_src_receiver, Duration::from_millis(600))?.is_none());
 
     Ok(())
+}
+
+fn raw_sender_or_skip() -> Result<Option<RawSender>, Box<dyn Error>> {
+    match RawSender::new() {
+        Ok(sender) => Ok(Some(sender)),
+        Err(SocketError::PermissionDenied) => {
+            if std::env::var_os("ACHIM_SUDO").is_some() {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "ACHIM_SUDO=1 but CAP_NET_RAW/root is unavailable",
+                )));
+            }
+            eprintln!("skipping raw-socket loopback test: CAP_NET_RAW/root is unavailable");
+            Ok(None)
+        }
+        Err(error) => Err(Box::new(error)),
+    }
 }
 
 fn options_body() -> Vec<u8> {

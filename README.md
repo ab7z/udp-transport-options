@@ -10,8 +10,8 @@ intended to implement that mechanism in userspace, with raw sockets used only
 for the Linux send/receive boundary.
 
 This repository contains the crate layout, protocol constants, core data types,
-error types, planning docs, and placeholder example CLIs. Most protocol behavior
-is tracked in [`docs/plan/ROADMAP.md`](docs/plan/ROADMAP.md).
+error types, planning docs, example peer CLIs, and Linux evaluation scripts. Most
+protocol behavior is tracked in [`docs/plan/ROADMAP.md`](docs/plan/ROADMAP.md).
 
 ## Development workflow
 
@@ -92,8 +92,17 @@ scripts/vm-ubuntu-server.sh spike
 # the independent checker scripts/wire-check.py verifies the post-kernel bytes (plus a tshark
 # L3/L4 cross-check; one-time prerequisite on achim: sudo apt-get install -y tshark)
 scripts/vm-ubuntu-server.sh wire
+
+# Step 17 FF2/P2 staged evaluation lanes. Artifacts land under /tmp/uoe-<epoch>/ on achim.
+scripts/vm-ubuntu-server.sh eval veth
+scripts/vm-ubuntu-server.sh eval router
+scripts/vm-ubuntu-server.sh eval nat
+scripts/vm-ubuntu-server.sh eval filter
 ```
 
 Set `VM_UBUNTU_SERVER_HOST` to use a different SSH alias, or `VM_UBUNTU_SERVER_DIR` to use another
 remote run directory (binaries land in its `bin/`). The host needs passwordless `sudo` and `rsync`,
 nothing else.
+
+See [`docs/evaluation.md`](docs/evaluation.md) for the FF2/P2 verdict taxonomy, capture artifacts,
+offload notes, and Wireshark/tshark interpretation limits.

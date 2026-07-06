@@ -1,6 +1,6 @@
 # Step 14: Example peer CLIs
 
-Status: pending (Linux, requires CAP_NET_RAW to run)
+Status: done; verified on achim (Linux, requires CAP_NET_RAW to run)
 
 ## Goal
 
@@ -30,10 +30,28 @@ covered by the specs of Steps 3-13. No Lean obligations; see `LEAN_RFC9868_VALID
 
 ## Tasks
 
-- [ ] `udpopt-send` (options + fragmentation flags).
-- [ ] `udpopt-recv` (decode + print).
-- [ ] Privilege error handling.
-- [ ] Documented loopback demo invocation.
+- [x] `udpopt-send` (options + fragmentation flags).
+- [x] `udpopt-recv` (decode + print).
+- [x] Privilege error handling.
+- [x] Documented loopback demo invocation.
+
+## Loopback demo
+
+In one root-capable shell on Linux or achim:
+
+```sh
+./bin/udpopt-recv --dst-port 41001 --timeout-ms 5000 --count 1 --json
+```
+
+In another shell:
+
+```sh
+./bin/udpopt-send --src 127.0.0.1 --dst 127.0.0.1 --src-port 40000 --dst-port 41001 \
+  --payload wire --apc --mds 1500 --mrds-size 2926 --req deadbeef --hexdump
+```
+
+Through the repository driver, use `scripts/vm-ubuntu-server.sh eval veth` for the same CLI pair as
+part of a captured path run.
 
 ## Definition of Done
 
