@@ -68,7 +68,7 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 10.5 | Wire-verification lane: tcpdump capture on `achim` + independent python pcap checker (own RFC 1071/CRC32C, goldens from `wire-format.md`) + tshark L3/L4 cross-check -- a second oracle for the send-path wire image that breaks the sender/receiver self-reference of the in-process tests | `scripts/vm-ubuntu-server.sh wire` exits 0 (10/10 scenarios); flipping a single captured surplus byte makes the checker fail | [x] |
 | 11 | FRAG fragmentation (send) | N bytes reassemble to N; atomic single-fragment valid; respects MRDS cap | [x] |
 | 12 | FRAG reassembly (recv) | in/out-of-order ok; overlap aborts; caps fire; GC; pairs isolated; no re-process loop | [x] |
-| 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [ ] |
+| 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [x] |
 | 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [ ] |
 | 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [ ] |
 | 17 | Evaluation runbook + netns/veth/tunnel scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the staged env on Linux; runbook reproduces integration results; quick-start verified | [ ] |

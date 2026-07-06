@@ -13,7 +13,7 @@ mod platform {
 
     use socket2::{Domain, Protocol, Socket, Type};
 
-    use crate::error::RecvError;
+    use crate::error::SocketError;
     use crate::socket::map_socket_error;
     use crate::wire::ip::IpRepr;
     use crate::wire::udp::UdpHeader;
@@ -33,7 +33,7 @@ mod platform {
     impl RawReceiver {
         /// Opens an `AF_INET SOCK_RAW IPPROTO_UDP` receiver and binds a dummy UDP socket on
         /// `dst_port` to suppress kernel ICMP port-unreachable noise.
-        pub fn bind(dst_port: u16, src_port: Option<u16>, own_src: Option<Ipv4Addr>) -> Result<Self, RecvError> {
+        pub fn bind(dst_port: u16, src_port: Option<u16>, own_src: Option<Ipv4Addr>) -> Result<Self, SocketError> {
             let socket =
                 Socket::new(Domain::IPV4, Type::from(libc::SOCK_RAW), Some(Protocol::UDP)).map_err(map_socket_error)?;
             let icmp_sink =
@@ -48,7 +48,7 @@ mod platform {
         }
 
         /// Configures the raw receive timeout.
-        pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), RecvError> {
+        pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), SocketError> {
             self.socket.set_read_timeout(timeout).map_err(map_socket_error)
         }
 
@@ -57,7 +57,7 @@ mod platform {
         /// This method only parses enough header state to apply the userspace demux filters. It does
         /// not validate the UDP checksum, OCS, or option semantics; the pure receive pipeline owns
         /// those decisions in Step 10.
-        pub fn recv(&self) -> Result<Option<Vec<u8>>, RecvError> {
+        pub fn recv(&self) -> Result<Option<Vec<u8>>, SocketError> {
             let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
             let n = match self.socket.recv(&mut buf) {
                 Ok(n) => n,
@@ -98,7 +98,7 @@ mod platform {
     use std::net::Ipv4Addr;
     use std::time::Duration;
 
-    use crate::error::RecvError;
+    use crate::error::SocketError;
 
     /// Raw IPv4 receiver for UDP datagrams, with userspace port filtering.
     #[derive(Debug, Default)]
@@ -106,24 +106,24 @@ mod platform {
 
     impl RawReceiver {
         /// Returns [`io::ErrorKind::Unsupported`] on non-Linux hosts.
-        pub fn bind(_dst_port: u16, _src_port: Option<u16>, _own_src: Option<Ipv4Addr>) -> Result<Self, RecvError> {
-            Err(RecvError::Io(io::Error::new(
+        pub fn bind(_dst_port: u16, _src_port: Option<u16>, _own_src: Option<Ipv4Addr>) -> Result<Self, SocketError> {
+            Err(SocketError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "raw UDP-options receive is supported on Linux only",
             )))
         }
 
         /// Returns [`io::ErrorKind::Unsupported`] on non-Linux hosts.
-        pub fn set_read_timeout(&self, _timeout: Option<Duration>) -> Result<(), RecvError> {
-            Err(RecvError::Io(io::Error::new(
+        pub fn set_read_timeout(&self, _timeout: Option<Duration>) -> Result<(), SocketError> {
+            Err(SocketError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "raw UDP-options receive is supported on Linux only",
             )))
         }
 
         /// Returns [`io::ErrorKind::Unsupported`] on non-Linux hosts.
-        pub fn recv(&self) -> Result<Option<Vec<u8>>, RecvError> {
-            Err(RecvError::Io(io::Error::new(
+        pub fn recv(&self) -> Result<Option<Vec<u8>>, SocketError> {
+            Err(SocketError::Io(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "raw UDP-options receive is supported on Linux only",
             )))

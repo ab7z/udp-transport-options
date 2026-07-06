@@ -65,19 +65,26 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
                     delivery,
                     Delivery::Payload {
                         data: user_data.to_vec(),
-                        options: Vec::new()
+                        options: Vec::new(),
+                        option_bearing: true,
+                        reports: Vec::new(),
                     }
                 );
                 return;
             }
             ExpectedDisposition::ZeroPayload => {
-                assert_eq!(
-                    delivery,
-                    Delivery::Payload {
-                        data: Vec::new(),
-                        options: Vec::new()
-                    }
-                );
+                let Delivery::Payload {
+                    data,
+                    options,
+                    option_bearing,
+                    ..
+                } = delivery
+                else {
+                    panic!("expected zero-length payload delivery");
+                };
+                assert_eq!(data, Vec::<u8>::new());
+                assert_eq!(options, Vec::new());
+                assert!(option_bearing);
                 return;
             }
             ExpectedDisposition::Buffered => {
@@ -97,8 +104,18 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
     }
 
     match delivery {
-        Delivery::Payload { data, options } => {
+        Delivery::Payload {
+            data,
+            options,
+            option_bearing: _,
+            reports,
+        } => {
             assert_eq!(data, user_data);
+            assert!(
+                reports
+                    .iter()
+                    .all(|report| !matches!(report.kind, OptionKind::Frag | OptionKind::Nop | OptionKind::Eol))
+            );
             for option in options {
                 assert!(matches!(
                     option.kind,
@@ -157,13 +174,14 @@ fn classify_trusted_options(
     now: Instant,
 ) -> ExpectedDisposition {
     let full_options_bytes = options_bytes;
-    let (options_bytes, fragment_data) =
-        match fragment_option_limit(options_bytes, user_data_empty, options_offset_from_udp_header) {
-            FragmentOptionLimit::Full => (options_bytes, &[][..]),
-            FragmentOptionLimit::End(end) => (&options_bytes[..end], &full_options_bytes[end..]),
-            FragmentOptionLimit::MalformedFrag => return ExpectedDisposition::Dropped,
-            FragmentOptionLimit::UnsupportedUnsafeBeforeFrag => return ExpectedDisposition::Dropped,
-        };
+    let option_limit = fragment_option_limit(options_bytes, user_data_empty, options_offset_from_udp_header);
+    let fragment_option_context = matches!(option_limit, FragmentOptionLimit::End(_));
+    let (options_bytes, fragment_data) = match option_limit {
+        FragmentOptionLimit::Full => (options_bytes, &[][..]),
+        FragmentOptionLimit::End(end) => (&options_bytes[..end], &full_options_bytes[end..]),
+        FragmentOptionLimit::MalformedFrag => return ExpectedDisposition::Dropped,
+        FragmentOptionLimit::UnsupportedUnsafeBeforeFrag => return ExpectedDisposition::Dropped,
+    };
     let mut iter = OptionsIter::new(options_bytes);
     let mut seen = [false; 256];
     let mut valid_frag_seen = None;
@@ -198,6 +216,7 @@ fn classify_trusted_options(
                     return ExpectedDisposition::ZeroPayload;
                 }
             }
+            OptionKind::Apc if fragment_option_context => {}
             OptionKind::Apc | OptionKind::Mds | OptionKind::Mrds | OptionKind::Req | OptionKind::Res => {
                 if is_sub_minimum_known_option(option) {
                     return ExpectedDisposition::DeliverWithoutOptions;

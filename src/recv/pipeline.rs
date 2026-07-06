@@ -53,6 +53,11 @@ pub enum Delivery {
         data: Vec<u8>,
         /// Parsed options (empty if the surplus area was absent or its options were discarded).
         options: Vec<RawOption>,
+        /// Whether the datagram carried a usable UDP-options surplus area, even if those options
+        /// were later discarded by pad, OCS, or TLV validation.
+        option_bearing: bool,
+        /// Per-option processing status for API consumers.
+        reports: Vec<OptionReport>,
     },
     /// The datagram was a fragment; it was buffered and there is nothing to deliver yet.
     Buffered,
@@ -60,9 +65,41 @@ pub enum Delivery {
     Dropped,
 }
 
+/// User-visible processing status for a UDP option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionStatus {
+    /// The option was recognized and processed successfully.
+    Success,
+    /// The option was recognized but failed validation or processing.
+    Failed,
+    /// The option was intentionally ignored.
+    Ignored,
+}
+
+/// Where a reported option was observed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OptionSource {
+    /// The option applies to the reassembled or unfragmented UDP datagram.
+    Datagram,
+    /// The option was accumulated from one or more UDP fragments.
+    FragmentSet,
+}
+
+/// Processing status for one option visible at the API boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionReport {
+    /// The option Kind.
+    pub kind: OptionKind,
+    /// The processing disposition.
+    pub status: OptionStatus,
+    /// The source level at which the option was observed.
+    pub source: OptionSource,
+}
+
 #[derive(Debug)]
 struct ParsedOptions {
     options: Vec<RawOption>,
+    reports: Vec<OptionReport>,
     frag: Option<Frag>,
     unsupported_unsafe_seen: bool,
     fragment_failed: bool,
@@ -139,21 +176,23 @@ fn process_datagram_inner(
         }
     }
 
-    let deliver_without_options = || {
+    let deliver_without_options = |option_bearing| {
         Ok(Delivery::Payload {
             data: user_data.to_vec(),
             options: Vec::new(),
+            option_bearing,
+            reports: Vec::new(),
         })
     };
 
     let Some(layout) = locate_surplus(&ip, &udp) else {
-        return deliver_without_options();
+        return deliver_without_options(false);
     };
 
     let pad = datagram[layout.starts_at];
     if let Err(error) = ocs::check_pad(pad, layout.needs_pad) {
         warn_sampled!(PAD_WARNINGS, "discarding UDP options: {error}");
-        return deliver_without_options();
+        return deliver_without_options(true);
     }
 
     let body = &datagram[layout.ocs_at()..ip_end];
@@ -164,17 +203,18 @@ fn process_datagram_inner(
                 OCS_ZERO_WITH_UDP_CHECKSUM_WARNINGS,
                 "discarding UDP options: OCS is zero while UDP checksum is non-zero"
             );
-            return deliver_without_options();
+            return deliver_without_options(true);
         }
         OcsCheck::Error(error) => {
             warn_sampled!(OCS_MISMATCH_WARNINGS, "discarding UDP options: {error}");
-            return deliver_without_options();
+            return deliver_without_options(true);
         }
     }
 
     let options_offset_from_udp_header = layout.ocs_at() + usize::from(length::OCS) - udp_at;
     let ParsedOptions {
         options,
+        reports,
         frag,
         unsupported_unsafe_seen,
         fragment_failed,
@@ -186,13 +226,13 @@ fn process_datagram_inner(
         Ok(parsed) => parsed,
         Err(error) => {
             warn_sampled!(TLV_PARSE_WARNINGS, "discarding UDP options: {error}");
-            return deliver_without_options();
+            return deliver_without_options(true);
         }
     };
     let valid_frag_seen = frag.is_some();
 
     if valid_frag_seen && !user_data.is_empty() {
-        return deliver_without_options();
+        return deliver_without_options(true);
     }
     let fragment_key = frag
         .filter(|_| user_data.is_empty())
@@ -207,6 +247,8 @@ fn process_datagram_inner(
         return Ok(Delivery::Payload {
             data: Vec::new(),
             options: Vec::new(),
+            option_bearing: true,
+            reports,
         });
     }
     if let Some(frag) = frag.filter(|_| user_data.is_empty()) {
@@ -219,21 +261,37 @@ fn process_datagram_inner(
             cache.discard(key);
             return Ok(Delivery::Dropped);
         };
-        return match cache.insert_with_options(key, frag, fragment_data, &options, now) {
+        let fragment_option_failures = fragment_option_failures(&reports);
+        return match cache.insert_with_options_and_failures(
+            key,
+            frag,
+            fragment_data,
+            &options,
+            &fragment_option_failures,
+            now,
+        ) {
             ReassemblyOutcome::Incomplete => Ok(Delivery::Buffered),
             ReassemblyOutcome::Abort(_) => Ok(Delivery::Dropped),
             ReassemblyOutcome::Complete {
                 tail,
                 udp_length,
                 fragment_options,
+                fragment_option_failures,
             } => {
                 let Some(reassembled) = reassembled_datagram(&ip, &udp, udp_length, &tail) else {
                     return Ok(Delivery::Dropped);
                 };
                 match process_datagram_inner(&reassembled, cache, now, false)? {
-                    Delivery::Payload { data, options } => Ok(Delivery::Payload {
+                    Delivery::Payload {
                         data,
-                        options: merge_fragment_options(fragment_options, options),
+                        options,
+                        option_bearing,
+                        reports,
+                    } => Ok(Delivery::Payload {
+                        data,
+                        options: merge_fragment_options(fragment_options.clone(), &fragment_option_failures, options),
+                        option_bearing,
+                        reports: merge_fragment_reports(fragment_options, fragment_option_failures, reports),
                     }),
                     delivery => Ok(delivery),
                 }
@@ -244,6 +302,8 @@ fn process_datagram_inner(
     Ok(Delivery::Payload {
         data: user_data.to_vec(),
         options,
+        option_bearing: true,
+        reports,
     })
 }
 
@@ -257,9 +317,51 @@ fn frag_key(ip: &IpRepr, udp: &UdpHeader, frag: Frag) -> FragKey {
     }
 }
 
-fn merge_fragment_options(mut fragment_options: Vec<RawOption>, datagram_options: Vec<RawOption>) -> Vec<RawOption> {
+fn merge_fragment_options(
+    mut fragment_options: Vec<RawOption>,
+    fragment_option_failures: &[OptionKind],
+    datagram_options: Vec<RawOption>,
+) -> Vec<RawOption> {
+    fragment_options.retain(|option| !fragment_option_failures.contains(&option.kind));
     fragment_options.extend(datagram_options);
     fragment_options
+}
+
+fn merge_fragment_reports(
+    fragment_options: Vec<RawOption>,
+    fragment_option_failures: Vec<OptionKind>,
+    datagram_reports: Vec<OptionReport>,
+) -> Vec<OptionReport> {
+    let mut reports: Vec<_> = fragment_option_failures
+        .into_iter()
+        .map(|kind| OptionReport {
+            kind,
+            status: OptionStatus::Failed,
+            source: OptionSource::FragmentSet,
+        })
+        .collect();
+    for option in fragment_options {
+        if reports.iter().any(|report| report.kind == option.kind) {
+            continue;
+        }
+        reports.push(OptionReport {
+            kind: option.kind,
+            status: OptionStatus::Success,
+            source: OptionSource::FragmentSet,
+        });
+    }
+    reports.extend(datagram_reports);
+    reports
+}
+
+fn fragment_option_failures(reports: &[OptionReport]) -> Vec<OptionKind> {
+    let mut failures = Vec::new();
+    for report in reports {
+        if report.status == OptionStatus::Failed && !failures.contains(&report.kind) {
+            failures.push(report.kind);
+        }
+    }
+    failures
 }
 
 fn reassembled_datagram(ip: &IpRepr, udp: &UdpHeader, udp_length: u16, tail: &[u8]) -> Option<Vec<u8>> {
@@ -296,13 +398,15 @@ fn parse_options(
     user_data: &[u8],
     options_offset_from_udp_header: usize,
 ) -> Result<ParsedOptions, crate::error::ParseError> {
-    let options_bytes = match fragment_option_limit(options_bytes, user_data.is_empty(), options_offset_from_udp_header)
-    {
+    let option_limit = fragment_option_limit(options_bytes, user_data.is_empty(), options_offset_from_udp_header);
+    let fragment_option_context = matches!(option_limit, FragmentOptionLimit::End { .. });
+    let options_bytes = match option_limit {
         FragmentOptionLimit::Full => options_bytes,
         FragmentOptionLimit::End { end } => &options_bytes[..end],
         FragmentOptionLimit::MalformedFrag { frag } => {
             return Ok(ParsedOptions {
                 options: Vec::new(),
+                reports: Vec::new(),
                 frag: Some(frag),
                 unsupported_unsafe_seen: true,
                 fragment_failed: true,
@@ -311,6 +415,7 @@ fn parse_options(
         FragmentOptionLimit::UnsupportedUnsafeBeforeFrag { frag } => {
             return Ok(ParsedOptions {
                 options: Vec::new(),
+                reports: Vec::new(),
                 frag: Some(frag),
                 unsupported_unsafe_seen: true,
                 fragment_failed: true,
@@ -319,6 +424,7 @@ fn parse_options(
     };
     let mut iter = OptionsIter::new(options_bytes);
     let mut options = Vec::new();
+    let mut reports = Vec::new();
     let mut seen = [false; 256];
     let mut seen_non_must_support_safe = false;
     let mut frag = None;
@@ -331,6 +437,7 @@ fn parse_options(
                 return if unsupported_unsafe_seen {
                     Ok(ParsedOptions {
                         options: Vec::new(),
+                        reports: Vec::new(),
                         frag,
                         unsupported_unsafe_seen,
                         fragment_failed: false,
@@ -338,6 +445,7 @@ fn parse_options(
                 } else if frag.is_some() && user_data.is_empty() {
                     Ok(ParsedOptions {
                         options: Vec::new(),
+                        reports: Vec::new(),
                         frag,
                         unsupported_unsafe_seen: false,
                         fragment_failed: true,
@@ -369,6 +477,7 @@ fn parse_options(
                     if frag.is_some() && user_data.is_empty() {
                         return Ok(ParsedOptions {
                             options: Vec::new(),
+                            reports: Vec::new(),
                             frag,
                             unsupported_unsafe_seen: false,
                             fragment_failed: true,
@@ -385,40 +494,82 @@ fn parse_options(
                 }
             }
             OptionKind::Apc => {
+                if fragment_option_context {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
+                    continue;
+                }
                 reject_sub_minimum(option)?;
-                if mark_seen_once(&mut seen, raw_kind) && accepts_apc(option, user_data) {
-                    options.push(option.into());
+                if mark_seen_once(&mut seen, raw_kind) {
+                    match accepts_apc(option, user_data) {
+                        OptionStatus::Success => {
+                            reports.push(report(option.kind, OptionStatus::Success));
+                            options.push(option.into());
+                        }
+                        status => reports.push(report(option.kind, status)),
+                    }
+                } else {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
                 }
             }
             OptionKind::Mds => {
                 reject_sub_minimum(option)?;
-                if mark_seen_once(&mut seen, raw_kind) && Mds::decode(option.value).is_ok() {
-                    options.push(option.into());
+                if mark_seen_once(&mut seen, raw_kind) {
+                    if Mds::decode(option.value).is_ok() {
+                        reports.push(report(option.kind, OptionStatus::Success));
+                        options.push(option.into());
+                    } else {
+                        reports.push(report(option.kind, OptionStatus::Failed));
+                    }
+                } else {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
                 }
             }
             OptionKind::Mrds => {
                 reject_sub_minimum(option)?;
-                if mark_seen_once(&mut seen, raw_kind) && Mrds::decode(option.value).is_ok() {
-                    options.push(option.into());
+                if mark_seen_once(&mut seen, raw_kind) {
+                    if Mrds::decode(option.value).is_ok() {
+                        reports.push(report(option.kind, OptionStatus::Success));
+                        options.push(option.into());
+                    } else {
+                        reports.push(report(option.kind, OptionStatus::Failed));
+                    }
+                } else {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
                 }
             }
             OptionKind::Req => {
                 reject_sub_minimum(option)?;
-                if mark_seen_once(&mut seen, raw_kind) && Req::decode(option.value).is_ok() {
-                    options.push(option.into());
+                if mark_seen_once(&mut seen, raw_kind) {
+                    if Req::decode(option.value).is_ok() {
+                        reports.push(report(option.kind, OptionStatus::Success));
+                        options.push(option.into());
+                    } else {
+                        reports.push(report(option.kind, OptionStatus::Failed));
+                    }
+                } else {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
                 }
             }
             OptionKind::Res => {
                 reject_sub_minimum(option)?;
-                if mark_seen_once(&mut seen, raw_kind) && Res::decode(option.value).is_ok() {
-                    options.push(option.into());
+                if mark_seen_once(&mut seen, raw_kind) {
+                    if Res::decode(option.value).is_ok() {
+                        reports.push(report(option.kind, OptionStatus::Success));
+                        options.push(option.into());
+                    } else {
+                        reports.push(report(option.kind, OptionStatus::Failed));
+                    }
+                } else {
+                    reports.push(report(option.kind, OptionStatus::Ignored));
                 }
             }
             OptionKind::Other(_) if option.kind.is_safe() => {
                 reject_sub_minimum(option)?;
+                reports.push(report(option.kind, OptionStatus::Ignored));
             }
             OptionKind::Other(_) => {
                 unsupported_unsafe_seen = true;
+                reports.push(report(option.kind, OptionStatus::Failed));
                 break;
             }
         }
@@ -435,10 +586,19 @@ fn parse_options(
 
     Ok(ParsedOptions {
         options,
+        reports,
         frag,
         unsupported_unsafe_seen,
         fragment_failed: false,
     })
+}
+
+fn report(kind: OptionKind, status: OptionStatus) -> OptionReport {
+    OptionReport {
+        kind,
+        status,
+        source: OptionSource::Datagram,
+    }
 }
 
 fn fragment_option_limit(
@@ -523,14 +683,14 @@ fn mark_seen_once(seen: &mut [bool; 256], raw_kind: u8) -> bool {
     }
 }
 
-fn accepts_apc(option: OptionRef<'_>, user_data: &[u8]) -> bool {
+fn accepts_apc(option: OptionRef<'_>, user_data: &[u8]) -> OptionStatus {
     match Apc::decode(option.value) {
-        Ok(apc) if apc == Apc::compute(user_data) => true,
+        Ok(apc) if apc == Apc::compute(user_data) => OptionStatus::Success,
         Ok(_) => {
             warn_sampled!(APC_MISMATCH_WARNINGS, "received APC option with a checksum mismatch");
-            false
+            OptionStatus::Failed
         }
-        Err(_) => false,
+        Err(_) => OptionStatus::Failed,
     }
 }
 
@@ -543,7 +703,9 @@ mod tests {
 
     use log::{LevelFilter, Log, Metadata, Record};
 
-    use super::{Delivery, WARN_SAMPLE_INTERVAL, process_datagram, should_log_sampled};
+    use super::{
+        Delivery, OptionReport, OptionSource, OptionStatus, WARN_SAMPLE_INTERVAL, process_datagram, should_log_sampled,
+    };
     use crate::error::{HeaderError, RecvError};
     use crate::frag::reassembly::ReassemblyCache;
     use crate::frag::split::{PeerFragmentLimits, SplitConfig, split_datagram};
@@ -658,10 +820,33 @@ mod tests {
     }
 
     fn payload(data: &[u8], options: Vec<RawOption>) -> Delivery {
+        payload_with_bearing(data, options, true)
+    }
+
+    fn payload_with_bearing(data: &[u8], options: Vec<RawOption>, option_bearing: bool) -> Delivery {
+        let reports = options
+            .iter()
+            .map(|option| report(option.kind, OptionStatus::Success, OptionSource::Datagram))
+            .collect();
+        payload_with_reports(data, options, option_bearing, reports)
+    }
+
+    fn payload_with_reports(
+        data: &[u8],
+        options: Vec<RawOption>,
+        option_bearing: bool,
+        reports: Vec<OptionReport>,
+    ) -> Delivery {
         Delivery::Payload {
             data: data.to_vec(),
             options,
+            option_bearing,
+            reports,
         }
+    }
+
+    fn report(kind: OptionKind, status: OptionStatus, source: OptionSource) -> OptionReport {
+        OptionReport { kind, status, source }
     }
 
     fn raw(kind: OptionKind, value: &[u8]) -> RawOption {
@@ -779,11 +964,11 @@ mod tests {
     fn delivers_without_options_when_surplus_is_absent_or_unusable() {
         assert_eq!(
             process(&datagram_with_raw_surplus(b"hello", &[], false)).unwrap(),
-            payload(b"hello", Vec::new())
+            payload_with_bearing(b"hello", Vec::new(), false)
         );
         assert_eq!(
             process(&datagram_with_raw_surplus(b"hi", &[0], false)).unwrap(),
-            payload(b"hi", Vec::new())
+            payload_with_bearing(b"hi", Vec::new(), false)
         );
     }
 
@@ -853,7 +1038,15 @@ mod tests {
         let bytes = datagram(b"hello", &[kind::MDS, 5, 0, 1, 2, kind::REQ, 6, 4, 3, 2, 1]);
         assert_eq!(
             process(&bytes).unwrap(),
-            payload(b"hello", vec![raw(OptionKind::Req, &[4, 3, 2, 1])])
+            payload_with_reports(
+                b"hello",
+                vec![raw(OptionKind::Req, &[4, 3, 2, 1])],
+                true,
+                vec![
+                    report(OptionKind::Mds, OptionStatus::Failed, OptionSource::Datagram),
+                    report(OptionKind::Req, OptionStatus::Success, OptionSource::Datagram),
+                ],
+            )
         );
     }
 
@@ -886,17 +1079,49 @@ mod tests {
         let safe = datagram(b"hello", &[10, 2, kind::REQ, 6, 1, 1, 2, 2]);
         assert_eq!(
             process(&safe).unwrap(),
-            payload(b"hello", vec![raw(OptionKind::Req, &[1, 1, 2, 2])])
+            payload_with_reports(
+                b"hello",
+                vec![raw(OptionKind::Req, &[1, 1, 2, 2])],
+                true,
+                vec![
+                    report(OptionKind::Other(10), OptionStatus::Ignored, OptionSource::Datagram),
+                    report(OptionKind::Req, OptionStatus::Success, OptionSource::Datagram),
+                ],
+            )
         );
 
         let unsafe_option = datagram(b"hello", &[kind::UNSAFE_MIN, 2]);
-        assert_eq!(process(&unsafe_option).unwrap(), payload(b"", Vec::new()));
+        assert_eq!(
+            process(&unsafe_option).unwrap(),
+            payload_with_reports(
+                b"",
+                Vec::new(),
+                true,
+                vec![report(
+                    OptionKind::Other(kind::UNSAFE_MIN),
+                    OptionStatus::Failed,
+                    OptionSource::Datagram,
+                )],
+            )
+        );
     }
 
     #[test]
     fn unknown_unsafe_precedence_survives_later_malformed_tlv() {
         let bytes = datagram(b"hello", &[kind::UNSAFE_MIN, 2, kind::APC, 6]);
-        assert_eq!(process(&bytes).unwrap(), payload(b"", Vec::new()));
+        assert_eq!(
+            process(&bytes).unwrap(),
+            payload_with_reports(
+                b"",
+                Vec::new(),
+                true,
+                vec![report(
+                    OptionKind::Other(kind::UNSAFE_MIN),
+                    OptionStatus::Failed,
+                    OptionSource::Datagram,
+                )],
+            )
+        );
     }
 
     #[test]
@@ -904,7 +1129,15 @@ mod tests {
         let bytes = datagram(b"hello", &[kind::REQ, 6, 1, 2, 3, 4, kind::REQ, 6, 9, 8, 7, 6]);
         assert_eq!(
             process(&bytes).unwrap(),
-            payload(b"hello", vec![raw(OptionKind::Req, &[1, 2, 3, 4])])
+            payload_with_reports(
+                b"hello",
+                vec![raw(OptionKind::Req, &[1, 2, 3, 4])],
+                true,
+                vec![
+                    report(OptionKind::Req, OptionStatus::Success, OptionSource::Datagram),
+                    report(OptionKind::Req, OptionStatus::Ignored, OptionSource::Datagram),
+                ],
+            )
         );
     }
 
@@ -993,7 +1226,7 @@ mod tests {
         );
         assert_eq!(
             process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
-            payload(b"abcdefghijk", Vec::new())
+            payload_with_bearing(b"abcdefghijk", Vec::new(), false)
         );
     }
 
@@ -1041,13 +1274,20 @@ mod tests {
         );
         assert_eq!(
             process_with_cache(&fragment_datagram(second, &second_options, b"def"), &mut cache, now).unwrap(),
-            payload(
+            payload_with_reports(
                 b"abcdef",
                 vec![
                     raw(OptionKind::Mds, &1200u16.to_be_bytes()),
                     raw(OptionKind::Mrds, &[0x0b, 0xb8, 2]),
                     raw(OptionKind::Req, &[3, 3, 3, 3]),
                     raw(OptionKind::Res, &[4, 4, 4, 4]),
+                ],
+                false,
+                vec![
+                    report(OptionKind::Mds, OptionStatus::Success, OptionSource::FragmentSet),
+                    report(OptionKind::Mrds, OptionStatus::Success, OptionSource::FragmentSet),
+                    report(OptionKind::Req, OptionStatus::Success, OptionSource::FragmentSet),
+                    report(OptionKind::Res, OptionStatus::Success, OptionSource::FragmentSet),
                 ],
             )
         );
@@ -1256,7 +1496,15 @@ mod tests {
         let bytes = datagram(b"hello", &[10, 2, kind::REQ, 6, 1, 3, 5, 7]);
         assert_eq!(
             process(&bytes).unwrap(),
-            payload(b"hello", vec![raw(OptionKind::Req, &[1, 3, 5, 7])])
+            payload_with_reports(
+                b"hello",
+                vec![raw(OptionKind::Req, &[1, 3, 5, 7])],
+                true,
+                vec![
+                    report(OptionKind::Other(10), OptionStatus::Ignored, OptionSource::Datagram),
+                    report(OptionKind::Req, OptionStatus::Success, OptionSource::Datagram),
+                ],
+            )
         );
         for _ in 0..WARN_SAMPLE_INTERVAL {
             let _ = process(&bytes);

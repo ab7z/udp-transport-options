@@ -3,7 +3,7 @@
 This document describes the internal architecture of `udp-transport-options`, a userspace reference
 implementation of [RFC 9868](https://www.rfc-editor.org/rfc/rfc9868.txt) (Transport Options for UDP,
 October 2025) in Rust. It goes deeper than `CLAUDE.md`: it states each module's inputs and outputs,
-lists the concrete public types with their planned method signatures, explains the three design rules
+lists the concrete public types and method signatures, explains the three design rules
 with their rationale, and walks the send and receive data flows step by step.
 
 The companion thesis asks two research questions, and the architecture is shaped to answer them:
@@ -212,8 +212,9 @@ the surplus-area bytes (and length). Output: the OCS value, or a pass/fail verdi
 
 The `TypedOption` trait and the fixed-length `Copy` structs `Apc`, `Mds`, `Mrds`, `Req`, `Res`,
 `Frag`. Each decodes from, and encodes to, its wire bytes. APC carries a CRC32C over the UDP user
-data (RFC 9868 Sec. 11.3, Fig. 9). Input (decode): an option's value bytes. Output: an owned typed
-value, or a `ParseError` on a wrong length. Root-free.
+data and is reported only per-datagram, not per-fragment (RFC 9868 Sec. 11.3, Fig. 9). Input
+(decode): an option's value bytes. Output: an owned typed value, or a `ParseError` on a wrong length.
+Root-free.
 
 ### `options` (mod.rs) (pure)
 
@@ -263,9 +264,8 @@ The raw send path using `IP_HDRINCL` (RFC 9868 Sec. 15; locked decision). Its pu
 `assemble_datagram` helper builds the IP header, the UDP header (with UDP Length < IP Total Length,
 which is what creates the surplus area), and the surplus area; it computes the UDP checksum and the
 OCS by hand. The privileged `RawSender` wrapper only opens/configures the raw socket and transmits
-the assembled bytes. Input: addresses, ports, payload, and options. Output: a sent datagram (or a
-`RecvError::Io` / `RecvError::PermissionDenied`). Needs `CAP_NET_RAW`. All `unsafe` FFI is confined
-here behind safe wrappers.
+the assembled bytes. Input: addresses, ports, payload, and options. Output: a sent datagram or
+`SocketError`. Needs `CAP_NET_RAW`. All `unsafe` FFI is confined here behind safe wrappers.
 
 ### `socket/recv` (privileged: Linux, root)
 
@@ -279,20 +279,33 @@ the socket. Output: raw IP-datagram bytes for the pipeline. Needs `CAP_NET_RAW`.
 
 The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 
-- **low-level:** set and read explicit options on individual datagrams.
-- **high-level:** a peer that sends and receives payloads with typed options, applying the OCS and
-  fragmentation/reassembly transparently. A send too large for a single datagram (the fragment size
-  derives from the path MTU, with MDS as a hint) auto-fragments; the reassembled size -- UDP header,
-  data, and per-datagram options -- must stay within the peer's MRDS (default 2926 when none
-  received), otherwise the send fails with an error; the receiver reassembles transparently.
+- **low-level:** `build_datagram()` builds an individual datagram from explicit `RawOption`s, and
+  `decode_datagram()` runs one raw datagram through the receive pipeline and receive policy.
+  `build_datagram()` still enforces the RFC rule that FRAG cannot be combined with non-empty UDP
+  user data. Empty option sets emit a plain UDP datagram with no surplus area.
+- **high-level:** `Peer` wraps `RawSender`, `RawReceiver`, `ReassemblyCache`, and an
+  `IdentificationGenerator`. `Peer::send()` applies the OCS through the existing serializer/send
+  path whenever options are present and auto-fragments when the payload exceeds the configured
+  single-datagram capacity; `Peer::recv()` reassembles transparently and returns only completed user
+  datagrams.
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
+`ReceivePolicy` can require successfully processed APC/MDS/MRDS/REQ/RES options from the datagram or
+the coalesced fragment set, or drop all datagrams with a usable option-bearing surplus layout after
+the UDP checksum boundary. Tails too short to hold the aligned OCS are delivered without options,
+matching `process_datagram`.
+`SendOptions` selects typed/raw options and automatic APC generation, while `SendConfig` controls the
+datagram size budget, peer MRDS, FRAG enablement, and FRAG Identification.
+Raw option guards are based on the canonical wire Kind byte: `OptionKind::Other(3)` is still FRAG
+and `OptionKind::Other(2)` is still APC for API validation, even though callers should normally use
+the named variants. High-level send rejects duplicate reportable APC/MDS/MRDS/REQ/RES Kinds instead
+of emitting intentionally duplicated per-datagram options.
+The API deliberately does not expose option ordering or per-fragment boundary control.
 
 ## 3. The data model
 
-This section lists the concrete public types (verbatim from the skeleton) and the planned method
-signatures the steps will fill in. Field definitions are reproduced from source; methods marked
-"(planned)" are the contracts, not yet present.
+This section lists the concrete public types and method signatures filled in by the roadmap steps.
+Field definitions are reproduced from source where that helps audit the public shape.
 
 ### `model` constants
 
@@ -456,6 +469,10 @@ pub struct RawOption {
 impl<'a> From<OptionRef<'a>> for RawOption { /* copies value into a Vec */ }
 ```
 
+The wire Kind byte is canonical for both serialization and public API guard checks. For example,
+`OptionKind::Other(3)` serializes as a FRAG option and is rejected by API paths that forbid
+caller-supplied FRAG.
+
 ### `options::typed::TypedOption` and the typed structs
 
 ```rust
@@ -580,11 +597,21 @@ impl ReassemblyCache {
 ```rust
 pub enum Delivery {
     Payload {
-        data: Vec<u8>,           // the UDP user data handed to the application
-        options: Vec<RawOption>, // parsed options; empty if absent or discarded
+        data: Vec<u8>,              // the UDP user data handed to the application
+        options: Vec<RawOption>,    // successfully processed options
+        option_bearing: bool,       // true when a usable UDP-options surplus layout was present
+        reports: Vec<OptionReport>, // datagram status plus coalesced FragmentSet status
     },
     Buffered,                    // the datagram was a fragment; nothing to deliver yet
     Dropped,                     // fragment-local failure; no user delivery
+}
+
+pub enum OptionStatus { Success, Failed, Ignored }
+pub enum OptionSource { Datagram, FragmentSet }
+pub struct OptionReport {
+    pub kind: OptionKind,
+    pub status: OptionStatus,
+    pub source: OptionSource,
 }
 
 // The pure receive state machine: verify UDP cksum, locate/validate surplus, validate OCS, parse,
@@ -597,7 +624,7 @@ pub fn process_datagram(
 ) -> Result<Delivery, RecvError>;
 ```
 
-### `error::ParseError`, `error::SplitError`, `error::HeaderError`, and `error::RecvError`
+### Error types
 
 ```rust
 pub enum ParseError {
@@ -619,6 +646,19 @@ pub enum SplitError {
     Serialize(SerializeError),
 }
 
+pub enum SocketError {
+    Io(std::io::Error),
+    PermissionDenied, // needs CAP_NET_RAW or root
+}
+
+pub enum SendError {
+    Serialize(SerializeError),
+    Split(SplitError),
+    Socket(SocketError),
+    DatagramTooLarge { len: usize, max: usize },
+    InvalidConfig { reason: &'static str },
+}
+
 pub enum HeaderError {                      // IP/UDP header invalidates the whole datagram (drop)
     IpTruncated { need: usize, have: usize },
     UnsupportedVersion(u8),
@@ -635,9 +675,41 @@ pub enum RecvError {
     Parse(ParseError),     // surplus parse failed (payload is still delivered)
     UdpLengthExceedsIpPayload { udp_len: u16, transport_payload_len: usize },
     UdpChecksumMismatch { expected: u16, actual: u16 },
-    Io(std::io::Error),    // raw-socket I/O error
-    PermissionDenied,      // needs CAP_NET_RAW or root
+    Socket(SocketError),
 }
+```
+
+### `api` types and functions
+
+```rust
+pub struct DatagramAddrs { pub src: Ipv4Addr, pub dst: Ipv4Addr, pub src_port: u16, pub dst_port: u16 }
+pub enum FragmentationMode { Auto, Disabled }
+pub struct SendOptions { /* raw options plus automatic APC */ }
+pub struct SendConfig {
+    pub max_datagram_len: usize,
+    pub peer: PeerFragmentLimits,
+    pub fragmentation: FragmentationMode,
+    pub identification: u32,
+}
+pub struct ReceivePolicy { /* required options + drop-all-option-bearing */ }
+pub struct ReceivedDatagram { pub data: Vec<u8>, pub options: Vec<RawOption>, pub reports: Vec<OptionReport> }
+pub enum ApiDelivery { Received(ReceivedDatagram), Buffered, Dropped, Filtered }
+pub struct SendOutcome { pub datagrams: usize, pub bytes: usize }
+pub struct Peer { /* raw sockets, cache, policy, identification generator */ }
+
+pub fn build_datagram(addrs: DatagramAddrs, payload: &[u8], raw_options: &[RawOption]) -> Result<Vec<u8>, SendError>;
+pub fn build_outgoing_datagrams(
+    addrs: DatagramAddrs,
+    payload: &[u8],
+    options: SendOptions,
+    config: SendConfig,
+) -> Result<Vec<Vec<u8>>, SendError>;
+pub fn decode_datagram(
+    datagram: &[u8],
+    cache: &mut ReassemblyCache,
+    now: Instant,
+    policy: &ReceivePolicy,
+) -> Result<ApiDelivery, RecvError>;
 ```
 
 ## 4. The three design rules
@@ -747,7 +819,7 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         v
  (5) socket/send  (privileged: Linux, IP_HDRINCL)   <-- the only privileged step
         - write the datagram on a SOCK_RAW socket with IP_HDRINCL set
-        - assert on the wire: IP Total Length > UDP Length (the surplus area is present)
+        - assert on the wire: IP Total Length > UDP Length when an options body is present
         |
         v
  datagram on the wire
@@ -846,9 +918,11 @@ application delivery.
         | Abort(_) -> Delivery::Dropped
         | valid empty-payload FRAG plus UNSAFE/malformed per-fragment option -> Delivery::Dropped
         v
- Completion path: Complete { tail, udp_length, fragment_options } is re-fed ONCE into process_datagram.
+ Completion path: Complete { tail, udp_length, fragment_options, fragment_option_failures }
+        is re-fed ONCE into process_datagram.
         A reassembled datagram with no FRAG lands at (F) -> Delivery::Payload
-        { data, options }; coalesced per-fragment SAFE options are prepended to the delivered options.
+        { data, options }; coalesced per-fragment SAFE options are prepended only when the option is
+        usable per-fragment and no fragment failed that option kind. APC is per-datagram only.
         A FRAG with non-empty data hits the (F) non-empty branch (options ignored, data delivered,
         Sec. 11.4); a nested FRAG with empty data is rejected -- local anti-loop policy, never a
         second re-feed (the RFC does not define nested fragmentation)
@@ -900,9 +974,13 @@ failed":
   means the datagram itself cannot be trusted and is dropped (the first row of the disposition
   table), never "payload delivered, options discarded". Produced by `IpRepr::parse` and
   `UdpHeader::parse`; how a drop is reported (and logged) is the Step-10 pipeline's decision.
-- `RecvError` is the pipeline/socket result type: `Parse(ParseError)` (carried for diagnostics),
-  `Io(std::io::Error)` (a raw-socket failure), and `PermissionDenied` (the operation needs
-  `CAP_NET_RAW` or root). `RecvError` implements `From<ParseError>` and `From<std::io::Error>`.
+- `SocketError` is the raw-socket failure type: `Io(std::io::Error)` for ordinary I/O failures and
+  `PermissionDenied` for missing `CAP_NET_RAW` / root.
+- `SendError` covers the public send API: serialization failure, split failure, socket failure,
+  datagram-size overflow, or invalid configuration.
+- `RecvError` is the pipeline/socket result type: protocol/header failures plus `Socket(SocketError)`.
+  `Peer::recv()` treats protocol drops, buffered fragments, and policy drops as no user datagram, and
+  only returns `Err` for socket failures.
 
 The pure parser never panics on arbitrary input: malformed bytes always become a `ParseError`, never
 an out-of-bounds index. That property is what makes the parser safe to feed with anything that arrives
