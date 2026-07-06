@@ -114,6 +114,23 @@ fn low_level_raw_option_round_trip() {
 }
 
 #[test]
+fn empty_options_emit_plain_datagram() {
+    let datagram = build_outgoing_datagrams(addrs(), b"plain", SendOptions::new(), SendConfig::default()).unwrap();
+    assert_eq!(datagram.len(), 1);
+    let (ip, udp_at) = IpRepr::parse(&datagram[0]).unwrap();
+    let udp = UdpHeader::parse(&datagram[0][udp_at..]).unwrap();
+    assert_eq!(usize::from(ip.total_len), 20 + usize::from(udp.length));
+    assert!(locate_surplus(&ip, &udp).is_none());
+
+    let ApiDelivery::Received(received) = decode_one(&datagram[0]) else {
+        panic!("plain datagram should be delivered");
+    };
+    assert_eq!(received.data, b"plain");
+    assert!(received.options.is_empty());
+    assert!(received.reports.is_empty());
+}
+
+#[test]
 fn low_level_rejects_frag_with_user_data() {
     let frag = raw(OptionKind::Frag, &[0; 8]);
     assert!(matches!(
@@ -278,7 +295,7 @@ fn fragment_local_apc_is_ignored() {
 }
 
 #[test]
-fn required_policy_does_not_accept_fragment_set_success_as_datagram_success() {
+fn required_policy_accepts_fragment_set_success() {
     let mds = encode(Mds {
         max_datagram_size: 1500,
     });
@@ -320,10 +337,10 @@ fn required_policy_does_not_accept_fragment_set_success_as_datagram_success() {
         decode_datagram(&first_datagram, &mut cache, now, &policy).unwrap(),
         ApiDelivery::Buffered
     );
-    assert_eq!(
-        decode_datagram(&second_datagram, &mut cache, now, &policy).unwrap(),
-        ApiDelivery::Filtered
-    );
+    let ApiDelivery::Received(received) = decode_datagram(&second_datagram, &mut cache, now, &policy).unwrap() else {
+        panic!("fragment-set success should satisfy required option policy");
+    };
+    assert_eq!(received.data, b"abcdef");
 }
 
 #[test]
@@ -435,6 +452,14 @@ fn high_level_send_rejects_raw_frag_and_duplicate_apc() {
         build_outgoing_datagrams(addrs(), b"payload", with_raw_apc_alias, SendConfig::default()),
         Err(SendError::InvalidConfig { .. })
     ));
+
+    let mut duplicate_req = SendOptions::new();
+    duplicate_req.push_raw(raw(OptionKind::Req, &[1, 2, 3, 4]));
+    duplicate_req.push_raw(raw(OptionKind::Other(kind::REQ), &[5, 6, 7, 8]));
+    assert!(matches!(
+        build_outgoing_datagrams(addrs(), b"payload", duplicate_req, SendConfig::default()),
+        Err(SendError::InvalidConfig { .. })
+    ));
 }
 
 #[test]
@@ -479,6 +504,24 @@ fn auto_fragmentation_reassembles_within_mrds() {
         panic!("last fragment should complete reassembly");
     };
     assert_eq!(received.data, vec![0x5a; 80]);
+}
+
+#[test]
+fn auto_fragmentation_without_options_uses_full_default_mrds() {
+    let payload = vec![0x5a; 2918];
+    let datagrams = build_outgoing_datagrams(addrs(), &payload, SendOptions::new(), SendConfig::default()).unwrap();
+    assert_eq!(datagrams.len(), 2);
+
+    let mut cache = ReassemblyCache::new();
+    let mut last = ApiDelivery::Buffered;
+    for datagram in &datagrams {
+        last = decode_datagram(datagram, &mut cache, Instant::now(), &ReceivePolicy::default()).unwrap();
+    }
+    let ApiDelivery::Received(received) = last else {
+        panic!("default MRDS payload should reassemble");
+    };
+    assert_eq!(received.data, payload);
+    assert!(received.options.is_empty());
 }
 
 #[test]

@@ -10,16 +10,18 @@ use crate::options::ocs;
 use crate::wire::ip::IpRepr;
 use crate::wire::udp::{self, UdpHeader};
 
-/// Builds one complete IPv4 datagram carrying UDP options in the surplus area.
+/// Builds one complete IPv4 datagram, optionally carrying UDP options in the surplus area.
 ///
 /// `options_body` must be the OCS-led body returned by [`crate::options::serialize::OptionsBuilder`]
-/// with its OCS placeholder still zero. This function copies it into the datagram and patches the
-/// OCS in place. It never mutates the caller's slice.
+/// with its OCS placeholder still zero, or empty to emit a plain datagram with no surplus area. This
+/// function copies a non-empty body into the datagram and patches the OCS in place. It never mutates
+/// the caller's slice.
 ///
 /// # Panics
 ///
 /// Panics if the UDP length, surplus length, or IPv4 total length cannot be represented in the
-/// corresponding 16-bit wire fields, or if `options_body` is too short to hold the OCS field.
+/// corresponding 16-bit wire fields, or if a non-empty `options_body` is too short to hold the OCS
+/// field.
 pub fn assemble_datagram(
     src: Ipv4Addr,
     dst: Ipv4Addr,
@@ -29,8 +31,8 @@ pub fn assemble_datagram(
     options_body: &[u8],
 ) -> Vec<u8> {
     assert!(
-        options_body.len() >= usize::from(length::OCS),
-        "options body must include the OCS field"
+        options_body.is_empty() || options_body.len() >= usize::from(length::OCS),
+        "non-empty options body must include the OCS field"
     );
 
     let udp_len = udp::HEADER_LEN
@@ -38,10 +40,14 @@ pub fn assemble_datagram(
         .expect("UDP length arithmetic overflow");
     let udp_len = u16::try_from(udp_len).expect("UDP length exceeds the 16-bit UDP Length field");
     let natural_start = usize::from(length::UDP_HEADER) + 20 + user_data.len();
-    let needs_pad = natural_start % 2 == 1;
-    let surplus_len = usize::from(needs_pad)
-        .checked_add(options_body.len())
-        .expect("surplus length arithmetic overflow");
+    let needs_pad = !options_body.is_empty() && natural_start % 2 == 1;
+    let surplus_len = if options_body.is_empty() {
+        0
+    } else {
+        usize::from(needs_pad)
+            .checked_add(options_body.len())
+            .expect("surplus length arithmetic overflow")
+    };
     let surplus_len_u16 = u16::try_from(surplus_len).expect("surplus length exceeds the 16-bit OCS input");
     let total_len = 20usize
         .checked_add(usize::from(udp_len))
@@ -70,11 +76,17 @@ pub fn assemble_datagram(
     let user_at = 20 + udp::HEADER_LEN;
     datagram[user_at..user_at + user_data.len()].copy_from_slice(user_data);
     let ocs_at = natural_start + usize::from(needs_pad);
-    datagram[ocs_at..ocs_at + options_body.len()].copy_from_slice(options_body);
-    ocs::compute(&mut datagram[ocs_at..ocs_at + options_body.len()], surplus_len_u16);
+    if !options_body.is_empty() {
+        datagram[ocs_at..ocs_at + options_body.len()].copy_from_slice(options_body);
+        ocs::compute(&mut datagram[ocs_at..ocs_at + options_body.len()], surplus_len_u16);
+    }
 
     debug_assert_eq!(datagram.len(), usize::from(ip.total_len));
-    debug_assert!(usize::from(udp_len) < total_len);
+    if options_body.is_empty() {
+        debug_assert_eq!(usize::from(udp_len), total_len - 20);
+    } else {
+        debug_assert!(usize::from(udp_len) < total_len);
+    }
     datagram
 }
 

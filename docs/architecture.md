@@ -282,21 +282,24 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 - **low-level:** `build_datagram()` builds an individual datagram from explicit `RawOption`s, and
   `decode_datagram()` runs one raw datagram through the receive pipeline and receive policy.
   `build_datagram()` still enforces the RFC rule that FRAG cannot be combined with non-empty UDP
-  user data.
+  user data. Empty option sets emit a plain UDP datagram with no surplus area.
 - **high-level:** `Peer` wraps `RawSender`, `RawReceiver`, `ReassemblyCache`, and an
   `IdentificationGenerator`. `Peer::send()` applies the OCS through the existing serializer/send
-  path and auto-fragments when the payload exceeds the configured single-datagram capacity;
-  `Peer::recv()` reassembles transparently and returns only completed user datagrams.
+  path whenever options are present and auto-fragments when the payload exceeds the configured
+  single-datagram capacity; `Peer::recv()` reassembles transparently and returns only completed user
+  datagrams.
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
-`ReceivePolicy` can require successfully processed datagram-level APC/MDS/MRDS/REQ/RES options or drop
-all datagrams with a usable option-bearing surplus layout after the UDP checksum boundary. Tails too
-short to hold the aligned OCS are delivered without options, matching `process_datagram`.
+`ReceivePolicy` can require successfully processed APC/MDS/MRDS/REQ/RES options from the datagram or
+the coalesced fragment set, or drop all datagrams with a usable option-bearing surplus layout after
+the UDP checksum boundary. Tails too short to hold the aligned OCS are delivered without options,
+matching `process_datagram`.
 `SendOptions` selects typed/raw options and automatic APC generation, while `SendConfig` controls the
 datagram size budget, peer MRDS, FRAG enablement, and FRAG Identification.
 Raw option guards are based on the canonical wire Kind byte: `OptionKind::Other(3)` is still FRAG
 and `OptionKind::Other(2)` is still APC for API validation, even though callers should normally use
-the named variants.
+the named variants. High-level send rejects duplicate reportable APC/MDS/MRDS/REQ/RES Kinds instead
+of emitting intentionally duplicated per-datagram options.
 The API deliberately does not expose option ordering or per-fragment boundary control.
 
 ## 3. The data model
@@ -816,7 +819,7 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
         v
  (5) socket/send  (privileged: Linux, IP_HDRINCL)   <-- the only privileged step
         - write the datagram on a SOCK_RAW socket with IP_HDRINCL set
-        - assert on the wire: IP Total Length > UDP Length (the surplus area is present)
+        - assert on the wire: IP Total Length > UDP Length when an options body is present
         |
         v
  datagram on the wire

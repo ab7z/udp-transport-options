@@ -9,8 +9,8 @@ Expose the library through a low-level and a high-level API, with finalized erro
 ## Requirements
 
 - Low-level API: set and read explicit options on individual datagrams.
-- High-level peer: send and receive payloads with typed options, applying the OCS and
-  fragmentation/reassembly transparently.
+- High-level peer: send and receive payloads with typed options, applying the OCS when options are
+  present and fragmentation/reassembly transparently.
 - Finalized `thiserror` error types across parse / receive / socket layers.
 - Documented public API (`cargo doc` builds cleanly).
 
@@ -37,9 +37,10 @@ split model, and preserves the original reassembled tail/RDOS shape.
    `decode_datagram()` parses a received datagram into payload, successful options, and option
    status reports.
 2. High-level peer: `Peer` wraps the raw sockets, the receive pipeline, and a `ReassemblyCache`;
-   `send(payload, options)` applies OCS and auto-fragments when the payload exceeds the configured
-   single-datagram capacity; a send whose reassembled size exceeds the peer's MRDS fails before
-   emitting fragments; `recv()` reassembles transparently and returns only completed user datagrams.
+   `send(payload, options)` applies OCS for non-empty options and auto-fragments when the payload
+   exceeds the configured single-datagram capacity; a send whose reassembled size exceeds the peer's
+   MRDS fails before emitting fragments; `recv()` reassembles transparently and returns only
+   completed user datagrams.
 3. Consolidate socket errors into `SocketError`; add `SendError` for serialize/split/socket/config
    send failures and receive-policy construction errors for non-reportable required options.
 4. API tests and property tests cover explicit raw options, typed send options, APC failure status,

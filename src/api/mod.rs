@@ -302,9 +302,7 @@ impl Peer {
 /// Builds one IPv4 datagram from explicit raw options.
 pub fn build_datagram(addrs: DatagramAddrs, payload: &[u8], raw_options: &[RawOption]) -> Result<Vec<u8>, SendError> {
     validate_low_level_options(payload, raw_options)?;
-    let mut builder = OptionsBuilder::new();
-    builder.extend_raw(raw_options.iter().cloned());
-    let body = builder.finish()?;
+    let body = raw_options_body(raw_options)?;
     assemble_checked(addrs, payload, &body, IPV4_DATAGRAM_LEN_MAX)
 }
 
@@ -397,12 +395,24 @@ pub fn decode_datagram(
 }
 
 fn options_body(payload: &[u8], options: &SendOptions) -> Result<Vec<u8>, SendError> {
+    if !options.include_apc && options.raw_options.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut builder = OptionsBuilder::new();
     if options.include_apc {
         let apc = Apc::compute(payload);
         builder.push(OptionKind::Apc, apc.crc32c.to_be_bytes());
     }
     builder.extend_raw(options.raw_options.iter().cloned());
+    Ok(builder.finish()?)
+}
+
+fn raw_options_body(raw_options: &[RawOption]) -> Result<Vec<u8>, SendError> {
+    if raw_options.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut builder = OptionsBuilder::new();
+    builder.extend_raw(raw_options.iter().cloned());
     Ok(builder.finish()?)
 }
 
@@ -451,6 +461,9 @@ fn assemble_checked(
 fn datagram_len(payload_len: usize, options_body_len: usize) -> Option<usize> {
     let udp_len = UDP_HEADER_LEN.checked_add(payload_len)?;
     let natural_start = IPV4_HEADER_LEN.checked_add(udp_len)?;
+    if options_body_len == 0 {
+        return Some(natural_start);
+    }
     let needs_pad = natural_start % 2 == 1;
     natural_start
         .checked_add(usize::from(needs_pad))?
@@ -482,6 +495,11 @@ fn validate_send_options(options: &SendOptions) -> Result<(), SendError> {
             reason: "automatic APC cannot be combined with a raw APC option",
         });
     }
+    if raw_options_contain_duplicate_reportable_kind(&options.raw_options) {
+        return Err(SendError::InvalidConfig {
+            reason: "high-level send options cannot include duplicate reportable options",
+        });
+    }
     Ok(())
 }
 
@@ -498,6 +516,25 @@ fn raw_options_contain_kind(raw_options: &[RawOption], raw_kind: u8) -> bool {
     raw_options.iter().any(|option| option.kind.to_byte() == raw_kind)
 }
 
+fn raw_options_contain_duplicate_reportable_kind(raw_options: &[RawOption]) -> bool {
+    let mut seen = [false; 256];
+    for option in raw_options {
+        let kind = option.kind.to_byte();
+        if !is_high_level_unique_kind(kind) {
+            continue;
+        }
+        if seen[usize::from(kind)] {
+            return true;
+        }
+        seen[usize::from(kind)] = true;
+    }
+    false
+}
+
+fn is_high_level_unique_kind(kind: u8) -> bool {
+    matches!(kind, kind::APC | kind::MDS | kind::MRDS | kind::REQ | kind::RES)
+}
+
 fn fragment_surplus_budget(config: SendConfig) -> Result<usize, SendError> {
     config
         .max_datagram_len
@@ -509,11 +546,9 @@ fn fragment_surplus_budget(config: SendConfig) -> Result<usize, SendError> {
 
 fn missing_required_option(policy: &ReceivePolicy, reports: &[OptionReport]) -> Option<OptionKind> {
     policy.required_options.iter().copied().find(|required| {
-        !reports.iter().any(|report| {
-            report.kind == *required
-                && report.status == OptionStatus::Success
-                && report.source == OptionSource::Datagram
-        })
+        !reports
+            .iter()
+            .any(|report| report.kind == *required && report.status == OptionStatus::Success)
     })
 }
 
