@@ -97,9 +97,11 @@ def by_port(packets: list[Packet], lo: int, hi: int) -> dict[int, list[Packet]]:
     return grouped
 
 
-def classify(sender: list[Packet], receiver: list[Packet]) -> str:
+def classify(sender: list[Packet], receiver: list[Packet], expect_sender_surplus: bool) -> str:
     if not sender:
         return "never-captured"
+    if expect_sender_surplus and any(not packet.surplus for packet in sender):
+        return "sender-surplus-missing"
     if not receiver:
         return "dropped"
     sender_surplus = Counter(packet.surplus for packet in sender)
@@ -123,14 +125,16 @@ def main() -> int:
     parser.add_argument("--receiver-pcap", required=True)
     parser.add_argument("--port-base", type=int, default=41000)
     parser.add_argument("--port-count", type=int, default=5)
+    parser.add_argument("--expect-surplus-port", type=int, action="append", default=[])
     parser.add_argument("--require-intact", action="store_true")
     args = parser.parse_args()
 
     sender = by_port(read_pcap(args.sender_pcap), args.port_base, args.port_base + args.port_count - 1)
     receiver = by_port(read_pcap(args.receiver_pcap), args.port_base, args.port_base + args.port_count - 1)
+    expect_surplus_ports = set(args.expect_surplus_port)
     failed = False
     for port in range(args.port_base, args.port_base + args.port_count):
-        verdict = classify(sender.get(port, []), receiver.get(port, []))
+        verdict = classify(sender.get(port, []), receiver.get(port, []), port in expect_surplus_ports)
         sent_surplus = sum(len(packet.surplus) for packet in sender.get(port, []))
         received_surplus = sum(len(packet.surplus) for packet in receiver.get(port, []))
         print(
@@ -138,6 +142,7 @@ def main() -> int:
             f'"sender_packets":{len(sender.get(port, []))},"receiver_packets":{len(receiver.get(port, []))},'
             f'"sender_surplus":{sent_surplus},"receiver_surplus":{received_surplus}}}'
         )
+        failed = failed or verdict in {"never-captured", "sender-surplus-missing"}
         failed = failed or (args.require_intact and verdict != "intact")
     return 1 if failed else 0
 

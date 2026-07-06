@@ -166,6 +166,10 @@ python3 "$SCRIPT_DIR/eval-check.py" \
     --receiver-pcap "$RUN_DIR/receiver.pcap" \
     --port-base "$PORT_BASE" \
     --port-count "$SCENARIOS" \
+    --expect-surplus-port "$((PORT_BASE + 1))" \
+    --expect-surplus-port "$((PORT_BASE + 2))" \
+    --expect-surplus-port "$((PORT_BASE + 3))" \
+    --expect-surplus-port "$((PORT_BASE + 4))" \
     ${EVAL_REQUIRE_INTACT:+--require-intact} | tee "$RUN_DIR/verdicts.jsonl"
 
 echo "eval-run: artifacts in $RUN_DIR"

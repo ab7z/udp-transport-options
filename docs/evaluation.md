@@ -12,6 +12,8 @@ The checker classifies one destination-port-tagged scenario at a time:
 - `surplus-stripped`: sender-side capture had surplus bytes, while receiver-side IP Total Length
   ends at UDP Length.
 - `packet-count-mismatch`: both sides captured traffic for the scenario, but the packet counts differ.
+- `sender-surplus-missing`: a scenario that is meant to exercise UDP surplus/options produced at
+  least one sender-side packet without surplus; this is a harness failure, not a path result.
 - `modified`: sender-side and receiver-side surplus bytes differ.
 - `dropped`: sender-side capture exists, but no receiver-side packet was captured.
 - `never-captured`: no sender-side packet was captured, so the experiment did not prove a send.
