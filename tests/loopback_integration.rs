@@ -15,13 +15,15 @@ use udp_transport_options::frag::split::PeerFragmentLimits;
 use udp_transport_options::model::kind;
 use udp_transport_options::options::kind::OptionKind;
 use udp_transport_options::options::serialize::OptionsBuilder;
-use udp_transport_options::options::typed::{Mds, Mrds, Req};
+use udp_transport_options::options::typed::{Mds, Mrds, Req, Res};
 use udp_transport_options::recv::pipeline::{Delivery, OptionStatus, process_datagram};
 use udp_transport_options::socket::recv::RawReceiver;
 use udp_transport_options::socket::send::{RawSender, assemble_datagram};
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 const RECV_TIMEOUT: Duration = Duration::from_millis(100);
+// The fixture models a token previously received from the peer in a REQ.
+const RES_TOKEN: [u8; 4] = [0xca, 0xfe, 0xba, 0xbe];
 
 #[test]
 #[ignore = "requires Linux CAP_NET_RAW/root; run through scripts/vm-ubuntu-server.sh ignored"]
@@ -42,6 +44,7 @@ fn loopback_delivers_supported_options() -> Result<(), Box<dyn Error>> {
     options.push_typed(Req {
         token: [0xde, 0xad, 0xbe, 0xef],
     });
+    options.push_typed(Res { token: RES_TOKEN });
 
     let datagrams = build_outgoing_datagrams(addrs(src_port, dst_port), b"loopback", options, SendConfig::default())?;
     assert_eq!(datagrams.len(), 1);
@@ -53,6 +56,7 @@ fn loopback_delivers_supported_options() -> Result<(), Box<dyn Error>> {
         options,
         option_bearing,
         reports,
+        ..
     } = process_datagram(&received, &mut ReassemblyCache::new(), Instant::now())?
     else {
         panic!("supported options should deliver one payload");
@@ -64,9 +68,19 @@ fn loopback_delivers_supported_options() -> Result<(), Box<dyn Error>> {
     assert!(options.iter().any(|option| option.kind == OptionKind::Mrds));
     assert!(options.iter().any(|option| option.kind == OptionKind::Req));
     assert!(
+        options
+            .iter()
+            .any(|option| option.kind == OptionKind::Res && option.value.as_slice() == RES_TOKEN)
+    );
+    assert!(
         reports
             .iter()
             .any(|report| report.kind == OptionKind::Apc && report.status == OptionStatus::Success)
+    );
+    assert!(
+        reports
+            .iter()
+            .any(|report| report.kind == OptionKind::Res && report.status == OptionStatus::Success)
     );
 
     Ok(())
@@ -94,6 +108,7 @@ fn loopback_discards_options_on_ocs_failure_but_delivers_payload() -> Result<(),
         options,
         option_bearing,
         reports,
+        ..
     } = process_datagram(&received, &mut ReassemblyCache::new(), Instant::now())?
     else {
         panic!("OCS failure should still deliver the UDP payload");
@@ -107,9 +122,13 @@ fn loopback_discards_options_on_ocs_failure_but_delivers_payload() -> Result<(),
 }
 
 #[test]
-#[ignore = "covered by the root-gated integration lane; pure pipeline needs no privilege"]
-fn fragmented_datagrams_reassemble_through_pipeline() -> Result<(), Box<dyn Error>> {
+#[ignore = "requires Linux CAP_NET_RAW/root; run through scripts/vm-ubuntu-server.sh ignored"]
+fn fragmented_datagrams_reassemble_over_raw_loopback_out_of_order() -> Result<(), Box<dyn Error>> {
+    let Some(sender) = raw_sender_or_skip()? else {
+        return Ok(());
+    };
     let (src_port, dst_port) = distinct_ports();
+    let receiver = receiver(src_port, dst_port)?;
     let config = SendConfig {
         max_datagram_len: 64,
         peer: PeerFragmentLimits {
@@ -117,11 +136,17 @@ fn fragmented_datagrams_reassemble_through_pipeline() -> Result<(), Box<dyn Erro
             max_segments: 8,
         },
         fragmentation: FragmentationMode::Auto,
-        identification: 0x0102_0304,
+        identification: Some(0x0102_0304),
     };
-    let payload = vec![0x5a; 80];
-    let datagrams = build_outgoing_datagrams(addrs(src_port, dst_port), &payload, SendOptions::new(), config)?;
-    assert!(datagrams.len() > 1);
+    let payload: Vec<_> = (0..96).map(|index| index as u8).collect();
+    let mut send_options = SendOptions::new().with_apc();
+    send_options.push_typed(Res { token: RES_TOKEN });
+    let datagrams = build_outgoing_datagrams(addrs(src_port, dst_port), &payload, send_options, config)?;
+    assert!(datagrams.len() >= 3);
+
+    let terminal = datagrams.len() - 1;
+    let mut send_order = vec![terminal, 0];
+    send_order.extend((1..terminal).rev());
 
     let mut cache = ReassemblyCache::with_limits(ReassemblyLimits {
         max_reassembled_size: 256,
@@ -130,14 +155,40 @@ fn fragmented_datagrams_reassemble_through_pipeline() -> Result<(), Box<dyn Erro
         timeout: udp_transport_options::model::limits::REASSEMBLY_TIMEOUT_MAX,
     });
     let mut last = ApiDelivery::Buffered;
-    for datagram in &datagrams {
-        last = decode_datagram(datagram, &mut cache, Instant::now(), &ReceivePolicy::default())?;
+    for (position, fragment_index) in send_order.into_iter().enumerate() {
+        let datagram = &datagrams[fragment_index];
+        assert_eq!(sender.send(LOOPBACK, datagram)?, datagram.len());
+        let received = recv_until(&receiver, Duration::from_secs(2))?.expect("FRAG datagram should arrive");
+        last = decode_datagram(&received, &mut cache, Instant::now(), &ReceivePolicy::default())?;
+        if position + 1 < datagrams.len() {
+            assert_eq!(last, ApiDelivery::Buffered);
+        }
     }
 
     let ApiDelivery::Received(received) = last else {
-        panic!("last fragment should complete reassembly");
+        panic!("last missing fragment should complete out-of-order reassembly");
     };
     assert_eq!(received.data, payload);
+    assert!(received.options.iter().any(|option| option.kind == OptionKind::Apc));
+    assert!(
+        received
+            .options
+            .iter()
+            .any(|option| option.kind == OptionKind::Res && option.value.as_slice() == RES_TOKEN)
+    );
+    assert!(
+        received
+            .reports
+            .iter()
+            .any(|report| report.kind == OptionKind::Apc && report.status == OptionStatus::Success)
+    );
+    assert!(
+        received
+            .reports
+            .iter()
+            .any(|report| report.kind == OptionKind::Res && report.status == OptionStatus::Success)
+    );
+    assert!(cache.is_empty());
     Ok(())
 }
 
@@ -159,6 +210,7 @@ fn loopback_malformed_surplus_delivers_payload_without_options() -> Result<(), B
         options,
         option_bearing,
         reports: _,
+        ..
     } = process_datagram(&received, &mut ReassemblyCache::new(), Instant::now())?
     else {
         panic!("malformed surplus should still deliver the UDP payload");

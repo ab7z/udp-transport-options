@@ -31,6 +31,9 @@ impl OptionsBuilder {
     }
 
     /// Appends one raw option value. The value excludes Kind/Length framing.
+    ///
+    /// For RES, the caller must supply a token copied from a previously received REQ; this generic
+    /// wire builder cannot establish token provenance.
     pub fn push(&mut self, kind: OptionKind, value: impl Into<Vec<u8>>) -> &mut Self {
         self.options.push(RawOption {
             kind,
@@ -40,12 +43,16 @@ impl OptionsBuilder {
     }
 
     /// Appends one owned raw option.
+    ///
+    /// The caller retains the RFC 9868 RES-token provenance obligation described by [`Self::push`].
     pub fn push_raw(&mut self, option: RawOption) -> &mut Self {
         self.options.push(option);
         self
     }
 
     /// Appends a sequence of owned raw options.
+    ///
+    /// The caller retains the RFC 9868 RES-token provenance obligation described by [`Self::push`].
     pub fn extend_raw<I>(&mut self, options: I) -> &mut Self
     where
         I: IntoIterator<Item = RawOption>,

@@ -2,7 +2,8 @@
 
 This runbook describes the reproducible Linux lanes for measuring whether RFC 9868 UDP surplus bytes
 survive a path. The endpoint implementation is the Step 14 CLI pair; tcpdump pcaps are the path
-evidence; `scripts/eval-check.py` compares sender and receiver captures.
+evidence; `scripts/eval-check.py` compares sender and receiver captures. These are controlled local
+experiments, not measurements over real external paths.
 
 ## What The Verdicts Mean
 
@@ -25,7 +26,10 @@ separate reassembly-aware oracle.
 
 Wireshark/tshark is useful for IPv4 and UDP fields only. As recorded in Step 10.5, tshark 4.6 has no
 RFC 9868 UDP-options dissector; the surplus bytes are the raw bytes after the UDP Length extent, and
-the project checker is the options-level oracle.
+the Step 10.5 `scripts/wire-check.py` checker is the independent options-level oracle. The evaluation
+checker is narrower: it classifies path survival by comparing captured surplus byte strings and
+packet counts; it does not independently validate OCS, TLV semantics, FRAG fields, reassembly, or
+application delivery.
 
 ## Prerequisites
 
@@ -65,6 +69,15 @@ Each run writes artifacts under `/tmp/uoe-<epoch>/` on achim:
 - `send-*.jsonl` and `recv-*.jsonl`
 - `verdicts.jsonl`
 
+Since Step 18 the lane is fail-closed end to end: `eval-run.sh` aborts a scenario when the
+receiver process exits non-zero, and `eval-check.py` — beyond the pcap verdicts — validates the
+full sender-side surplus grammar (pre-OCS pad, OCS recomputation, TLV order, APC CRC32C, FRAG
+geometry) and correlates the sender manifests with the receiver JSON records. On `veth` and
+`router` every manifest payload must reappear as a receiver delivery record; on `nat` receiver
+records are validated but full delivery is not required; on `filter` any receiver record fails
+the run. A passing `veth`/`router` run therefore also attests that the receiving endpoint
+accepted or reassembled each expected payload.
+
 The direct `veth` and plain `router` topologies are the controlled "no middlebox strips surplus"
 baselines. `nat` measures Linux nftables masquerade behavior. `filter` intentionally drops the
 experiment UDP port range and is the negative path-control case.
@@ -101,16 +114,22 @@ those cases.
 
 ## Scope Limits
 
-The tunnel case is intentionally not treated as proof of middlebox surplus handling. A tunnel
-encapsulates the original IP packet, so on-path devices see tunnel traffic rather than the inner UDP
-surplus. Tunnel captures are useful for MTU and encapsulation checks, but native or staged NAT/filter
-paths are the FF2 evidence for middlebox behavior.
+There is no implemented tunnel topology or tunnel script. Conceptually, a future tunnel case must
+not be treated as proof that on-path devices handled UDP surplus: a tunnel encapsulates the original
+IP packet, so those devices see tunnel traffic rather than the inner UDP surplus. Such a lane would
+be an encapsulation/MTU control only.
+
+The `filter` topology drops the complete experiment port range. It is a negative control for the
+capture/verdict machinery, not a surplus-specific filtering experiment. None of the current lanes
+intentionally strips or rewrites only the surplus area. The veth/router/NAT/filter results establish
+reproducible behavior for those local Linux topologies; real external paths and diverse
+middleboxes remain future FF2 work.
 
 ## FF1 Soll-Ist Hook
 
 For the thesis checklist, use `docs/requirements.md` as the "soll" side:
 
-- endpoint wire/state-machine requirements are implemented in the pure modules and validated by
-  unit/property/fuzz/Lean where applicable;
+- endpoint wire/state-machine requirements and their remaining partial/delegated items are mapped
+  in `docs/requirements.md`; unit/property/fuzz/Lean cover their stated subsets;
 - raw-socket send/receive is partial-in-userspace because it requires Linux and `CAP_NET_RAW`;
 - network-path survival is not enforceable by endpoint code and is measured empirically here.

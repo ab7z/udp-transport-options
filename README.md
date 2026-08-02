@@ -5,13 +5,15 @@ A userspace Rust reference implementation of
 
 RFC 9868 stores UDP transport options in the surplus area: bytes after the end
 of the UDP user data (the extent indicated by the UDP Length field) but before
-the end of the IP transport payload. This crate is
-intended to implement that mechanism in userspace, with raw sockets used only
+the end of the IP transport payload. This crate implements the in-scope endpoint mechanism in
+userspace, with raw sockets used only
 for the Linux send/receive boundary.
 
-This repository contains the crate layout, protocol constants, core data types,
-error types, planning docs, example peer CLIs, and Linux evaluation scripts. Most
-protocol behavior is tracked in [`docs/plan/ROADMAP.md`](docs/plan/ROADMAP.md).
+This repository contains the parser/serializer, checksum and OCS logic, the must-support options,
+FRAG split/reassembly, low- and high-level APIs, example peer CLIs, formal models, and Linux test and
+evaluation lanes. The requirement-to-implementation mapping lives in
+[`docs/requirements.md`](docs/requirements.md); roadmap history lives in
+[`docs/plan/ROADMAP.md`](docs/plan/ROADMAP.md).
 
 ## Development workflow
 
@@ -27,7 +29,7 @@ code.
 
 ## Scope
 
-Planned in scope:
+Implemented endpoint scope:
 
 - TLV option parsing and serialization
 - Option Checksum (OCS)
@@ -36,6 +38,12 @@ Planned in scope:
 - IPv4 support
 - low-level and high-level APIs
 - example sender/receiver CLIs
+
+The receive API reports TLV-option status and the fixed OCS status separately and can require a
+successful OCS. REQ/RES are wire-level pass-through options: the library never auto-responds, and a
+caller that sends RES must supply a token that it previously received in REQ. Low-level automatic
+fragmentation requires an explicit FRAG Identification; `Peer` owns a per-peer generator seeded from
+the operating system by default.
 
 Out of scope: IPv6, kernel modules, TIME, AUTH/UCMP/UENC, and RFC 9869 DPLPMTUD.
 
@@ -93,7 +101,7 @@ scripts/vm-ubuntu-server.sh spike
 # L3/L4 cross-check; one-time prerequisite on achim: sudo apt-get install -y tshark)
 scripts/vm-ubuntu-server.sh wire
 
-# Step 17 FF2/P2 staged evaluation lanes. Artifacts land under /tmp/uoe-<epoch>/ on achim.
+# Step 17 FF2/P2 controlled local evaluation lanes. Artifacts land under /tmp/uoe-<epoch>/ on achim.
 scripts/vm-ubuntu-server.sh eval veth
 scripts/vm-ubuntu-server.sh eval router
 scripts/vm-ubuntu-server.sh eval nat
@@ -105,4 +113,7 @@ remote run directory (binaries land in its `bin/`). The host needs passwordless 
 nothing else.
 
 See [`docs/evaluation.md`](docs/evaluation.md) for the FF2/P2 verdict taxonomy, capture artifacts,
-offload notes, and Wireshark/tshark interpretation limits.
+offload notes, and Wireshark/tshark interpretation limits. These lanes cover namespace/veth, routed,
+Linux NAT, and a filter negative control; they do not yet measure real external paths or
+surplus-specific middleboxes, and there is no implemented tunnel lane. FF2 therefore remains only
+partially evidenced.

@@ -2,6 +2,15 @@
 
 Status: implemented
 
+> Current remediation note (2026-07-13): processing stops immediately at the first unsupported
+> UNSAFE option and never scans later bytes to discover FRAG. Only a valid empty-data FRAG already
+> established before the failure creates fragment-local `Dropped` behavior; otherwise the ordinary
+> zero-length user delivery applies. A correctly framed FRAG with non-empty UDP user data ignores all
+> options and delivers the original data even when Frag.Start is unusable as a fragment boundary.
+> OCS now has separate `OcsReport`/`OcsStatus` reporting, and both UDP-Length bounds are sampled-logged
+> at their actual validation boundaries. Erratum 8834 governs option overrun as malformed-area
+> handling.
+
 ## Goal
 
 Implement the pure, root-free receive state machine that encodes the RFC 9868 processing order.

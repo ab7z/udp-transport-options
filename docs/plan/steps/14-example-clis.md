@@ -2,6 +2,12 @@
 
 Status: done; verified on achim (Linux, requires CAP_NET_RAW to run)
 
+> Current CLI note (2026-07-13): the sender additionally supports REQ/RES and an optional first FRAG
+> Identification seed; absent seed means OS-random generator initialization. `--res` is caller-
+> delegated and MUST contain a token previously received from this peer in REQ -- the CLI does not
+> attest provenance. The receiver now prints/serializes separate OCS reports as well as TLV reports.
+> The requirements/plan below are retained as the original Step 14 snapshot.
+
 ## Goal
 
 Provide `udpopt-send` and `udpopt-recv` example peers that exercise the library and generate

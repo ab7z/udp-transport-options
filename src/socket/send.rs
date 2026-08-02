@@ -82,10 +82,11 @@ pub fn assemble_datagram(
     }
 
     debug_assert_eq!(datagram.len(), usize::from(ip.total_len));
+    debug_assert_eq!(ip.transport_payload_len(), usize::from(udp_len) + surplus_len);
     if options_body.is_empty() {
-        debug_assert_eq!(usize::from(udp_len), total_len - 20);
+        debug_assert_eq!(usize::from(udp_len), ip.transport_payload_len());
     } else {
-        debug_assert!(usize::from(udp_len) < total_len);
+        debug_assert!(usize::from(udp_len) < ip.transport_payload_len());
     }
     datagram
 }

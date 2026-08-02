@@ -22,8 +22,6 @@ fuzz_target!(|data: &[u8]| {
         data.get(3).copied().unwrap_or(0x56),
         data.get(4).copied().unwrap_or(0x78),
     ]);
-    let reverse = data.get(5).is_some_and(|byte| byte & 1 == 1);
-
     let config = SplitConfig {
         max_fragment_surplus_len,
         peer: PeerFragmentLimits {
@@ -33,5 +31,5 @@ fuzz_target!(|data: &[u8]| {
         identification,
     };
 
-    check_reassembly_invariants(payload, &options, config, reverse);
+    check_reassembly_invariants(payload, &options, config, data);
 });

@@ -18,6 +18,7 @@ use std::process;
 use std::thread;
 use std::time::Duration;
 
+use udp_transport_options::frag::split::{PeerFragmentLimits, SplitConfig, split_datagram};
 use udp_transport_options::options::kind::OptionKind;
 use udp_transport_options::options::ocs;
 use udp_transport_options::options::serialize::OptionsBuilder;
@@ -38,8 +39,12 @@ const REQ_TOKEN: [u8; 4] = [0xde, 0xad, 0xbe, 0xef];
 /// whose byte-swap equals itself, which would mask word-alignment regressions in the odd-start
 /// OCS. `c0ffee01` folds to a non-palindromic sum.
 const PAD_TOKEN: [u8; 4] = [0xc0, 0xff, 0xee, 0x01];
+// The fixture models a token previously received from the loopback peer in a REQ.
 const RES_TOKEN: [u8; 4] = [0xfe, 0xed, 0xfa, 0xce];
 const FRAG_ID: u32 = 0x1122_3344;
+const SPLIT_FRAG_ID: u32 = 0xa1b2_c3d4;
+const SPLIT_PAYLOAD_LEN: usize = 90;
+const SPLIT_FRAGMENT_SURPLUS_LEN: usize = 36;
 /// Fragment-data length for the data-carrying FRAG scenarios.
 const FRAG_DATA_LEN: usize = 64;
 
@@ -124,6 +129,36 @@ fn forced_zero_ocs_filler() -> [u8; 2] {
         }
     }
     unreachable!("the one's-complement sum is a bijection in the 16-bit filler, so a hit exists")
+}
+
+/// Uses the production FRAG splitter for a multi-fragment payload plus reassembled APC/RES
+/// options. All returned datagrams share one UDP 4-tuple and Identification; the independent checker
+/// reconstructs their tail without using any Rust parsing or reassembly code.
+fn production_split_datagrams(dst_port: u16) -> Vec<Vec<u8>> {
+    let payload = pattern(SPLIT_PAYLOAD_LEN);
+    let options_body = body(vec![
+        (OptionKind::Apc, typed_value(&Apc::compute(&payload))),
+        (OptionKind::Res, typed_value(&Res { token: RES_TOKEN })),
+    ]);
+    let fragments = split_datagram(
+        &payload,
+        &options_body,
+        SplitConfig {
+            max_fragment_surplus_len: SPLIT_FRAGMENT_SURPLUS_LEN,
+            peer: PeerFragmentLimits {
+                max_reassembled_size: 256,
+                max_segments: 8,
+            },
+            identification: SPLIT_FRAG_ID,
+        },
+    )
+    .expect("fixed production-split scenario fits its MRDS and fragment limits");
+    assert_eq!(fragments.len(), 5, "checker golden assumes five production fragments");
+
+    fragments
+        .into_iter()
+        .map(|fragment| assemble_datagram(LOOPBACK, LOOPBACK, SRC_PORT, dst_port, b"", &fragment.surplus_body))
+        .collect()
 }
 
 /// Builds the scenario datagrams in port order (`PORT_BASE + index`); mirrored in
@@ -279,9 +314,11 @@ fn main() {
     };
 
     let all = scenarios();
+    let split_port = PORT_BASE + u16::try_from(all.len()).expect("scenario count fits u16");
+    let split_datagrams = production_split_datagrams(split_port);
     println!(
         "wire_probe: {LOOPBACK} -> {LOOPBACK} (src port {SRC_PORT}), {} scenarios",
-        all.len()
+        all.len() + 1
     );
     for (index, scenario) in all.iter().enumerate() {
         let dst_port = PORT_BASE + u16::try_from(index).expect("scenario count fits u16");
@@ -297,5 +334,72 @@ fn main() {
         // Spike precedent: a short gap keeps the capture ordering clean.
         thread::sleep(Duration::from_millis(10));
     }
-    println!("wire_probe: sent {} datagrams", all.len());
+
+    let terminal = split_datagrams.len() - 1;
+    let mut split_order = vec![terminal, 0];
+    split_order.extend((1..terminal).rev());
+    println!(
+        "  {:<18} port {split_port}  {} fragments (send order {split_order:?})",
+        "production-split",
+        split_datagrams.len()
+    );
+    for fragment_index in split_order {
+        let datagram = &split_datagrams[fragment_index];
+        if let Err(err) = sender.send(LOOPBACK, datagram) {
+            eprintln!("wire_probe FAIL: production-split fragment {fragment_index} (port {split_port}): {err}");
+            process::exit(1);
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    println!(
+        "wire_probe: sent {} datagrams across {} scenarios",
+        all.len() + split_datagrams.len(),
+        all.len() + 1
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn production_split_shape_matches_checker_contract() {
+        let datagrams = production_split_datagrams(PORT_BASE + 10);
+        let mut offsets = Vec::new();
+        let mut surplus_lengths = Vec::new();
+        let mut data_lengths = Vec::new();
+        let mut starts = Vec::new();
+        let mut tail = Vec::new();
+
+        for datagram in datagrams {
+            let (_, udp_at) = IpRepr::parse(&datagram).expect("production fragment has a valid IPv4 header");
+            let udp = UdpHeader::parse(&datagram[udp_at..]).expect("production fragment has a valid UDP header");
+            assert_eq!(usize::from(udp.length), udp::HEADER_LEN);
+            let surplus = &datagram[udp_at + udp::HEADER_LEN..];
+            surplus_lengths.push(surplus.len());
+            assert_eq!(surplus[2], OptionKind::Frag.to_byte());
+            let option_len = usize::from(surplus[3]);
+            let frag = Frag::decode(&surplus[4..2 + option_len]).expect("production FRAG value decodes");
+            let data_at = udp_at + usize::from(frag.frag_start);
+
+            offsets.push(frag.frag_offset);
+            data_lengths.push(datagram.len() - data_at);
+            starts.push(frag.frag_start);
+            tail.extend_from_slice(&datagram[data_at..]);
+        }
+
+        assert_eq!(surplus_lengths, [36, 36, 36, 24, 36]);
+        assert_eq!(offsets, [8, 32, 56, 80, 92]);
+        assert_eq!(data_lengths, [24, 24, 24, 12, 22]);
+        assert_eq!(starts, [20, 20, 20, 20, 22]);
+        let payload = pattern(SPLIT_PAYLOAD_LEN);
+        assert_eq!(&tail[..SPLIT_PAYLOAD_LEN], payload);
+        assert_eq!(
+            &tail[SPLIT_PAYLOAD_LEN..],
+            body(vec![
+                (OptionKind::Apc, typed_value(&Apc::compute(&payload))),
+                (OptionKind::Res, typed_value(&Res { token: RES_TOKEN })),
+            ])
+        );
+    }
 }

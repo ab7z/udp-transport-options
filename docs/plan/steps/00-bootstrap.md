@@ -2,6 +2,10 @@
 
 Status: done
 
+> Historical-snapshot note (2026-07-13): this file records the Step 0 plan and its then-current DoD.
+> The `AF_INET6` socket clause at the bottom predates the deliberate IPv6 scope cut and is not a
+> current project requirement; the maintained implementation and verification surface is IPv4-only.
+
 ## Goal
 
 Turn the `cargo new` scaffold into a library-plus-binaries crate with the full module skeleton, the

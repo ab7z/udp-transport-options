@@ -13,7 +13,7 @@ that tracks status.
   method signatures, the send/receive data flows, and the design rules.
 - [`wire-format.md`](../wire-format.md) - byte-level reference: surplus-area layout, the OCS
   algorithm, the option TLV/extended forms, the option-kind registry, and the FRAG layouts.
-- [`steps/`](steps/) - one file per step (0-15 including the letter-suffixed 0.5 and 10.5, 17;
+- [`steps/`](steps/) - one file per step (0-15 including the letter-suffixed 0.5 and 10.5, 17-18;
   16 removed with IPv6; 9 merged into 8) with Requirements / Plan / Tasks / DoD.
 - The repo-root [`CLAUDE.md`](../../CLAUDE.md) holds the working conventions and a condensed overview.
 
@@ -71,7 +71,8 @@ Legend: [ ] pending, [~] in progress, [x] done, [-] merged/removed.
 | 13 | Two-tier API + error types | `cargo doc` builds; high-level send too large for one datagram auto-fragments (capped by peer MRDS, over-cap send fails) and recv reassembles transparently | [x] |
 | 14 | Example peer CLIs (`udpopt-send`/`udpopt-recv`) | `--help` works; documented loopback run sends options and the receiver prints them decoded | [x] |
 | 15 | Loopback integration suite (root-gated `--ignored` lane) | passes through `scripts/vm-ubuntu-server.sh ignored`; skipped (not failed) without privilege | [x] |
-| 17 | Evaluation runbook + netns/veth/tunnel scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the staged env on Linux; runbook reproduces integration results; quick-start verified | [x] |
+| 17 | Controlled evaluation runbook + netns/veth, routed, Linux NAT, and filter scripts (prototyped by the Step 0.5 spike's `scripts/spike.sh`) | scripts create the local staged environments on Linux; runbook reproduces the controlled results; external paths, surplus-specific middleboxes, and a tunnel control remain outside this completed bounded step | [x] |
+| 18 | RFC 9868 audit remediation: UNSAFE ordering, FRAG Identification, UDP-length logging, OCS/RES/API contracts, normative docs, and bounded evidence closure | post-UNSAFE bytes cannot affect FRAG state; high-level IDs are low-reuse and non-wrapping; OCS status is public; docs/errata/evidence are aligned; `scripts/pre-pr.sh` green | [x] |
 
 The 15 -> 17 numbering gap is intentional: **step 16 removed from scope (IPv6), 2026-06** -- the
 mechanism is IP-version-neutral and fully demonstrated on IPv4; IPv6 raw-socket semantics
@@ -82,8 +83,9 @@ stable (no renumbering).
 
 - **Surplus area stripped by the local stack** (the FF2 premise): de-risked up front by the Step 0.5
   spike over a staged 1500-MTU veth link, which proves `UDP Length` < `IP Total Length` survives raw
-  send -> raw recv (up to the MTU) before any TLV/OCS/FRAG work begins; real path/middlebox survival
-  is the separate Step 17 experiment.
+  send -> raw recv (up to the MTU) before any TLV/OCS/FRAG work begins. Step 17 adds controlled
+  local routed/NAT/filter lanes; real external-path and surplus-specific middlebox survival remains
+  empirical follow-up and is not claimed complete.
 - **Raw recv duplicate/ICMP noise**: bind a dummy `SOCK_DGRAM` to absorb ICMP port-unreachable;
   filter own-source in userspace (Step 8).
 - **`IP_HDRINCL` field fill** (Step 0.5 Finding A: the kernel forces IP Total Length to the buffer
@@ -111,9 +113,10 @@ stable (no renumbering).
   `LEAN_RFC9868_VALIDATION.md` define the scope. Socket I/O and middlebox behavior stay outside
   the Lean claim (empirical lanes above).
 - Before every PR (opening and updating): the mandatory local gate `scripts/pre-pr.sh` (host
-  fmt/clippy/test with 1024 proptest cases, Lean spec build + axiom audit, achim cross verify, the
-  achim wire lane, and a time-boxed libFuzzer smoke). Every step that adds a parsing surface
-  extends the property tests and fuzz targets in the same commit.
+  fmt/clippy/doc/test with 1024 proptest cases, the eval-checker Python unit tests, Lean spec
+  build + axiom audit, achim cross verify, the achim root and wire lanes, and a time-boxed
+  libFuzzer smoke). Every step that adds a parsing surface extends the property tests and fuzz
+  targets in the same commit.
 - Functional (root-free): `cargo test` locally, plus `scripts/vm-ubuntu-server.sh test`
   (cross-compiled test binaries execute on `achim` via the cargo runner).
 - Integration (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh ignored` (the runner executes
@@ -128,4 +131,5 @@ stable (no renumbering).
 - End-to-end: the `udpopt-send`/`udpopt-recv` CLIs over loopback, confirmed with a `tcpdump`/Wireshark
   capture showing the surplus area on the wire (the byte-level capture check itself is automated by
   the Step 10.5 wire lane).
-- Empirical (Step 17): the netns/veth runbook for the thesis's staged environments.
+- Empirical (Step 17): the controlled netns/veth, routed, Linux NAT, and filter runbook. These local
+  lanes do not by themselves answer FF2 over real external paths.

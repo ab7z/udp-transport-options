@@ -6,7 +6,7 @@
 //! Step-12 fragment or deliver the payload).
 
 use crate::error::{HeaderError, ParseError, RecvError};
-use crate::frag::reassembly::{FragKey, ReassemblyCache, ReassemblyOutcome};
+use crate::frag::reassembly::{FragKey, FragmentProcessing, ReassemblyCache, ReassemblyOutcome};
 use crate::model::{kind, length, limits};
 use crate::options::RawOption;
 use crate::options::kind::OptionKind;
@@ -22,6 +22,8 @@ use std::time::Instant;
 
 const TLV_HEADER_LEN: usize = 2;
 const WARN_SAMPLE_INTERVAL: u64 = 64;
+static UDP_LENGTH_BELOW_MIN_WARNINGS: AtomicU64 = AtomicU64::new(0);
+static UDP_LENGTH_EXCEEDS_IP_WARNINGS: AtomicU64 = AtomicU64::new(0);
 
 macro_rules! warn_sampled {
     ($counter:ident, $($arg:tt)+) => {{
@@ -44,6 +46,42 @@ fn should_log_sampled(counter: &AtomicU64) -> Option<u64> {
     (sample == 1 || sample.is_multiple_of(WARN_SAMPLE_INTERVAL)).then_some(sample)
 }
 
+/// Emits the RFC 9868 Section 10 diagnostic for a UDP Length below the fixed header size.
+///
+/// Raw-socket demultiplexing and API prefilters call this helper before the pure pipeline can see
+/// the datagram, so all receive entry points share the same rate-limited diagnostic.
+pub(crate) fn warn_udp_length_below_min(length: u16) {
+    if let Some(sample) = should_log_sampled(&UDP_LENGTH_BELOW_MIN_WARNINGS) {
+        if sample == 1 {
+            log::warn!("dropping UDP-options datagram: UDP Length {length} is below the 8-byte minimum");
+        } else {
+            log::warn!(
+                "dropping UDP-options datagram: UDP Length {length} is below the 8-byte minimum \
+                 (sample #{sample}; repeated warnings in this category are sampled)"
+            );
+        }
+    }
+}
+
+/// Emits the RFC 9868 Section 10 diagnostic for a UDP Length beyond the IP transport payload.
+///
+/// The API's option-bearing prefilter performs this check before the pure pipeline, so both paths
+/// use the same rate-limited diagnostic.
+pub(crate) fn warn_udp_length_exceeds_ip(length: u16, transport_payload_len: usize) {
+    if let Some(sample) = should_log_sampled(&UDP_LENGTH_EXCEEDS_IP_WARNINGS) {
+        if sample == 1 {
+            log::warn!(
+                "dropping UDP-options datagram: UDP Length {length} exceeds IP transport payload {transport_payload_len}"
+            );
+        } else {
+            log::warn!(
+                "dropping UDP-options datagram: UDP Length {length} exceeds IP transport payload \
+                 {transport_payload_len} (sample #{sample}; repeated warnings in this category are sampled)"
+            );
+        }
+    }
+}
+
 /// The outcome of processing one received datagram.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Delivery {
@@ -58,6 +96,8 @@ pub enum Delivery {
         option_bearing: bool,
         /// Per-option processing status for API consumers.
         reports: Vec<OptionReport>,
+        /// Separate OCS processing confirmations required by RFC 9868 Section 15.
+        ocs_reports: Vec<OcsReport>,
     },
     /// The datagram was a fragment; it was buffered and there is nothing to deliver yet.
     Buffered,
@@ -76,13 +116,49 @@ pub enum OptionStatus {
     Ignored,
 }
 
-/// Where a reported option was observed.
+/// Where a reported option or OCS was observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionSource {
     /// The option applies to the reassembled or unfragmented UDP datagram.
     Datagram,
     /// The option was accumulated from one or more UDP fragments.
     FragmentSet,
+}
+
+/// User-visible processing status for the Option Checksum (OCS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OcsStatus {
+    /// No surplus area, and therefore no OCS, was present.
+    Absent,
+    /// A non-zero OCS validated successfully.
+    ///
+    /// For a coalesced fragment-set report, at least one fragment used a validated non-zero OCS;
+    /// any other accepted fragments may have used the RFC-permitted zero OCS.
+    Valid,
+    /// A zero OCS was permitted because the UDP checksum was also zero.
+    ///
+    /// For a coalesced fragment-set report, every accepted fragment used this unused form.
+    Unused,
+    /// A non-zero OCS or its alignment pad failed validation.
+    Failed,
+    /// A zero OCS was invalid because the UDP checksum was non-zero.
+    InvalidZero,
+    /// The fragment-set OCS state was not observed by the receive pipeline.
+    ///
+    /// Reported only with [`OptionSource::FragmentSet`] when at least one fragment entered the
+    /// shared [`ReassemblyCache`](crate::frag::reassembly::ReassemblyCache) through its public
+    /// insertion methods, which carry no OCS observation. It never satisfies a required-OCS
+    /// receive policy.
+    Unobserved,
+}
+
+/// One OCS processing confirmation visible at the API boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OcsReport {
+    /// OCS processing disposition.
+    pub status: OcsStatus,
+    /// Whether the confirmation applies to the datagram or its fragment set.
+    pub source: OptionSource,
 }
 
 /// Processing status for one option visible at the API boundary.
@@ -110,7 +186,6 @@ enum FragmentOptionLimit {
     Full,
     End { end: usize },
     MalformedFrag { frag: Frag },
-    UnsupportedUnsafeBeforeFrag { frag: Frag },
 }
 
 /// Processes one received IPv4 datagram according to the RFC 9868 receive order.
@@ -118,6 +193,9 @@ enum FragmentOptionLimit {
 /// This function is deliberately pure: malformed IP/UDP input returns a drop error, malformed or
 /// untrusted surplus contents discard only the options, and time-dependent reassembly state is driven
 /// by the caller-provided `now`.
+///
+/// `cache` must be scoped to this UDP source/destination address-and-port pair. A caller serving
+/// multiple socket pairs must keep separate caches so that the per-pair RFC limits remain separate.
 pub fn process_datagram(ip_datagram: &[u8], cache: &mut ReassemblyCache, now: Instant) -> Result<Delivery, RecvError> {
     process_datagram_inner(ip_datagram, cache, now, true)
 }
@@ -134,10 +212,7 @@ fn process_datagram_inner(
     let udp = match UdpHeader::parse(&datagram[udp_at..]) {
         Ok(udp) => udp,
         Err(HeaderError::UdpLengthInvalid { length }) => {
-            warn_sampled!(
-                UDP_LENGTH_BELOW_MIN_WARNINGS,
-                "dropping UDP-options datagram: UDP Length {length} is below the 8-byte minimum"
-            );
+            warn_udp_length_below_min(length);
             return Err(HeaderError::UdpLengthInvalid { length }.into());
         }
         Err(error) => return Err(error.into()),
@@ -145,12 +220,7 @@ fn process_datagram_inner(
     let udp_len = usize::from(udp.length);
 
     if udp_len > ip.transport_payload_len() {
-        warn_sampled!(
-            UDP_LENGTH_EXCEEDS_IP_WARNINGS,
-            "dropping UDP-options datagram: UDP Length {} exceeds IP transport payload {}",
-            udp.length,
-            ip.transport_payload_len()
-        );
+        warn_udp_length_exceeds_ip(udp.length, ip.transport_payload_len());
         return Err(RecvError::UdpLengthExceedsIpPayload {
             udp_len: udp.length,
             transport_payload_len: ip.transport_payload_len(),
@@ -176,40 +246,45 @@ fn process_datagram_inner(
         }
     }
 
-    let deliver_without_options = |option_bearing| {
+    let deliver_without_options = |option_bearing, ocs_status| {
         Ok(Delivery::Payload {
             data: user_data.to_vec(),
             options: Vec::new(),
             option_bearing,
             reports: Vec::new(),
+            ocs_reports: vec![OcsReport {
+                status: ocs_status,
+                source: OptionSource::Datagram,
+            }],
         })
     };
 
     let Some(layout) = locate_surplus(&ip, &udp) else {
-        return deliver_without_options(false);
+        return deliver_without_options(false, OcsStatus::Absent);
     };
 
     let pad = datagram[layout.starts_at];
     if let Err(error) = ocs::check_pad(pad, layout.needs_pad) {
         warn_sampled!(PAD_WARNINGS, "discarding UDP options: {error}");
-        return deliver_without_options(true);
+        return deliver_without_options(true, OcsStatus::Failed);
     }
 
     let body = &datagram[layout.ocs_at()..ip_end];
-    match ocs::validate(body, layout.len as u16, udp.checksum) {
-        OcsCheck::Valid | OcsCheck::Unused => {}
+    let ocs_status = match ocs::validate(body, layout.len as u16, udp.checksum) {
+        OcsCheck::Valid => OcsStatus::Valid,
+        OcsCheck::Unused => OcsStatus::Unused,
         OcsCheck::IgnoreOptions => {
             warn_sampled!(
                 OCS_ZERO_WITH_UDP_CHECKSUM_WARNINGS,
                 "discarding UDP options: OCS is zero while UDP checksum is non-zero"
             );
-            return deliver_without_options(true);
+            return deliver_without_options(true, OcsStatus::InvalidZero);
         }
         OcsCheck::Error(error) => {
             warn_sampled!(OCS_MISMATCH_WARNINGS, "discarding UDP options: {error}");
-            return deliver_without_options(true);
+            return deliver_without_options(true, OcsStatus::Failed);
         }
-    }
+    };
 
     let options_offset_from_udp_header = layout.ocs_at() + usize::from(length::OCS) - udp_at;
     let ParsedOptions {
@@ -226,13 +301,13 @@ fn process_datagram_inner(
         Ok(parsed) => parsed,
         Err(error) => {
             warn_sampled!(TLV_PARSE_WARNINGS, "discarding UDP options: {error}");
-            return deliver_without_options(true);
+            return deliver_without_options(true, ocs_status);
         }
     };
     let valid_frag_seen = frag.is_some();
 
     if valid_frag_seen && !user_data.is_empty() {
-        return deliver_without_options(true);
+        return deliver_without_options(true, ocs_status);
     }
     let fragment_key = frag
         .filter(|_| user_data.is_empty())
@@ -249,6 +324,10 @@ fn process_datagram_inner(
             options: Vec::new(),
             option_bearing: true,
             reports,
+            ocs_reports: vec![OcsReport {
+                status: ocs_status,
+                source: OptionSource::Datagram,
+            }],
         });
     }
     if let Some(frag) = frag.filter(|_| user_data.is_empty()) {
@@ -266,8 +345,11 @@ fn process_datagram_inner(
             key,
             frag,
             fragment_data,
-            &options,
-            &fragment_option_failures,
+            FragmentProcessing {
+                options: &options,
+                option_failures: &fragment_option_failures,
+                ocs_nonzero: Some(ocs_status == OcsStatus::Valid),
+            },
             now,
         ) {
             ReassemblyOutcome::Incomplete => Ok(Delivery::Buffered),
@@ -277,6 +359,7 @@ fn process_datagram_inner(
                 udp_length,
                 fragment_options,
                 fragment_option_failures,
+                fragment_ocs_nonzero,
             } => {
                 let Some(reassembled) = reassembled_datagram(&ip, &udp, udp_length, &tail) else {
                     return Ok(Delivery::Dropped);
@@ -287,11 +370,26 @@ fn process_datagram_inner(
                         options,
                         option_bearing,
                         reports,
+                        mut ocs_reports,
                     } => Ok(Delivery::Payload {
                         data,
                         options: merge_fragment_options(fragment_options.clone(), &fragment_option_failures, options),
                         option_bearing,
                         reports: merge_fragment_reports(fragment_options, fragment_option_failures, reports),
+                        ocs_reports: {
+                            ocs_reports.insert(
+                                0,
+                                OcsReport {
+                                    status: match fragment_ocs_nonzero {
+                                        Some(true) => OcsStatus::Valid,
+                                        Some(false) => OcsStatus::Unused,
+                                        None => OcsStatus::Unobserved,
+                                    },
+                                    source: OptionSource::FragmentSet,
+                                },
+                            );
+                            ocs_reports
+                        },
                     }),
                     delivery => Ok(delivery),
                 }
@@ -304,6 +402,10 @@ fn process_datagram_inner(
         options,
         option_bearing: true,
         reports,
+        ocs_reports: vec![OcsReport {
+            status: ocs_status,
+            source: OptionSource::Datagram,
+        }],
     })
 }
 
@@ -412,15 +514,6 @@ fn parse_options(
                 fragment_failed: true,
             });
         }
-        FragmentOptionLimit::UnsupportedUnsafeBeforeFrag { frag } => {
-            return Ok(ParsedOptions {
-                options: Vec::new(),
-                reports: Vec::new(),
-                frag: Some(frag),
-                unsupported_unsafe_seen: true,
-                fragment_failed: true,
-            });
-        }
     };
     let mut iter = OptionsIter::new(options_bytes);
     let mut options = Vec::new();
@@ -457,6 +550,21 @@ fn parse_options(
         };
         let raw_kind = option.kind.to_byte();
 
+        if !(fragment_option_context && option.kind == OptionKind::Apc)
+            && let Err(error) = reject_sub_minimum(option)
+        {
+            if frag.is_some() && user_data.is_empty() {
+                return Ok(ParsedOptions {
+                    options: Vec::new(),
+                    reports: Vec::new(),
+                    frag,
+                    unsupported_unsafe_seen: false,
+                    fragment_failed: true,
+                });
+            }
+            return Err(error);
+        }
+
         if option.kind.is_safe() && !option.kind.is_must_support() {
             seen_non_must_support_safe = true;
         } else if seen_non_must_support_safe
@@ -472,7 +580,6 @@ fn parse_options(
         match option.kind {
             OptionKind::Eol | OptionKind::Nop => {}
             OptionKind::Frag => {
-                reject_sub_minimum(option)?;
                 if seen[usize::from(raw_kind)] {
                     if frag.is_some() && user_data.is_empty() {
                         return Ok(ParsedOptions {
@@ -498,7 +605,6 @@ fn parse_options(
                     reports.push(report(option.kind, OptionStatus::Ignored));
                     continue;
                 }
-                reject_sub_minimum(option)?;
                 if mark_seen_once(&mut seen, raw_kind) {
                     match accepts_apc(option, user_data) {
                         OptionStatus::Success => {
@@ -512,7 +618,6 @@ fn parse_options(
                 }
             }
             OptionKind::Mds => {
-                reject_sub_minimum(option)?;
                 if mark_seen_once(&mut seen, raw_kind) {
                     if Mds::decode(option.value).is_ok() {
                         reports.push(report(option.kind, OptionStatus::Success));
@@ -525,7 +630,6 @@ fn parse_options(
                 }
             }
             OptionKind::Mrds => {
-                reject_sub_minimum(option)?;
                 if mark_seen_once(&mut seen, raw_kind) {
                     if Mrds::decode(option.value).is_ok() {
                         reports.push(report(option.kind, OptionStatus::Success));
@@ -538,7 +642,6 @@ fn parse_options(
                 }
             }
             OptionKind::Req => {
-                reject_sub_minimum(option)?;
                 if mark_seen_once(&mut seen, raw_kind) {
                     if Req::decode(option.value).is_ok() {
                         reports.push(report(option.kind, OptionStatus::Success));
@@ -551,7 +654,6 @@ fn parse_options(
                 }
             }
             OptionKind::Res => {
-                reject_sub_minimum(option)?;
                 if mark_seen_once(&mut seen, raw_kind) {
                     if Res::decode(option.value).is_ok() {
                         reports.push(report(option.kind, OptionStatus::Success));
@@ -564,7 +666,6 @@ fn parse_options(
                 }
             }
             OptionKind::Other(_) if option.kind.is_safe() => {
-                reject_sub_minimum(option)?;
                 reports.push(report(option.kind, OptionStatus::Ignored));
             }
             OptionKind::Other(_) => {
@@ -611,7 +712,6 @@ fn fragment_option_limit(
     }
 
     let mut iter = OptionsIter::new(options_bytes);
-    let mut unsupported_unsafe_before_frag = false;
     for item in iter.by_ref() {
         let Ok(option) = item else {
             return FragmentOptionLimit::Full;
@@ -628,13 +728,10 @@ fn fragment_option_limit(
                 if end > options_bytes.len() || end < option_end_offset(options_bytes, option) {
                     return FragmentOptionLimit::MalformedFrag { frag };
                 }
-                if unsupported_unsafe_before_frag {
-                    return FragmentOptionLimit::UnsupportedUnsafeBeforeFrag { frag };
-                }
                 return FragmentOptionLimit::End { end };
             }
             OptionKind::Other(_) if option.kind.is_unsafe() => {
-                unsupported_unsafe_before_frag = true;
+                return FragmentOptionLimit::Full;
             }
             OptionKind::Eol => return FragmentOptionLimit::Full,
             _ => {}
@@ -704,10 +801,11 @@ mod tests {
     use log::{LevelFilter, Log, Metadata, Record};
 
     use super::{
-        Delivery, OptionReport, OptionSource, OptionStatus, WARN_SAMPLE_INTERVAL, process_datagram, should_log_sampled,
+        Delivery, OcsReport, OcsStatus, OptionReport, OptionSource, OptionStatus, WARN_SAMPLE_INTERVAL,
+        process_datagram, should_log_sampled,
     };
     use crate::error::{HeaderError, RecvError};
-    use crate::frag::reassembly::ReassemblyCache;
+    use crate::frag::reassembly::{FragKey, ReassemblyCache, ReassemblyOutcome};
     use crate::frag::split::{PeerFragmentLimits, SplitConfig, split_datagram};
     use crate::model::{kind, length, limits};
     use crate::options::RawOption;
@@ -741,7 +839,7 @@ mod tests {
             if message.contains("consecutive UDP NOP options") {
                 NOP_FLOOD_LOGS.fetch_add(1, Ordering::SeqCst);
             }
-            if message.contains("below the 8-byte minimum") {
+            if message.contains("below the 8-byte minimum") || message.contains("exceeds IP transport payload") {
                 UDP_LENGTH_LOGS.fetch_add(1, Ordering::SeqCst);
             }
             if message.contains("must-support UDP option after another SAFE option") {
@@ -837,16 +935,53 @@ mod tests {
         option_bearing: bool,
         reports: Vec<OptionReport>,
     ) -> Delivery {
+        let ocs_status = if option_bearing {
+            OcsStatus::Valid
+        } else {
+            OcsStatus::Absent
+        };
+        payload_with_reports_and_ocs(data, options, option_bearing, reports, ocs_status)
+    }
+
+    fn payload_with_reports_and_ocs(
+        data: &[u8],
+        options: Vec<RawOption>,
+        option_bearing: bool,
+        reports: Vec<OptionReport>,
+        ocs_status: OcsStatus,
+    ) -> Delivery {
         Delivery::Payload {
             data: data.to_vec(),
             options,
             option_bearing,
             reports,
+            ocs_reports: vec![OcsReport {
+                status: ocs_status,
+                source: OptionSource::Datagram,
+            }],
         }
     }
 
     fn report(kind: OptionKind, status: OptionStatus, source: OptionSource) -> OptionReport {
         OptionReport { kind, status, source }
+    }
+
+    fn with_fragment_ocs(mut delivery: Delivery) -> Delivery {
+        with_fragment_ocs_status(&mut delivery, OcsStatus::Valid);
+        delivery
+    }
+
+    fn with_fragment_ocs_status(delivery: &mut Delivery, status: OcsStatus) {
+        let Delivery::Payload { ocs_reports, .. } = delivery else {
+            panic!("fragment OCS report requires a payload delivery");
+        };
+        ocs_reports.insert(
+            0,
+            OcsReport {
+                status,
+                source: OptionSource::FragmentSet,
+            },
+        );
     }
 
     fn raw(kind: OptionKind, value: &[u8]) -> RawOption {
@@ -942,15 +1077,19 @@ mod tests {
         }
         assert!(UDP_LENGTH_LOGS.load(Ordering::SeqCst) >= 1);
 
+        UDP_LENGTH_LOGS.store(0, Ordering::SeqCst);
         let mut too_long = datagram_with_raw_surplus(b"hi", &[], false);
         too_long[24..26].copy_from_slice(&11u16.to_be_bytes());
-        assert!(matches!(
-            process(&too_long),
-            Err(RecvError::UdpLengthExceedsIpPayload {
-                udp_len: 11,
-                transport_payload_len: 10
-            })
-        ));
+        for _ in 0..WARN_SAMPLE_INTERVAL {
+            assert!(matches!(
+                process(&too_long),
+                Err(RecvError::UdpLengthExceedsIpPayload {
+                    udp_len: 11,
+                    transport_payload_len: 10
+                })
+            ));
+        }
+        assert!(UDP_LENGTH_LOGS.load(Ordering::SeqCst) >= 1);
     }
 
     #[test]
@@ -988,7 +1127,10 @@ mod tests {
         let layout = locate_surplus(&ip, &udp).unwrap();
         assert!(layout.needs_pad);
         bad[layout.starts_at] = 0x7f;
-        assert_eq!(process(&bad).unwrap(), payload(user_data, Vec::new()));
+        assert_eq!(
+            process(&bad).unwrap(),
+            payload_with_reports_and_ocs(user_data, Vec::new(), true, Vec::new(), OcsStatus::Failed)
+        );
     }
 
     #[test]
@@ -1011,7 +1153,13 @@ mod tests {
         zero_udp_zero_ocs[layout.ocs_at()..layout.ocs_at() + usize::from(length::OCS)].fill(0);
         assert_eq!(
             process(&zero_udp_zero_ocs).unwrap(),
-            payload(user_data, vec![raw(OptionKind::Req, &[0xaa, 0xbb, 0xcc, 0xdd])])
+            payload_with_reports_and_ocs(
+                user_data,
+                vec![raw(OptionKind::Req, &[0xaa, 0xbb, 0xcc, 0xdd])],
+                true,
+                vec![report(OptionKind::Req, OptionStatus::Success, OptionSource::Datagram)],
+                OcsStatus::Unused,
+            )
         );
 
         let mut nonzero_udp_zero_ocs = valid.clone();
@@ -1019,17 +1167,29 @@ mod tests {
         let udp = UdpHeader::parse(&nonzero_udp_zero_ocs[udp_at..]).unwrap();
         let layout = locate_surplus(&ip, &udp).unwrap();
         nonzero_udp_zero_ocs[layout.ocs_at()..layout.ocs_at() + usize::from(length::OCS)].fill(0);
-        assert_eq!(process(&nonzero_udp_zero_ocs).unwrap(), payload(user_data, Vec::new()));
+        assert_eq!(
+            process(&nonzero_udp_zero_ocs).unwrap(),
+            payload_with_reports_and_ocs(user_data, Vec::new(), true, Vec::new(), OcsStatus::InvalidZero)
+        );
 
         let mut bad_ocs = valid;
         let last = bad_ocs.len() - 1;
         bad_ocs[last] ^= 0x01;
-        assert_eq!(process(&bad_ocs).unwrap(), payload(user_data, Vec::new()));
+        assert_eq!(
+            process(&bad_ocs).unwrap(),
+            payload_with_reports_and_ocs(user_data, Vec::new(), true, Vec::new(), OcsStatus::Failed)
+        );
     }
 
     #[test]
     fn malformed_tlv_discards_all_options_but_not_payload() {
         let bytes = datagram(b"hello", &[kind::APC, 1, kind::REQ, 6, 1, 2, 3, 4]);
+        assert_eq!(process(&bytes).unwrap(), payload(b"hello", Vec::new()));
+    }
+
+    #[test]
+    fn erratum_8834_overrun_discards_preceding_options_but_delivers_payload() {
+        let bytes = datagram(b"hello", &[kind::REQ, 6, 1, 2, 3, 4, 10, 8, 0xaa, 0xbb]);
         assert_eq!(process(&bytes).unwrap(), payload(b"hello", Vec::new()));
     }
 
@@ -1209,7 +1369,13 @@ mod tests {
         );
         assert_eq!(
             process_with_cache(&datagrams[1], &mut cache, now).unwrap(),
-            payload(b"abcdefghij", vec![raw(OptionKind::Req, &[1, 2, 3, 4])])
+            with_fragment_ocs(payload_with_reports_and_ocs(
+                b"abcdefghij",
+                vec![raw(OptionKind::Req, &[1, 2, 3, 4])],
+                true,
+                vec![report(OptionKind::Req, OptionStatus::Success, OptionSource::Datagram)],
+                OcsStatus::Unused,
+            ))
         );
     }
 
@@ -1226,7 +1392,86 @@ mod tests {
         );
         assert_eq!(
             process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
-            payload_with_bearing(b"abcdefghijk", Vec::new(), false)
+            with_fragment_ocs(payload_with_bearing(b"abcdefghijk", Vec::new(), false))
+        );
+    }
+
+    #[test]
+    fn reports_unused_ocs_for_an_all_zero_checksum_fragment_set() {
+        let mut datagrams = split_fragment_datagrams(b"abcdefghijk", &[]);
+        assert_eq!(datagrams.len(), 2);
+        for datagram in &mut datagrams {
+            datagram[26..28].fill(0);
+            let (ip, udp_at) = IpRepr::parse(datagram).unwrap();
+            let udp = UdpHeader::parse(&datagram[udp_at..]).unwrap();
+            let layout = locate_surplus(&ip, &udp).unwrap();
+            datagram[layout.ocs_at()..layout.ocs_at() + usize::from(length::OCS)].fill(0);
+        }
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        let mut expected = payload_with_bearing(b"abcdefghijk", Vec::new(), false);
+        with_fragment_ocs_status(&mut expected, OcsStatus::Unused);
+        assert_eq!(process_with_cache(&datagrams[1], &mut cache, now).unwrap(), expected);
+    }
+
+    #[test]
+    fn reports_valid_ocs_when_a_fragment_set_mixes_valid_and_permitted_unused_forms() {
+        let mut datagrams = split_fragment_datagrams(b"abcdefghijk", &[]);
+        assert_eq!(datagrams.len(), 2);
+        datagrams[0][26..28].fill(0);
+        let (ip, udp_at) = IpRepr::parse(&datagrams[0]).unwrap();
+        let udp = UdpHeader::parse(&datagrams[0][udp_at..]).unwrap();
+        let layout = locate_surplus(&ip, &udp).unwrap();
+        datagrams[0][layout.ocs_at()..layout.ocs_at() + usize::from(length::OCS)].fill(0);
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&datagrams[1], &mut cache, now).unwrap(),
+            with_fragment_ocs(payload_with_bearing(b"abcdefghijk", Vec::new(), false))
+        );
+    }
+
+    #[test]
+    fn public_cache_insertion_mixed_with_pipeline_reports_unobserved_fragment_set_ocs() {
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+        let second = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        let key = FragKey {
+            src: SRC,
+            dst: DST,
+            src_port: SRC_PORT,
+            dst_port: DST_PORT,
+            identification: 0x0102_0304,
+        };
+        assert_eq!(cache.insert(key, first, b"abc", now), ReassemblyOutcome::Incomplete);
+
+        let mut expected = payload_with_bearing(b"abcdef", Vec::new(), false);
+        with_fragment_ocs_status(&mut expected, OcsStatus::Unobserved);
+        assert_eq!(
+            process_with_cache(&fragment_datagram(second, &[], b"def"), &mut cache, now).unwrap(),
+            expected
         );
     }
 
@@ -1274,7 +1519,7 @@ mod tests {
         );
         assert_eq!(
             process_with_cache(&fragment_datagram(second, &second_options, b"def"), &mut cache, now).unwrap(),
-            payload_with_reports(
+            with_fragment_ocs(payload_with_reports(
                 b"abcdef",
                 vec![
                     raw(OptionKind::Mds, &1200u16.to_be_bytes()),
@@ -1289,7 +1534,7 @@ mod tests {
                     report(OptionKind::Req, OptionStatus::Success, OptionSource::FragmentSet),
                     report(OptionKind::Res, OptionStatus::Success, OptionSource::FragmentSet),
                 ],
-            )
+            ))
         );
     }
 
@@ -1333,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_before_frag_discards_existing_partial() {
+    fn unsafe_before_frag_stops_before_frag_and_preserves_existing_partial() {
         let first = Frag {
             frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
             identification: 0x0102_0304,
@@ -1362,13 +1607,71 @@ mod tests {
         );
         assert_eq!(
             process_with_cache(&datagram(b"", &unsafe_then_frag), &mut cache, now).unwrap(),
-            Delivery::Dropped
+            payload_with_reports(
+                b"",
+                Vec::new(),
+                true,
+                vec![report(
+                    OptionKind::Other(kind::UNSAFE_MIN),
+                    OptionStatus::Failed,
+                    OptionSource::Datagram,
+                )],
+            )
         );
-        assert!(cache.is_empty());
+        assert_eq!(cache.len(), 1);
         assert_eq!(
             process_with_cache(&fragment_datagram(valid_terminal, &[], b"def"), &mut cache, now).unwrap(),
+            with_fragment_ocs(payload_with_bearing(b"abcdef", Vec::new(), false))
+        );
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn unsafe_before_malformed_frag_does_not_discard_existing_partial() {
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+        let malformed = Frag {
+            frag_start: u16::from(length::UDP_HEADER) + u16::from(length::OCS),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+        let valid_terminal = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            ..malformed
+        };
+        let mut unsafe_then_malformed_frag = vec![kind::UNSAFE_MIN, 2];
+        malformed.encode(&mut unsafe_then_malformed_frag);
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&fragment_datagram(first, &[], b"abc"), &mut cache, now).unwrap(),
             Delivery::Buffered
         );
+        assert_eq!(
+            process_with_cache(&datagram(b"", &unsafe_then_malformed_frag), &mut cache, now).unwrap(),
+            payload_with_reports(
+                b"",
+                Vec::new(),
+                true,
+                vec![report(
+                    OptionKind::Other(kind::UNSAFE_MIN),
+                    OptionStatus::Failed,
+                    OptionSource::Datagram,
+                )],
+            )
+        );
+        assert_eq!(cache.len(), 1);
+        assert_eq!(
+            process_with_cache(&fragment_datagram(valid_terminal, &[], b"def"), &mut cache, now).unwrap(),
+            with_fragment_ocs(payload_with_bearing(b"abcdef", Vec::new(), false))
+        );
+        assert!(cache.is_empty());
     }
 
     #[test]
@@ -1437,6 +1740,47 @@ mod tests {
         options.extend_from_slice(&[kind::MDS, 5, 0, 1]);
 
         assert_eq!(process(&datagram(b"", &options)).unwrap(), Delivery::Dropped);
+    }
+
+    #[test]
+    fn sub_minimum_option_after_frag_discards_existing_partial_without_user_delivery() {
+        let first = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_NON_TERMINAL)),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER),
+            rdos: None,
+        };
+        let malformed_terminal = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL) + 3),
+            identification: 0x0102_0304,
+            frag_offset: u16::from(length::UDP_HEADER) + 3,
+            rdos: Some(u16::from(length::UDP_HEADER) + 6),
+        };
+        let valid_terminal = Frag {
+            frag_start: frag_start_for(b"", usize::from(length::FRAG_TERMINAL)),
+            ..malformed_terminal
+        };
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&fragment_datagram(first, &[], b"abc"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(
+                &fragment_datagram(malformed_terminal, &[kind::MDS, 3, 0], b"def"),
+                &mut cache,
+                now,
+            )
+            .unwrap(),
+            Delivery::Dropped
+        );
+        assert!(cache.is_empty());
+        assert_eq!(
+            process_with_cache(&fragment_datagram(valid_terminal, &[], b"def"), &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
     }
 
     #[test]

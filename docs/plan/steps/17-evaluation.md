@@ -2,6 +2,15 @@
 
 Status: done; verified on achim (Linux)
 
+> Scope correction (2026-07-13): "done" means the controlled local harness is implemented and was
+> exercised on achim. It covers namespace/veth, routed, Linux NAT, and a filter that drops the whole
+> experiment port range as a negative control. It neither intentionally strips/modifies only the
+> surplus nor measures real external paths or diverse middleboxes; no tunnel lane is implemented.
+> At the time of this correction `eval-check.py` compared captured surplus bytes and packet counts
+> only; Step 18 upgraded it to independently validate sender-side OCS/TLV/APC/FRAG semantics and to
+> correlate receiver delivery JSON, with receiver failures fatal in `eval-run.sh`. These lanes
+> provide partial FF2 evidence, not a completed answer to FF2.
+
 ## Goal
 
 Provide the reproducible evaluation harness for the thesis's staged network environments (chapter 5).

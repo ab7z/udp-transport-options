@@ -2,6 +2,14 @@
 
 Status: done
 
+> Current API/proof note (2026-07-13): receive results expose fixed-field OCS status separately from
+> TLV option reports, and `ReceivePolicy::require_ocs` can require a successful OCS. REQ/RES remain
+> pass-through: the library never auto-responds, and any caller sending RES MUST provide a token it
+> previously received in REQ; the library does not attest that provenance. The current Lean `Api`
+> model proves path selection, MRDS gating, and reassembled tail/RDOS length shape. It does not model
+> payload/option bytes and therefore does not establish the content-preserving end-to-end round trip
+> described as the original target below.
+
 ## Goal
 
 Expose the library through a low-level and a high-level API, with finalized error types.

@@ -2,6 +2,12 @@
 
 Status: done
 
+> Current interpretation (2026-07-13): RFC 9868 requires transmitters to use the default Length form
+> through total length 254 and the Extended Length form above it. This parser's rejection of bounded
+> extended encodings with total length `4..=254` is a documented local strictness policy, not an
+> additional RFC receiver MUST. Per Verified Technical Erratum 8834, an option that overruns the
+> area makes the whole options area malformed; it is not merely ignored in isolation.
+
 ## Goal
 
 Parse the options in a surplus area as a zero-copy, total, panic-free iterator of borrowed

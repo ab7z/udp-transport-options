@@ -27,3 +27,10 @@ path = "src/bin/udpopt-send.rs"
 [[bin]]
 name = "udpopt-recv"
 path = "src/bin/udpopt-recv.rs"
+
+# Wire-verification traffic generator (Step 10.5). `test = true` makes `cargo test` compile and
+# run its golden test against the checker contract (examples are excluded by default).
+[[example]]
+name = "wire_probe"
+path = "examples/wire_probe.rs"
+test = true

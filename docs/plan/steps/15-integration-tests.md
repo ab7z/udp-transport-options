@@ -1,6 +1,15 @@
 # Step 15: Loopback integration suite
 
-Status: done; verified on achim (Linux, requires CAP_NET_RAW)
+Status: done; predecessor suite verified on achim (Linux, requires CAP_NET_RAW); the 2026-07-13
+FRAG/RES remediation passed the achim root lane (`vm-ubuntu-server.sh ignored`) on 2026-08-02
+
+> Current evidence note (2026-07-13): the ignored lane now sends production-generated FRAG
+> datagrams through `RawSender`/`RawReceiver` on loopback in terminal/first/rest-reversed order and
+> completes reassembly only after the missing fragment arrives. It verifies the original payload,
+> successful APC, and the caller-declared previously received RES token. The ordinary supported-
+> option socket test also includes RES. The code/build/lint checks passed locally; the required
+> `scripts/vm-ubuntu-server.sh ignored` rerun completed green on achim on 2026-08-02 (as the
+> pre-PR gate's root lane).
 
 ## Goal
 

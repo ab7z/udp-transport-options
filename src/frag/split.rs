@@ -5,8 +5,13 @@
 //! the terminal fragment the 12-byte form (carrying the Reassembled-Datagram-Option-Start). The
 //! single-fragment (atomic) case is supported, and sizing respects MDS/MRDS.
 
+use std::fs::File;
+use std::io::{self, Read};
+
 use crate::error::SplitError;
 use crate::model::{kind, length, limits};
+
+const RANDOM_IDENTIFICATION_SEED_MASK: u32 = u32::MAX >> 1;
 
 const IPV4_HEADER_LEN: usize = 20;
 const FRAGMENT_SURPLUS_LEN_MAX: usize = u16::MAX as usize - IPV4_HEADER_LEN - length::UDP_HEADER as usize;
@@ -61,21 +66,37 @@ pub struct Fragment {
 /// Monotonic FRAG Identification generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct IdentificationGenerator {
-    next: u32,
+    next: Option<u32>,
 }
 
 impl IdentificationGenerator {
     /// Creates a generator whose first returned value is `next`.
     pub const fn new(next: u32) -> Self {
-        Self { next }
+        Self { next: Some(next) }
+    }
+
+    /// Creates a generator with a seed read from the operating system's random device.
+    ///
+    /// The upper seed bit is cleared so every generated seed leaves at least half of the 32-bit
+    /// Identification space available before fail-closed exhaustion.
+    pub fn from_os_random() -> io::Result<Self> {
+        let mut bytes = [0u8; 4];
+        File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+        Ok(Self::new(bounded_random_seed(bytes)))
     }
 
     /// Returns the next Identification value without wrapping.
+    ///
+    /// `u32::MAX` is returned once and exhausts the generator; all later calls fail closed.
     pub fn next_id(&mut self) -> Result<u32, SplitError> {
-        let id = self.next;
-        self.next = self.next.checked_add(1).ok_or(SplitError::IdentificationExhausted)?;
+        let id = self.next.ok_or(SplitError::IdentificationExhausted)?;
+        self.next = id.checked_add(1);
         Ok(id)
     }
+}
+
+fn bounded_random_seed(bytes: [u8; 4]) -> u32 {
+    u32::from_ne_bytes(bytes) & RANDOM_IDENTIFICATION_SEED_MASK
 }
 
 /// Splits one logical UDP datagram tail into RFC 9868 FRAG surplus bodies.
@@ -266,8 +287,8 @@ fn frag_value(frag_start: u16, identification: u32, frag_offset: u16, rdos: Opti
 #[cfg(test)]
 mod tests {
     use super::{
-        FRAGMENT_SURPLUS_LEN_MAX, IdentificationGenerator, PeerFragmentLimits, SplitConfig, SplitError,
-        rdos_needs_options_pad, split_datagram,
+        FRAGMENT_SURPLUS_LEN_MAX, IdentificationGenerator, PeerFragmentLimits, RANDOM_IDENTIFICATION_SEED_MASK,
+        SplitConfig, SplitError, bounded_random_seed, rdos_needs_options_pad, split_datagram,
     };
     use crate::model::length;
     use crate::options::kind::OptionKind;
@@ -473,7 +494,14 @@ mod tests {
         assert_eq!(generator.next_id(), Ok(42));
 
         let mut exhausted = IdentificationGenerator::new(u32::MAX);
+        assert_eq!(exhausted.next_id(), Ok(u32::MAX));
         assert_eq!(exhausted.next_id(), Err(SplitError::IdentificationExhausted));
+        assert_eq!(exhausted.next_id(), Err(SplitError::IdentificationExhausted));
+    }
+
+    #[test]
+    fn random_identification_seed_keeps_exhaustion_headroom() {
+        assert_eq!(bounded_random_seed([u8::MAX; 4]), RANDOM_IDENTIFICATION_SEED_MASK);
     }
 
     #[test]

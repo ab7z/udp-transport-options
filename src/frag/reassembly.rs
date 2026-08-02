@@ -14,6 +14,10 @@ use crate::options::kind::OptionKind;
 use crate::options::typed::{Frag, Mds, Mrds, Req, Res, TypedOption};
 
 /// Receive-side FRAG reassembly state.
+///
+/// Scope each cache instance to one source/destination address-and-port pair (one UDP 4-tuple).
+/// Callers handling multiple socket pairs must keep a separate cache for each pair because
+/// [`ReassemblyLimits::max_pending_partials`] applies to the entire cache.
 #[derive(Debug)]
 pub struct ReassemblyCache {
     partials: HashMap<FragKey, Partial>,
@@ -62,7 +66,17 @@ impl ReassemblyCache {
         fragment_options: &[RawOption],
         now: Instant,
     ) -> ReassemblyOutcome {
-        self.insert_with_options_and_failures(key, frag, data, fragment_options, &[], now)
+        self.insert_with_options_and_failures(
+            key,
+            frag,
+            data,
+            FragmentProcessing {
+                options: fragment_options,
+                option_failures: &[],
+                ocs_nonzero: None,
+            },
+            now,
+        )
     }
 
     pub(crate) fn insert_with_options_and_failures(
@@ -70,8 +84,7 @@ impl ReassemblyCache {
         key: FragKey,
         frag: Frag,
         data: &[u8],
-        fragment_options: &[RawOption],
-        fragment_option_failures: &[OptionKind],
+        processing: FragmentProcessing<'_>,
         now: Instant,
     ) -> ReassemblyOutcome {
         self.gc(now);
@@ -91,7 +104,7 @@ impl ReassemblyCache {
 
         if !self.partials.contains_key(&key) {
             if self.partials.len() >= self.limits.max_pending_partials {
-                return self.insert_without_retaining(fragment, data, fragment_options, fragment_option_failures, now);
+                return self.insert_without_retaining(fragment, data, processing, now);
             }
             self.partials.insert(key, Partial::new(now));
         }
@@ -100,13 +113,21 @@ impl ReassemblyCache {
             .partials
             .get_mut(&key)
             .expect("partial was inserted or already present");
-        match partial.insert(fragment, data, fragment_options, fragment_option_failures, self.limits) {
+        match partial.insert(
+            fragment,
+            data,
+            processing.options,
+            processing.option_failures,
+            processing.ocs_nonzero,
+            self.limits,
+        ) {
             InsertResult::Incomplete => ReassemblyOutcome::Incomplete,
             InsertResult::Complete {
                 tail,
                 udp_length,
                 fragment_options,
                 fragment_option_failures,
+                fragment_ocs_nonzero,
             } => {
                 self.partials.remove(&key);
                 ReassemblyOutcome::Complete {
@@ -114,6 +135,7 @@ impl ReassemblyCache {
                     udp_length,
                     fragment_options,
                     fragment_option_failures,
+                    fragment_ocs_nonzero,
                 }
             }
             InsertResult::Abort(reason) => {
@@ -137,22 +159,30 @@ impl ReassemblyCache {
         &self,
         fragment: NormalizedFragment,
         data: &[u8],
-        fragment_options: &[RawOption],
-        fragment_option_failures: &[OptionKind],
+        processing: FragmentProcessing<'_>,
         now: Instant,
     ) -> ReassemblyOutcome {
         let mut partial = Partial::new(now);
-        match partial.insert(fragment, data, fragment_options, fragment_option_failures, self.limits) {
+        match partial.insert(
+            fragment,
+            data,
+            processing.options,
+            processing.option_failures,
+            processing.ocs_nonzero,
+            self.limits,
+        ) {
             InsertResult::Complete {
                 tail,
                 udp_length,
                 fragment_options,
                 fragment_option_failures,
+                fragment_ocs_nonzero,
             } => ReassemblyOutcome::Complete {
                 tail,
                 udp_length,
                 fragment_options,
                 fragment_option_failures,
+                fragment_ocs_nonzero,
             },
             InsertResult::Abort(reason) => ReassemblyOutcome::Abort(reason),
             InsertResult::Incomplete => ReassemblyOutcome::Abort(AbortReason::LimitExceeded),
@@ -170,6 +200,17 @@ impl Default for ReassemblyCache {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Validated per-fragment processing observations retained until reassembly completes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FragmentProcessing<'a> {
+    /// Successfully processed SAFE options on this fragment.
+    pub options: &'a [RawOption],
+    /// Option kinds that failed on this fragment.
+    pub option_failures: &'a [OptionKind],
+    /// Whether this fragment used a validated, non-zero OCS, or `None` if not observed.
+    pub ocs_nonzero: Option<bool>,
 }
 
 /// Receive-side FRAG reassembly limits.
@@ -197,7 +238,7 @@ impl Default for ReassemblyLimits {
     }
 }
 
-/// The reassembly key: the UDP 5-tuple plus the FRAG Identification.
+/// The reassembly key: the UDP 4-tuple plus the FRAG Identification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FragKey {
     /// Source IP address.
@@ -227,6 +268,13 @@ pub enum ReassemblyOutcome {
         fragment_options: Vec<RawOption>,
         /// Option kinds that failed on at least one individual fragment.
         fragment_option_failures: Vec<OptionKind>,
+        /// Whether at least one fragment carried a validated, non-zero OCS.
+        ///
+        /// `Some(false)` means all accepted fragments used the RFC-permitted zero OCS with a zero
+        /// UDP checksum. `None` means at least one fragment arrived through a public insertion
+        /// method that supplies no OCS observation; the receive pipeline surfaces that set as
+        /// `OcsStatus::Unobserved`, which never satisfies a required-OCS policy.
+        fragment_ocs_nonzero: Option<bool>,
     },
     /// Reassembly was aborted and the partial state discarded.
     Abort(AbortReason),
@@ -252,6 +300,7 @@ struct Partial {
     byte_total: usize,
     fragment_options: FragmentOptions,
     fragment_option_failures: FragmentOptionFailures,
+    fragment_ocs_nonzero: Option<bool>,
     empty_terminal_options: Option<Vec<RawOption>>,
     empty_terminal_option_failures: Option<Vec<OptionKind>>,
     received_at: Instant,
@@ -267,6 +316,7 @@ impl Partial {
             byte_total: 0,
             fragment_options: FragmentOptions::default(),
             fragment_option_failures: FragmentOptionFailures::default(),
+            fragment_ocs_nonzero: Some(false),
             empty_terminal_options: None,
             empty_terminal_option_failures: None,
             received_at,
@@ -274,7 +324,7 @@ impl Partial {
     }
 
     fn is_expired(&self, now: Instant, timeout: Duration) -> bool {
-        now.duration_since(self.received_at) > timeout.min(limits::REASSEMBLY_TIMEOUT_MAX)
+        now.duration_since(self.received_at) >= timeout.min(limits::REASSEMBLY_TIMEOUT_MAX)
     }
 
     fn insert(
@@ -283,9 +333,11 @@ impl Partial {
         data: &[u8],
         fragment_options: &[RawOption],
         fragment_option_failures: &[OptionKind],
+        fragment_ocs_nonzero: Option<bool>,
         limits: ReassemblyLimits,
     ) -> InsertResult {
         if self.is_exact_duplicate(fragment, data, fragment_options, fragment_option_failures) {
+            self.observe_fragment_ocs(fragment_ocs_nonzero);
             return InsertResult::Incomplete;
         }
         let Some(fragment_count) = self.fragment_count.checked_add(1) else {
@@ -349,6 +401,7 @@ impl Partial {
         self.byte_total = byte_total;
         self.fragment_options.observe(fragment_options);
         self.fragment_option_failures.observe(fragment_option_failures);
+        self.observe_fragment_ocs(fragment_ocs_nonzero);
         if !data.is_empty() {
             let index = self
                 .segments
@@ -402,6 +455,13 @@ impl Partial {
                 .any(|segment| start < segment.end && segment.start < end)
     }
 
+    fn observe_fragment_ocs(&mut self, fragment_ocs_nonzero: Option<bool>) {
+        self.fragment_ocs_nonzero = match (self.fragment_ocs_nonzero, fragment_ocs_nonzero) {
+            (Some(accumulated), Some(current)) => Some(accumulated || current),
+            _ => None,
+        };
+    }
+
     fn complete(&self) -> InsertResult {
         let (Some(terminal_end), Some(udp_length)) = (self.terminal_end, self.udp_length) else {
             return InsertResult::Incomplete;
@@ -430,6 +490,7 @@ impl Partial {
             udp_length,
             fragment_options: self.fragment_options.to_raw_options(),
             fragment_option_failures: self.fragment_option_failures.to_vec(),
+            fragment_ocs_nonzero: self.fragment_ocs_nonzero,
         }
     }
 }
@@ -572,6 +633,7 @@ enum InsertResult {
         udp_length: u16,
         fragment_options: Vec<RawOption>,
         fragment_option_failures: Vec<OptionKind>,
+        fragment_ocs_nonzero: Option<bool>,
     },
     Abort(AbortReason),
 }
@@ -859,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn gc_removes_only_expired_partials() {
+    fn gc_removes_partial_at_timeout_boundary() {
         let t0 = now();
         let mut cache = ReassemblyCache::new();
         assert_eq!(
@@ -868,7 +930,7 @@ mod tests {
         );
         cache.gc(t0 + Duration::from_secs(119));
         assert_eq!(cache.len(), 1);
-        cache.gc(t0 + Duration::from_secs(121));
+        cache.gc(t0 + Duration::from_secs(120));
         assert!(cache.is_empty());
     }
 

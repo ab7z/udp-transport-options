@@ -2,6 +2,12 @@
 
 Status: done
 
+> Historical wording correction (2026-07-13): when an odd natural surplus start needs a zero pad,
+> the RFC 1071 byte stream begins at the aligned OCS and runs through the end of the area; the pad is
+> validated separately. The 16-bit length addend is nevertheless the full surplus length including
+> that pad. Thus older "whole surplus area" shorthand below must not be read as prepending the pad to
+> the checksum word stream. Validation folds to `0xFFFF` (one's-complement zero).
+
 ## Goal
 
 Compute and validate the Option Checksum (RFC 9868 Section 9) over the surplus area.

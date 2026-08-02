@@ -61,15 +61,21 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
     if let Some(expected) = expected_options_disposition(datagram, &ip, &udp, user_data, now) {
         match expected {
             ExpectedDisposition::DeliverWithoutOptions => {
-                assert_eq!(
-                    delivery,
-                    Delivery::Payload {
-                        data: user_data.to_vec(),
-                        options: Vec::new(),
-                        option_bearing: true,
-                        reports: Vec::new(),
-                    }
-                );
+                let Delivery::Payload {
+                    data,
+                    options,
+                    option_bearing,
+                    reports,
+                    ocs_reports,
+                } = delivery
+                else {
+                    panic!("expected payload delivery without options");
+                };
+                assert_eq!(data, user_data);
+                assert!(options.is_empty());
+                assert!(option_bearing);
+                assert!(reports.is_empty());
+                assert_eq!(ocs_reports.len(), 1);
                 return;
             }
             ExpectedDisposition::ZeroPayload => {
@@ -109,6 +115,7 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
             options,
             option_bearing: _,
             reports,
+            ocs_reports,
         } => {
             assert_eq!(data, user_data);
             assert!(
@@ -116,6 +123,7 @@ pub fn check_pipeline_invariants(buf: &[u8]) {
                     .iter()
                     .all(|report| !matches!(report.kind, OptionKind::Frag | OptionKind::Nop | OptionKind::Eol))
             );
+            assert_eq!(ocs_reports.len(), 1);
             for option in options {
                 assert!(matches!(
                     option.kind,
@@ -180,7 +188,6 @@ fn classify_trusted_options(
         FragmentOptionLimit::Full => (options_bytes, &[][..]),
         FragmentOptionLimit::End(end) => (&options_bytes[..end], &full_options_bytes[end..]),
         FragmentOptionLimit::MalformedFrag => return ExpectedDisposition::Dropped,
-        FragmentOptionLimit::UnsupportedUnsafeBeforeFrag => return ExpectedDisposition::Dropped,
     };
     let mut iter = OptionsIter::new(options_bytes);
     let mut seen = [false; 256];
@@ -199,7 +206,11 @@ fn classify_trusted_options(
             OptionKind::Eol | OptionKind::Nop => {}
             OptionKind::Frag => {
                 if is_sub_minimum_known_option(option) {
-                    return ExpectedDisposition::DeliverWithoutOptions;
+                    return if valid_frag_seen.is_some() && user_data_empty {
+                        ExpectedDisposition::Dropped
+                    } else {
+                        ExpectedDisposition::DeliverWithoutOptions
+                    };
                 }
                 let seen_frag = &mut seen[usize::from(raw_kind)];
                 if *seen_frag {
@@ -219,7 +230,11 @@ fn classify_trusted_options(
             OptionKind::Apc if fragment_option_context => {}
             OptionKind::Apc | OptionKind::Mds | OptionKind::Mrds | OptionKind::Req | OptionKind::Res => {
                 if is_sub_minimum_known_option(option) {
-                    return ExpectedDisposition::DeliverWithoutOptions;
+                    return if valid_frag_seen.is_some() && user_data_empty {
+                        ExpectedDisposition::Dropped
+                    } else {
+                        ExpectedDisposition::DeliverWithoutOptions
+                    };
                 }
                 let slot = &mut seen[usize::from(raw_kind)];
                 if !*slot {
@@ -228,7 +243,11 @@ fn classify_trusted_options(
             }
             OptionKind::Other(_) if option.kind.is_safe() => {
                 if is_sub_minimum_known_option(option) {
-                    return ExpectedDisposition::DeliverWithoutOptions;
+                    return if valid_frag_seen.is_some() && user_data_empty {
+                        ExpectedDisposition::Dropped
+                    } else {
+                        ExpectedDisposition::DeliverWithoutOptions
+                    };
                 }
             }
             OptionKind::Other(_) => {
@@ -282,7 +301,6 @@ enum FragmentOptionLimit {
     Full,
     End(usize),
     MalformedFrag,
-    UnsupportedUnsafeBeforeFrag,
 }
 
 fn fragment_option_limit(
@@ -295,7 +313,6 @@ fn fragment_option_limit(
     }
 
     let mut iter = OptionsIter::new(options_bytes);
-    let mut unsupported_unsafe_before_frag = false;
     for item in iter.by_ref() {
         let Ok(option) = item else {
             return FragmentOptionLimit::Full;
@@ -312,13 +329,10 @@ fn fragment_option_limit(
                 if end > options_bytes.len() || end < option_end_offset(options_bytes, option) {
                     return FragmentOptionLimit::MalformedFrag;
                 }
-                if unsupported_unsafe_before_frag {
-                    return FragmentOptionLimit::UnsupportedUnsafeBeforeFrag;
-                }
                 return FragmentOptionLimit::End(end);
             }
             OptionKind::Other(_) if option.kind.is_unsafe() => {
-                unsupported_unsafe_before_frag = true;
+                return FragmentOptionLimit::Full;
             }
             OptionKind::Eol => return FragmentOptionLimit::Full,
             _ => {}

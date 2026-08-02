@@ -13,6 +13,10 @@ The contribution is twofold and equally weighted:
 2. an empirical study of how far the surplus area survives real network paths and middleboxes
    (research questions FF1 and FF2 in the thesis).
 
+The current Step 17 harness is controlled and local: namespace/veth, routed, Linux NAT, and a
+filter negative control. It does not yet measure real external paths or surplus-specific
+middleboxes, and there is no implemented tunnel lane; do not describe FF2 as complete.
+
 The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
 git commit per step on `main`. The authoritative plan is `docs/plan/ROADMAP.md`,
 with a per-step file under `docs/plan/steps/`.
@@ -22,9 +26,11 @@ with a per-step file under `docs/plan/steps/`.
 The library and binaries **compile** on any platform, but the raw-socket paths only **run** on Linux.
 
 **`scripts/pre-pr.sh` is mandatory before opening or updating any PR.** Its lanes, fail-fast in
-order: `cargo fmt --check`, host clippy (`-D warnings`), host `cargo test` with `PROPTEST_CASES`
-(default 1024), `scripts/lean-gate.sh` (Lean spec build + theorem axiom audit),
-`scripts/vm-ubuntu-server.sh verify` (achim cross build + test + fmt + clippy),
+order: `cargo fmt --check`, host clippy (`-D warnings`), `cargo doc --no-deps`, host `cargo test`
+with `PROPTEST_CASES` (default 1024; includes the `wire_probe` example golden test), the
+eval-checker Python unit tests (`tests/test_eval_check.py`), `scripts/lean-gate.sh` (Lean spec
+build + theorem axiom audit), `scripts/vm-ubuntu-server.sh verify` (achim cross build + test +
+fmt + clippy), `scripts/vm-ubuntu-server.sh ignored` (root-gated integration tests on achim),
 `scripts/vm-ubuntu-server.sh wire` (root-gated tcpdump wire verification on achim,
 `scripts/wire-check.sh`), and a time-boxed
 libFuzzer smoke (`PRE_PR_FUZZ_SECONDS`, default 60s per target) on the macOS host. One-time
@@ -88,26 +94,52 @@ Design rules:
 
 ## Key RFC 9868 facts
 
+- The surplus area exists exactly when
+  `UDP Length < IPv4 Total Length - IPv4 IHL*4`; comparing UDP Length directly with IPv4 Total
+  Length is dimensionally wrong.
 - The **surplus area** can begin at any byte offset; its leading **OCS** is aligned to the first
   2-byte boundary of the area relative to the IP datagram start. If the natural start is odd, a
-  single `0x00` pad byte precedes the OCS, and that pad must be zero.
+  single `0x00` pad byte precedes the OCS, and that pad must be zero. The pad is separately
+  validated; the checksum word stream starts at the aligned OCS, while the 16-bit surplus-length
+  addend includes the pad.
 - **Option framing:** `Kind(1) [+ Length(1) + Value]`. EOL (0) and NOP (1) are single-byte (no
-  Length). `Length == 255` selects the extended 2-byte length form.
+  Length). `Length == 255` selects the extended 2-byte length form. Senders use the default form for
+  total lengths <=254; rejecting bounded extended encodings of those lengths is this crate's local
+  strict receive policy, not an additional RFC receiver MUST.
 - **Must-support kinds:** 0 EOL, 1 NOP, 2 APC (len 6, CRC32C of user data), 3 FRAG (len 10
   non-terminal / 12 terminal), 4 MDS (len 4), 5 MRDS (len 5), 6 REQ (len 6), 7 RES (len 6).
   SAFE = 0..=191, UNSAFE = 192..=255.
-- **OCS** uses the RFC 1071 sum over the whole surplus area (with the OCS field treated as zero) plus
-  the 16-bit surplus length; it must be the first content in the surplus area; the receiver checks
-  that the sum is the one's-complement zero (folded sum `0xFFFF`). A computed `0x0000` is sent as
+- **OCS** uses the RFC 1071 sum from the aligned OCS through the end of the surplus area (with the
+  OCS field treated as zero) plus the 16-bit full surplus length; the receiver checks that the sum
+  is the one's-complement zero (folded sum `0xFFFF`). A computed `0x0000` is sent as
   `0xFFFF`; a zero OCS is legal only when the UDP checksum is also zero. The UDP checksum covers only
-  up to UDP Length (not the surplus area).
-- **FRAG** is used only with empty UDP user data (UDP Length == 8). Reassembly is keyed by
-  (src IP, src port, dst IP, dst port, Identification); overlap aborts; timeout <= 2 min; per-pair
-  limits; default MRDS 2926 (IPv4).
+  up to UDP Length (not the surplus area). `OcsReport`/`OcsStatus` expose the fixed-field result
+  separately from TLV `OptionReport`s, and `ReceivePolicy::require_ocs` can require it.
+- **FRAG send order:** fully prepare the original options representation first, with the original
+  OCS zero for the fragmenting path; the unsent original UDP checksum SHOULD be zero. Split only
+  then, and compute each fragment's UDP checksum and OCS separately. Send-side Identification must
+  remain unique for the reassembly timeout; low-level fragmentation therefore requires an explicit
+  value, while `Peer` owns a per-peer generator.
+- **FRAG receive:** fragments normally use empty UDP user data (UDP Length == 8). A correctly framed
+  FRAG with non-empty user data causes all options to be ignored and the original data to be
+  delivered, regardless of whether Frag.Start would be usable as a fragment boundary. Reassembly is
+  keyed by (src IP, dst IP, src port, dst port, Identification); overlap aborts; expiry occurs at
+  `elapsed >= timeout`, whose default/clamped maximum is 120 seconds; cache ownership is one per
+  address/port pair and GC is caller-driven; default IPv4 MRDS is 2926.
 - **Receive order:** verify UDP checksum, locate/validate the surplus area, validate the OCS, parse
   the options, then reassemble (FRAG) or deliver. A malformed surplus area discards the options but
-  still delivers the payload; unknown SAFE options are ignored; unknown UNSAFE options cause the
-  reassembled data to be dropped (a zero-length datagram is still delivered to the user).
+  still delivers the payload; unknown SAFE options are ignored. At the first unsupported UNSAFE,
+  stop immediately and do not scan later bytes for FRAG. Without a previously trusted FRAG, drop the
+  user data but still deliver a zero-length datagram; after a valid empty-data FRAG has established
+  fragment context, discard the fragment/reassembly set with no user frame.
+- **Malformed option overrun:** Verified Technical Erratum 8834 replaces the obsolete Section 14
+  ignore-only sentence with the Section 10 malformed-area rule: discard all options, while ordinary
+  UDP payload remains deliverable. Held Editorial Erratum 8708 identifies Figure 11 as terminal
+  FRAG; terminal Length 12 / non-terminal Length 10 is already used here.
+- **REQ/RES:** the library provides pass-through wire handling and never auto-responds. Any direct
+  RES sender MUST use a token it previously received in REQ; the library does not attest provenance.
+- **Invalid UDP Length:** both `UDP Length < 8` at the raw receive boundary and the upper-bound
+  violation in the pure pipeline are sampled-logged before the datagram is discarded.
 
 ## Coding conventions
 
@@ -121,6 +153,10 @@ Design rules:
   (CLIs), `log` (diagnostics, including the >7-NOP DoS log). Dev/tooling only: `proptest`
   (property tests), `libfuzzer-sys` via `cargo-fuzz` (confined to the standalone `fuzz/` crate,
   nightly). The hand-roll rule above applies to production code, not to test harnesses.
+- The parser deliberately has no fixed non-padding-TLV count cap: its scan is zero-copy and bounded
+  by IPv4 length, while a global count cap could reject valid extensible sets (documented NFR-04
+  opt-out). Runs above seven NOPs are detected and sampled-logged, but parsing remains linear through
+  the datagram; NFR-05 is therefore partial rather than complete.
 - Every step that adds or changes a parsing surface (TLV parser, OCS, receive pipeline, FRAG)
   ships, in the same step commit, a new or extended fuzz target under `fuzz/fuzz_targets/` plus a
   property-test module asserting the joint invariants (see `tests/common/mod.rs` for the pattern:

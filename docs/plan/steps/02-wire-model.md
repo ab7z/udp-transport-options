@@ -2,8 +2,11 @@
 
 Status: done
 
-Addendum 2026-06: the IPv6 parts built here were later removed in a deliberate scope cut (IPv6
-dropped from project scope).
+> Historical-snapshot note (updated 2026-07-13): the IPv6 parts built here were later removed in a
+> deliberate scope cut. In the original phrase "even start offset", only the OCS position is even:
+> the natural surplus start itself may be odd, in which case a separately validated zero pad is the
+> first surplus byte and OCS follows at the next even datagram offset. The pad is included in the full
+> surplus-length addend but not prepended to the OCS-aligned checksum word stream.
 
 ## Goal
 

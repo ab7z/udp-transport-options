@@ -8,7 +8,7 @@ declared in `src/model.rs` and the types in `src/options/` and `src/wire/`.
 Conventions:
 
 - All multi-byte integers are big-endian (network byte order) on the wire, as required by RFC 9868
-  Sec. 8. The skeleton structs store them in host byte order; conversion happens at the codec
+  Sec. 8. The Rust structs store them in host byte order; conversion happens at the codec
   boundary.
 - "Offset" is counted from the first byte of the surplus area unless stated otherwise.
 - Byte diagrams are drawn most-significant byte first, one cell per byte.
@@ -67,8 +67,9 @@ Section 3 passes; otherwise the entire surplus area is ignored as though no opti
 When the surplus area would otherwise begin at an odd offset relative to the start of the IP
 datagram, a single pad byte is inserted before the OCS so that the OCS itself starts on an even
 boundary. This
-pad byte MUST be zero and is included in the OCS computation (RFC 9868 Sec. 8). `SurplusLayout`
-records this case in its `needs_pad` field.
+pad byte MUST be zero and is validated separately (RFC 9868 Sec. 8). The RFC 1071 word stream starts
+at the aligned OCS rather than one byte earlier; the pad is nevertheless included in the full surplus
+length addend used by the OCS (Section 3). `SurplusLayout` records this case in `needs_pad`.
 
 ```
 Even natural start:                 Odd natural start:
@@ -83,14 +84,16 @@ options described in Section 4.
 
 ## 3. The Option Checksum (OCS)
 
-OCS is the standard Internet checksum: the 16-bit one's-complement sum (RFC 1071) computed over the
-entire surplus area with the OCS field itself treated as zero, to which the length of the surplus
-area is added as a 16-bit one's-complement addend; the result is stored as the one's-complement of
-that sum, exactly as for the UDP checksum (RFC 9868 Sec. 9). The surplus-length addend plays the
-role of a pseudo-header, binding the OCS to the surplus area's length (RFC 9868 Sec. 8).
+OCS is the standard Internet checksum: the 16-bit one's-complement sum (RFC 1071) computed from the
+aligned OCS field through the end of the surplus area, with the OCS field itself treated as zero.
+The full surplus length -- including any separately validated pre-OCS pad -- is added as a 16-bit
+one's-complement value; the result is stored as the one's-complement of that sum (RFC 9868 Sec. 8,
+Sec. 9). The length addend binds the checksum to the complete surplus extent without shifting the
+absolute two-byte word grouping established by OCS alignment.
 
 ```
-sum = ones_complement_sum_16(surplus_area, with OCS field taken as zero)
+ocs_body = surplus_area[pre_ocs_pad_length..]
+sum = ones_complement_sum_16(ocs_body, with OCS field taken as zero)
 sum = ones_complement_add_16(sum, surplus_len as u16)
 OCS = !sum
 ```
@@ -100,8 +103,8 @@ This is the contract of `options::ocs`, which is built on the RFC 1071 primitive
 Computation is a two-pass back-patch over the surplus area: the OCS field is reserved as zero, the
 rest is serialized, then the field is patched in. A computed value of `0x0000` is transmitted as its
 one's-complement equivalent `0xFFFF`, exactly as for the UDP checksum, so a used OCS is never zero.
-Validation re-runs the one's-complement sum over the whole surplus area (including the stored OCS
-and the 16-bit surplus length); on a valid datagram the result is the one's-complement zero (a
+Validation re-runs the one's-complement sum over the OCS-aligned body (including the stored OCS)
+and the full 16-bit surplus length; on a valid datagram the result is the one's-complement zero (a
 folded sum of `0xFFFF`; equivalently, its complement is `0`).
 
 The OCS is optional in exactly one case: when the UDP checksum is zero, the OCS MAY be unused, which
@@ -112,8 +115,15 @@ the RFC 9868 Sec. 14 receive disposition (legacy emulation: deliver the payload,
 options); see the disposition table in `docs/requirements.md` (FR-36).
 
 If the OCS is in use and does not validate, the entire surplus area MUST be ignored and the datagram
-processed as though no options were present (RFC 9868 Sec. 9). The pad byte (Section 2), when
-present, is part of the surplus area and so is covered by this sum.
+processed as though no options were present (RFC 9868 Sec. 9). The pad byte remains part of the
+surplus area and the length addend, but is not prepended to the OCS-aligned checksum byte stream.
+
+The receive API exposes this fixed-field option separately from TLV `OptionReport`s as
+`OcsReport { status: OcsStatus, source }`. `OcsStatus` distinguishes `Absent`, `Valid`, `Unused`,
+`Failed`, and `InvalidZero`; fragment sets receive their own coalesced report, which degrades to
+`Unobserved` when fragments entered the shared reassembly cache through its public insertion
+methods (no OCS observation; never satisfies a required-OCS policy). This avoids inventing a Kind
+byte for OCS while satisfying the Sec. 15 status requirement.
 
 ## 4. TLV Option Framing
 
@@ -154,8 +164,17 @@ A `Length` octet equal to 255 (`model::kind::EXTENDED_LENGTH_MARKER`) is a senti
 Extended Length encoding: the two octets that follow are a 16-bit Extended Length giving the total
 option length, and the literal value 255 is not the length (RFC 9868 Sec. 10).
 Because the length is total option length, the default form can carry at most 252 value bytes
-(`252 + Kind + Length = 254`). A value of 253 bytes is the first extended case and encodes an
-Extended Length of 257 (`253 + Kind + marker + Extended Length`).
+(`252 + Kind + Length = 254`). For this canonical serializer, a value of 253 bytes is the first case
+that cannot fit the default form and encodes an Extended Length of 257
+(`253 + Kind + marker + Extended Length`). A receiver can still encounter structurally bounded
+extended totals 255 or 256; the parser accepts them even though the corresponding values could have
+used a shorter default encoding.
+
+The transmitter MUST use the default form for a total option length of at most 254 and the extended
+form above 254. This crate also rejects bounded received extended encodings with total length
+`4..=254`. That receive disposition is an explicit local strictness policy; RFC 9868 specifies the
+wire form but does not separately prescribe the receiver outcome for this non-canonical, otherwise
+bounded encoding. Extended lengths below the four-byte extended header are inherently malformed.
 
 ```
 +--------+--------+--------+--------+----------------------+
@@ -179,8 +198,10 @@ The `Kind` octet is partitioned into two ranges (RFC 9868 Sec. 10), with the bou
   it does not change the meaning of the UDP user data.
 - UNSAFE, `Kind` 192..=255: an option that MUST NOT be silently skipped. An unrecognized UNSAFE
   option forces the receiver to terminate option processing, drop all options, and drop the
-  (reassembled) UDP user data; a zero-length datagram is still delivered to the user (RFC 9868
-  Sec. 10, Sec. 12, Sec. 14).
+  (reassembled) UDP user data. On the ordinary or post-reassembly path, a zero-length datagram is
+  still delivered to the user (RFC 9868 Sec. 10, Sec. 12, Sec. 14). If a valid empty-payload FRAG was
+  already established before the failure, the fragment/reassembly set is discarded with no user
+  frame. Processing stops at the first unsupported UNSAFE; later bytes are never scanned for FRAG.
 
 Within the SAFE range, `Kind` 0..=7 are the must-support options every conforming implementation is
 required to support (RFC 9868 Sec. 10):
@@ -200,6 +221,12 @@ Any other codepoint, assigned or not, is carried verbatim as `OptionKind::Other(
 but unrecognized option is preserved as a `RawOption` so it can be inspected; the Step 5 raw builder
 re-emits only unassigned SAFE `Other` Kinds `10..=126`. SAFE `Other` options may be skipped, UNSAFE
 `Other` options force the user-data drop described above (RFC 9868 Sec. 10).
+
+An option that claims bytes beyond the surplus option area is not ignored locally. Per Sec. 10 and
+[RFC Editor Erratum 8834](https://www.rfc-editor.org/errata/eid8834), the whole options area is
+malformed and all TLV options/TLV reports are discarded; the ordinary UDP payload remains
+deliverable. The separately modeled OCS gate can still report the checksum disposition that was
+established before TLV parsing.
 
 ## 6. Additional Payload Checksum (APC)
 
@@ -262,7 +289,7 @@ Fields map to `options::typed::Frag { frag_start, identification, frag_offset, r
 is `Option<u16>`: `None` on a non-terminal fragment, `Some(_)` on the terminal fragment. All
 fragments of one datagram share the same 32-bit `identification`; on the receive side a reassembler
 groups them by `frag::reassembly::FragKey { src, dst, src_port, dst_port, identification }` (the UDP
-5-tuple plus the FRAG Identification). The send side (`frag::split`) carries each fragment with empty
+4-tuple plus the FRAG Identification). The send side (`frag::split`) carries each fragment with empty
 UDP user data (UDP Length 8) and places the fragment data in the surplus area after all of the
 fragment's options (the data follows the remainder of the UDP options, as located by `Frag. Start`,
 and runs to the end of the IP datagram). The receive pipeline uses the same boundary: for a valid
@@ -272,6 +299,20 @@ validated per-fragment MDS/MRDS/REQ/RES values, suppresses exact duplicate fragm
 the fragment data and per-fragment options match, aborts conflicting overlap or fragment-local
 UNSAFE/malformed failures, and re-feeds the reconstructed datagram once when terminal coverage is
 gap-free.
+
+A sender first fully prepares the original datagram's options, with the original OCS represented as
+zero for the fragmenting path, and only then passes that representation to `frag::split`. The
+original UDP checksum SHOULD be zero because it is never sent; when each fragment uses non-zero OCS,
+the original OCS SHOULD likewise be zero. Each emitted fragment then receives its own per-fragment
+options, UDP checksum, and OCS before transmission (RFC 9868 Sec. 11.4).
+
+On receive, a correctly framed FRAG combined with non-empty UDP user data is never used as a
+reassembly boundary: all options are ignored and the original user data is delivered. Empty-payload
+fragments are reassembled only after a trusted FRAG. Cache resource limits are per socket pair:
+`Peer` owns a cache per pair, and low-level callers must not share one `ReassemblyCache` across
+pairs because its pending-partial cap applies to the entire cache. The default timeout is clamped to
+120 seconds and expires when `elapsed >= timeout`; reclamation remains caller-driven through
+insertion/`gc`.
 
 ## 8. Maximum Datagram Size (MDS)
 
@@ -316,6 +357,11 @@ lightweight echo handshake: the sender emits a REQ carrying an opaque 4-byte tok
 echoes the same token back in a RES (RFC 9868 Sec. 11.7). The typed values are
 `options::typed::Req { token }` and `options::typed::Res { token }`, each a `[u8; 4]`.
 
+The implementation is a pass-through library and never generates RES automatically. A caller that
+constructs a RES MUST use a token it previously received in REQ; direct `Res`/`--res` construction
+does not make the library a provenance authority. Using the most recently received REQ token is the
+RFC's upper-layer SHOULD (RFC 9868 Sec. 11.7).
+
 ```
 REQ (Kind 6) / RES (Kind 7):
 +--------+--------+--------+--------+--------+--------+
@@ -336,9 +382,10 @@ Putting the pieces together, the surplus area is laid out as:
 - `surplus_area = ip_transport_payload_length - udp_length` (RFC 9868 Sec. 7); options are present
   only when this is greater than zero.
 - The pad byte is present iff the surplus area's natural start offset relative to the IP datagram is
-  odd; it MUST be zero and is covered by the OCS (RFC 9868 Sec. 8).
-- The OCS is computed over the whole surplus area (pad byte included) with the OCS field taken as
-  zero, plus `surplus_len` added as a 16-bit one's-complement addend, stored as the one's-complement
+  odd; it MUST be zero and is validated separately (RFC 9868 Sec. 8).
+- The OCS checksum byte stream begins at the aligned OCS field, not at an earlier pad. It is computed
+  through the end of the area with the OCS field taken as zero, plus the full `surplus_len` (including
+  the pad) as a 16-bit one's-complement addend, stored as the one's-complement
   of the sum (a computed `0x0000` is sent as `0xFFFF`); a zero OCS is legal only when the UDP
   checksum is also zero (RFC 9868 Sec. 9).
 - Each TLV option's `Length` counts its own `Kind` and `Length` octets; a `Length` of 255 selects

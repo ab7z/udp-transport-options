@@ -29,6 +29,10 @@ PORT_BASE = 0x9A68
 CANARY_PORT = 0x9A67
 
 UDP_HEADER_LEN = 8
+SPLIT_FRAG_ID = 0xA1B2C3D4
+SPLIT_PAYLOAD_LEN = 90
+SPLIT_FRAGMENT_SURPLUS_LEN = 36
+SPLIT_FRAGMENT_COUNT = 5
 
 # --- Independent primitives ------------------------------------------------------------------
 
@@ -207,9 +211,9 @@ def walk_tlvs(region):
             if offset + 4 > len(region):
                 raise ValueError(f"extended length truncated at offset {offset}")
             length = (region[offset + 2] << 8) | region[offset + 3]
-            # Minimal encoding: the default form carries totals up to 254 (value <= 252), so the
-            # first canonical extended case is a 253-byte value = total 257 (Sec. 4.1).
-            if length < 257:
+            # The default form carries total lengths through 254; every total length from 255
+            # onward therefore uses the extended form (RFC 9868 Sec. 10).
+            if length < 255:
                 raise ValueError(f"non-minimal extended length {length} at offset {offset}")
             value = region[offset + 4 : offset + length]
         else:
@@ -231,7 +235,7 @@ def canonical_rank(kind):
     return {3: 0, 2: 1, 4: 2, 5: 3, 6: 4, 7: 5}.get(kind, 1000 + kind)
 
 
-# --- Scenario table (mirror of examples/wire_probe.rs) ----------------------------------------
+# --- Single-datagram scenario table (mirror of examples/wire_probe.rs) -------------------------
 
 REQ_TLV = bytes.fromhex("0606deadbeef")  # REQ, Sec. 10
 # The pad-odd scenario uses its own token: the deadbeef REQ body folds to 0xA3A3, a byte
@@ -321,6 +325,9 @@ SCENARIOS = [
         "frag_data_len": 64,
     },
 ]
+
+# The production-split scenario follows these ports and carries five datagrams on one shared port;
+# check_production_split handles it separately because a single-packet golden cannot prove reassembly.
 
 
 # --- Checks ----------------------------------------------------------------------------------
@@ -434,6 +441,145 @@ def check_tlv_grammar(spec, region, options, end, err):
         err(f"non-zero bytes after EOL: {trailer.hex()}")
 
 
+def decode_production_fragment(pkt, err):
+    """Independently decodes one fragment emitted by Rust's production splitter."""
+    if pkt.src != SRC_IP or pkt.dst != SRC_IP:
+        err(f"addresses {pkt.src} -> {pkt.dst} are not loopback")
+    if pkt.src_port != SRC_PORT:
+        err(f"source port {pkt.src_port} != {SRC_PORT}")
+    if pkt.ihl != 20:
+        err(f"IHL {pkt.ihl} != 20")
+    if pkt.udp_len != UDP_HEADER_LEN or pkt.user_data:
+        err(f"FRAG must carry UDP Length 8 and empty user data, got {pkt.udp_len} / {pkt.user_data.hex()}")
+    if pkt.udp_checksum == 0 or not pkt.udp_checksum_folds():
+        err("UDP checksum is zero or invalid")
+    if pkt.needs_pad:
+        err("UDP Length 8 with a 20-byte IPv4 header must not need a surplus pad")
+        return None
+    if len(pkt.surplus) > SPLIT_FRAGMENT_SURPLUS_LEN:
+        err(f"surplus length {len(pkt.surplus)} exceeds split budget {SPLIT_FRAGMENT_SURPLUS_LEN}")
+    if len(pkt.surplus) < 12:
+        err("surplus is too short for OCS plus non-terminal FRAG")
+        return None
+
+    stored_ocs = (pkt.surplus[0] << 8) | pkt.surplus[1]
+    zeroed = b"\x00\x00" + pkt.surplus[2:]
+    derived = ~fold16(zeroed, len(pkt.surplus)) & 0xFFFF
+    expected_ocs = derived if derived != 0 else 0xFFFF
+    if stored_ocs != expected_ocs:
+        err(f"OCS 0x{stored_ocs:04x} != re-derived 0x{expected_ocs:04x}")
+
+    region = pkt.surplus[2:]
+    if region[0] != 3:
+        err(f"first option kind {region[0]} is not FRAG")
+        return None
+    option_len = region[1]
+    if option_len not in (10, 12) or option_len > len(region):
+        err(f"FRAG length {option_len} is not a complete 10/12-byte option")
+        return None
+    value = region[2:option_len]
+    frag_start = int.from_bytes(value[0:2], "big")
+    identification = int.from_bytes(value[2:6], "big")
+    frag_offset = int.from_bytes(value[6:8], "big")
+    rdos = int.from_bytes(value[8:10], "big") if option_len == 12 else None
+    data_start = frag_start - UDP_HEADER_LEN - 2  # region starts after the two-byte OCS
+    if data_start != option_len:
+        err(f"Frag.Start {frag_start} maps to region offset {data_start}, expected {option_len}")
+        return None
+
+    return {
+        "identification": identification,
+        "offset": frag_offset,
+        "rdos": rdos,
+        "terminal": option_len == 12,
+        "data": region[data_start:],
+        "frag_start": frag_start,
+        "surplus_len": len(pkt.surplus),
+    }
+
+
+def check_production_split(copies, err):
+    """Checks fragment wire invariants and independently reconstructs payload plus options."""
+    unique = {}
+    for pkt in copies:
+        unique.setdefault(pkt.raw, pkt)
+    if len(unique) != SPLIT_FRAGMENT_COUNT:
+        err(f"captured {len(unique)} unique fragments, expected {SPLIT_FRAGMENT_COUNT}")
+
+    fragments = []
+    for pkt in unique.values():
+        fragment = decode_production_fragment(pkt, err)
+        if fragment is not None:
+            fragments.append(fragment)
+    if len(fragments) != SPLIT_FRAGMENT_COUNT:
+        return
+    if any(fragment["identification"] != SPLIT_FRAG_ID for fragment in fragments):
+        err("fragments do not all carry the production-split Identification 0xa1b2c3d4")
+
+    fragments.sort(key=lambda fragment: fragment["offset"])
+    expected_offsets = [8, 32, 56, 80, 92]
+    expected_surplus_lengths = [36, 36, 36, 24, 36]
+    expected_lengths = [24, 24, 24, 12, 22]
+    if [fragment["offset"] for fragment in fragments] != expected_offsets:
+        err(f"fragment offsets {[fragment['offset'] for fragment in fragments]} != {expected_offsets}")
+    if [len(fragment["data"]) for fragment in fragments] != expected_lengths:
+        err(f"fragment data lengths {[len(fragment['data']) for fragment in fragments]} != {expected_lengths}")
+    if [fragment["surplus_len"] for fragment in fragments] != expected_surplus_lengths:
+        err(
+            f"fragment surplus lengths {[fragment['surplus_len'] for fragment in fragments]} "
+            f"!= {expected_surplus_lengths}"
+        )
+    if [fragment["frag_start"] for fragment in fragments] != [20, 20, 20, 20, 22]:
+        err(f"unexpected Frag.Start sequence {[fragment['frag_start'] for fragment in fragments]}")
+
+    terminal = [fragment for fragment in fragments if fragment["terminal"]]
+    expected_rdos = UDP_HEADER_LEN + SPLIT_PAYLOAD_LEN
+    if len(terminal) != 1 or terminal[0] is not fragments[-1] or terminal[0]["rdos"] != expected_rdos:
+        err(
+            f"terminal FRAG/RDOS mismatch: terminals {len(terminal)}, "
+            f"RDOS {[fragment['rdos'] for fragment in terminal]}, expected {expected_rdos}"
+        )
+        return
+    if any(fragment["rdos"] is not None for fragment in fragments[:-1]):
+        err("a non-terminal fragment carries RDOS")
+
+    cursor = UDP_HEADER_LEN
+    reassembled_tail = bytearray()
+    for fragment in fragments:
+        if fragment["offset"] != cursor:
+            err(f"gap or overlap at offset {cursor}: next fragment starts at {fragment['offset']}")
+        reassembled_tail.extend(fragment["data"])
+        cursor = fragment["offset"] + len(fragment["data"])
+
+    payload_len = terminal[0]["rdos"] - UDP_HEADER_LEN
+    payload = bytes(reassembled_tail[:payload_len])
+    options_body = bytes(reassembled_tail[payload_len:])
+    if payload != pattern(SPLIT_PAYLOAD_LEN):
+        err("independently reassembled payload does not match the production-split input")
+    expected_options = (
+        b"\x00\x00"
+        + bytes.fromhex("0206")
+        + crc32c(payload).to_bytes(4, "big")
+        + RES_TLV
+        + EOL_FILL
+    )
+    if options_body != expected_options:
+        err(f"reassembled options {options_body.hex()} != expected {expected_options.hex()}")
+        return
+
+    # The reconstructed virtual UDP header has checksum zero, so the zero per-datagram OCS is the
+    # RFC 9868 "unused" form. Still parse its TLVs independently and prove the APC over the payload.
+    try:
+        options, end = walk_tlvs(options_body[2:])
+    except ValueError as exc:
+        err(f"reassembled TLV walk failed: {exc}")
+        return
+    if options != [(2, crc32c(payload).to_bytes(4, "big")), (7, bytes.fromhex("feedface"))]:
+        err(f"reassembled parsed options are unexpected: {[(kind, value.hex()) for kind, value in options]}")
+    if any(options_body[2 + end :]):
+        err(f"non-zero reassembled bytes after EOL: {options_body[2 + end :].hex()}")
+
+
 # --- tshark cross-check ------------------------------------------------------------------------
 
 
@@ -495,7 +641,9 @@ def main(argv):
     groups = {}
     for pkt in packets:
         groups.setdefault(pkt.dst_port, []).append(pkt)
-    expected_ports = {PORT_BASE + index for index in range(len(SCENARIOS))}
+    scenario_count = len(SCENARIOS) + 1
+    split_port = PORT_BASE + len(SCENARIOS)
+    expected_ports = {PORT_BASE + index for index in range(scenario_count)}
     for port in sorted(set(groups) - expected_ports):
         failures.append(f"unexpected traffic to port {port}")
 
@@ -516,12 +664,27 @@ def main(argv):
             passed += 1
             print(f"PASS {spec['name']:<18} port {port}  {len(copies[0].surplus):>3}-byte surplus")
 
+    split_copies = groups.get(split_port)
+    if not split_copies:
+        failures.append(f"production-split: no packets captured on port {split_port}")
+    else:
+        errors = []
+        check_production_split(split_copies, errors.append)
+        if errors:
+            failures.extend(f"production-split: {message}" for message in errors)
+        else:
+            passed += 1
+            print(
+                f"PASS {'production-split':<18} port {split_port}  "
+                f"{SPLIT_FRAGMENT_COUNT} independently reassembled fragments"
+            )
+
     if failures:
         for failure in failures:
             print(f"FAIL {failure}", file=sys.stderr)
-        print(f"wire-check: FAIL ({passed}/{len(SCENARIOS)} scenarios, {len(failures)} failures)", file=sys.stderr)
+        print(f"wire-check: FAIL ({passed}/{scenario_count} scenarios, {len(failures)} failures)", file=sys.stderr)
         return 1
-    print(f"wire-check: PASS ({passed}/{len(SCENARIOS)} scenarios)")
+    print(f"wire-check: PASS ({passed}/{scenario_count} scenarios)")
     return 0
 
 
