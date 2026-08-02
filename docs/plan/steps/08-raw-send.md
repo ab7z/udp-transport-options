@@ -2,6 +2,13 @@
 
 Status: done (Linux, requires CAP_NET_RAW)
 
+> Historical-snapshot correction (2026-07-13): the dimensionally correct surplus invariant is
+> `UDP Length < IPv4 Total Length - IPv4 IHL*4`, not `UDP Length < IP Total Length`. The current raw
+> receiver parses enough IPv4/UDP header state for userspace demultiplexing and sampled-logs
+> `UDP Length < 8` before rejecting it; upper-bound validation remains in the pure pipeline. Current
+> raw I/O failures use `SocketError`, not the early `RecvError::Io` sketch below. Step 8's loopback
+> observation is not by itself a packet-capture proof that no ICMP was emitted.
+
 ## Goal
 
 Send and receive datagrams with a surplus area over Linux raw sockets, proving the kernel-facing

@@ -9,7 +9,7 @@ use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::error::{ReceivePolicyError, RecvError, SendError};
+use crate::error::{HeaderError, ReceivePolicyError, RecvError, SendError, SocketError};
 use crate::frag::reassembly::ReassemblyCache;
 use crate::frag::split::{IdentificationGenerator, PeerFragmentLimits, SplitConfig, split_datagram};
 use crate::model::{kind, length};
@@ -18,14 +18,14 @@ use crate::options::kind::OptionKind;
 use crate::options::parse::OptionsIter;
 use crate::options::serialize::OptionsBuilder;
 use crate::options::typed::{Apc, TypedOption};
-use crate::recv::pipeline::{Delivery, process_datagram};
+use crate::recv::pipeline::{Delivery, process_datagram, warn_udp_length_below_min, warn_udp_length_exceeds_ip};
 use crate::socket::recv::RawReceiver;
 use crate::socket::send::{RawSender, assemble_datagram};
 use crate::wire::ip::IpRepr;
 use crate::wire::surplus::locate_surplus;
 use crate::wire::udp::UdpHeader;
 
-pub use crate::recv::pipeline::{OptionReport, OptionSource, OptionStatus};
+pub use crate::recv::pipeline::{OcsReport, OcsStatus, OptionReport, OptionSource, OptionStatus};
 
 const IPV4_HEADER_LEN: usize = 20;
 const UDP_HEADER_LEN: usize = length::UDP_HEADER as usize;
@@ -72,12 +72,19 @@ impl SendOptions {
     }
 
     /// Adds an owned raw option value.
+    ///
+    /// For RES, the caller must supply a token copied from a previously received REQ. The API
+    /// deliberately delegates this RFC 9868 provenance precondition instead of maintaining hidden
+    /// request state.
     pub fn push_raw(&mut self, option: RawOption) -> &mut Self {
         self.raw_options.push(option);
         self
     }
 
     /// Adds a typed option by converting it into its owned raw value.
+    ///
+    /// A typed [`crate::options::typed::Res`] has the same caller-enforced token provenance
+    /// precondition as [`Self::push_raw`].
     pub fn push_typed<T: TypedOption>(&mut self, option: T) -> &mut Self {
         self.raw_options.push(raw_from_typed(option));
         self
@@ -109,8 +116,13 @@ pub struct SendConfig {
     pub peer: PeerFragmentLimits,
     /// FRAG behavior for oversized sends.
     pub fragmentation: FragmentationMode,
-    /// FRAG Identification to use for this send.
-    pub identification: u32,
+    /// FRAG Identification to use when this configuration is passed directly to
+    /// [`build_outgoing_datagrams`].
+    ///
+    /// Low-level callers must provide `Some` when the send requires fragmentation. [`Peer`] treats
+    /// `Some` as the first value of its per-peer generator and `None` as a request for an
+    /// operating-system-random seed.
+    pub identification: Option<u32>,
 }
 
 impl Default for SendConfig {
@@ -119,7 +131,7 @@ impl Default for SendConfig {
             max_datagram_len: DEFAULT_MAX_DATAGRAM_LEN,
             peer: PeerFragmentLimits::default_ipv4(),
             fragmentation: FragmentationMode::Auto,
-            identification: 1,
+            identification: None,
         }
     }
 }
@@ -129,6 +141,7 @@ impl Default for SendConfig {
 pub struct ReceivePolicy {
     required_options: Vec<OptionKind>,
     drop_all_option_bearing: bool,
+    ocs_required: bool,
 }
 
 impl ReceivePolicy {
@@ -137,6 +150,7 @@ impl ReceivePolicy {
         Self {
             required_options: Vec::new(),
             drop_all_option_bearing: false,
+            ocs_required: false,
         }
     }
 
@@ -158,6 +172,17 @@ impl ReceivePolicy {
         self
     }
 
+    /// Requires a successful OCS confirmation before delivering a datagram.
+    ///
+    /// Both a validated non-zero OCS and an RFC-permitted unused zero OCS satisfy this policy. For
+    /// reassembled data, a successful fragment-set confirmation also satisfies it. A fragment set
+    /// whose OCS state was not observed by the pipeline (because fragments entered the shared
+    /// [`ReassemblyCache`] through its public insertion methods) never satisfies it.
+    pub const fn require_ocs(mut self, require: bool) -> Self {
+        self.ocs_required = require;
+        self
+    }
+
     /// Returns the required option Kinds.
     pub fn required_options(&self) -> &[OptionKind] {
         &self.required_options
@@ -166,6 +191,11 @@ impl ReceivePolicy {
     /// Returns whether all option-bearing datagrams are filtered out.
     pub const fn drops_all_option_bearing(&self) -> bool {
         self.drop_all_option_bearing
+    }
+
+    /// Returns whether a successful OCS confirmation is required.
+    pub const fn requires_ocs(&self) -> bool {
+        self.ocs_required
     }
 }
 
@@ -178,6 +208,8 @@ pub struct ReceivedDatagram {
     pub options: Vec<RawOption>,
     /// Processing status for visible options.
     pub reports: Vec<OptionReport>,
+    /// Separate OCS processing confirmations.
+    pub ocs_reports: Vec<OcsReport>,
 }
 
 /// Result of decoding one raw datagram through the API policy layer.
@@ -245,22 +277,26 @@ impl Peer {
         let sender = RawSender::new()?;
         let receiver = RawReceiver::bind(config.addrs.src_port, Some(config.addrs.dst_port), None)?;
         receiver.set_read_timeout(config.read_timeout)?;
+        let mut send = config.send;
+        let identifications = take_peer_identification_generator(&mut send)?;
         Ok(Self {
             sender,
             receiver,
             cache: ReassemblyCache::new(),
             addrs: config.addrs,
-            send: config.send,
+            send,
             receive: config.receive,
-            identifications: IdentificationGenerator::new(config.send.identification),
+            identifications,
         })
     }
 
     /// Sends one logical UDP datagram, fragmenting when configured and needed.
+    ///
+    /// If `options` contains RES, its token must have been copied from a REQ previously received
+    /// from this peer. The caller owns that protocol state.
     pub fn send(&mut self, payload: &[u8], options: SendOptions) -> Result<SendOutcome, SendError> {
-        let mut config = self.send;
-        config.identification = self.identifications.next_id()?;
-        let datagrams = build_outgoing_datagrams(self.addrs, payload, options, config)?;
+        let datagrams =
+            build_peer_outgoing_datagrams(self.addrs, payload, options, self.send, &mut self.identifications)?;
 
         let mut bytes = 0usize;
         for datagram in &datagrams {
@@ -278,6 +314,10 @@ impl Peer {
     }
 
     /// Receives and processes one matching raw datagram.
+    ///
+    /// Receive diagnostics are emitted through the `log` facade. Applications embedding `Peer`
+    /// must install a logger if those diagnostics are to be retained; the bundled receiver CLI
+    /// installs a warning-level stderr logger.
     pub fn recv(&mut self) -> Result<Option<ReceivedDatagram>, RecvError> {
         let Some(datagram) = self.receiver.recv()? else {
             return Ok(None);
@@ -300,6 +340,10 @@ impl Peer {
 }
 
 /// Builds one IPv4 datagram from explicit raw options.
+///
+/// If `raw_options` contains RES, its token must have been copied from a REQ received from the
+/// destination peer. This stateless low-level function delegates that provenance check to the
+/// caller.
 pub fn build_datagram(addrs: DatagramAddrs, payload: &[u8], raw_options: &[RawOption]) -> Result<Vec<u8>, SendError> {
     validate_low_level_options(payload, raw_options)?;
     let body = raw_options_body(raw_options)?;
@@ -307,6 +351,13 @@ pub fn build_datagram(addrs: DatagramAddrs, payload: &[u8], raw_options: &[RawOp
 }
 
 /// Builds all IPv4 datagrams needed for one logical high-level send.
+///
+/// If fragmentation is required, `config.identification` must be `Some`; this low-level helper
+/// returns [`SendError::FragmentIdentificationRequired`] instead of allocating a value on the
+/// caller's behalf.
+///
+/// Any RES token in `options` must have been copied from a REQ received from the destination peer;
+/// token provenance is an explicit caller precondition.
 pub fn build_outgoing_datagrams(
     addrs: DatagramAddrs,
     payload: &[u8],
@@ -332,13 +383,14 @@ pub fn build_outgoing_datagrams(
         });
     }
 
+    let identification = config.identification.ok_or(SendError::FragmentIdentificationRequired)?;
     let fragments = split_datagram(
         payload,
         &body,
         SplitConfig {
             max_fragment_surplus_len: fragment_surplus_budget(config)?,
             peer: config.peer,
-            identification: config.identification,
+            identification,
         },
     )?;
 
@@ -348,7 +400,35 @@ pub fn build_outgoing_datagrams(
         .collect()
 }
 
+fn take_peer_identification_generator(config: &mut SendConfig) -> Result<IdentificationGenerator, SocketError> {
+    match config.identification.take() {
+        Some(seed) => Ok(IdentificationGenerator::new(seed)),
+        None => IdentificationGenerator::from_os_random().map_err(SocketError::Io),
+    }
+}
+
+fn build_peer_outgoing_datagrams(
+    addrs: DatagramAddrs,
+    payload: &[u8],
+    options: SendOptions,
+    config: SendConfig,
+    identifications: &mut IdentificationGenerator,
+) -> Result<Vec<Vec<u8>>, SendError> {
+    match build_outgoing_datagrams(addrs, payload, options.clone(), config) {
+        Err(SendError::FragmentIdentificationRequired) => {
+            let config = SendConfig {
+                identification: Some(identifications.next_id()?),
+                ..config
+            };
+            build_outgoing_datagrams(addrs, payload, options, config)
+        }
+        result => result,
+    }
+}
+
 /// Decodes one raw IPv4 datagram through the receive pipeline and API policy.
+///
+/// `cache` must be dedicated to the datagram's UDP source/destination address-and-port pair.
 pub fn decode_datagram(
     datagram: &[u8],
     cache: &mut ReassemblyCache,
@@ -369,6 +449,7 @@ pub fn decode_datagram(
             options,
             option_bearing,
             reports,
+            ocs_reports,
         } => {
             if policy.drop_all_option_bearing && option_bearing {
                 warn_policy_sampled(
@@ -387,7 +468,19 @@ pub fn decode_datagram(
                 );
                 return Ok(ApiDelivery::Filtered);
             }
-            Ok(ApiDelivery::Received(ReceivedDatagram { data, options, reports }))
+            if policy.ocs_required && !ocs_requirement_satisfied(&ocs_reports) {
+                warn_policy_sampled(
+                    &REQUIRED_OCS_WARNINGS,
+                    "dropping UDP datagram because a successful OCS confirmation is required",
+                );
+                return Ok(ApiDelivery::Filtered);
+            }
+            Ok(ApiDelivery::Received(ReceivedDatagram {
+                data,
+                options,
+                reports,
+                ocs_reports,
+            }))
         }
         Delivery::Buffered => Ok(ApiDelivery::Buffered),
         Delivery::Dropped => Ok(ApiDelivery::Dropped),
@@ -560,12 +653,33 @@ fn missing_required_option(policy: &ReceivePolicy, reports: &[OptionReport]) -> 
     })
 }
 
+fn ocs_requirement_satisfied(reports: &[OcsReport]) -> bool {
+    let has_failure = reports.iter().any(|report| {
+        matches!(
+            report.status,
+            OcsStatus::Failed | OcsStatus::InvalidZero | OcsStatus::Unobserved
+        )
+    });
+    !has_failure
+        && reports
+            .iter()
+            .any(|report| matches!(report.status, OcsStatus::Valid | OcsStatus::Unused))
+}
+
 fn wire_option_bearing(datagram: &[u8]) -> Result<bool, RecvError> {
     let (ip, udp_at) = IpRepr::parse(datagram)?;
     let ip_end = ip.header_len() + ip.transport_payload_len();
-    let udp = UdpHeader::parse(&datagram[udp_at..ip_end])?;
+    let udp = match UdpHeader::parse(&datagram[udp_at..ip_end]) {
+        Ok(udp) => udp,
+        Err(HeaderError::UdpLengthInvalid { length }) => {
+            warn_udp_length_below_min(length);
+            return Err(HeaderError::UdpLengthInvalid { length }.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     let udp_len = usize::from(udp.length);
     if udp_len > ip.transport_payload_len() {
+        warn_udp_length_exceeds_ip(udp.length, ip.transport_payload_len());
         return Err(RecvError::UdpLengthExceedsIpPayload {
             udp_len: udp.length,
             transport_payload_len: ip.transport_payload_len(),
@@ -595,6 +709,7 @@ fn is_required_reportable_kind(kind: OptionKind) -> bool {
 
 static DROP_ALL_WARNINGS: AtomicU64 = AtomicU64::new(0);
 static REQUIRED_OPTION_WARNINGS: AtomicU64 = AtomicU64::new(0);
+static REQUIRED_OCS_WARNINGS: AtomicU64 = AtomicU64::new(0);
 
 fn warn_policy_sampled(counter: &AtomicU64, message: &str) {
     let sample = counter.fetch_add(1, Ordering::Relaxed) + 1;
@@ -604,5 +719,66 @@ fn warn_policy_sampled(counter: &AtomicU64, message: &str) {
         } else {
             log::warn!("{message} (sample #{sample}; repeated warnings in this category are sampled)");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn addrs() -> DatagramAddrs {
+        DatagramAddrs {
+            src: Ipv4Addr::new(192, 0, 2, 1),
+            dst: Ipv4Addr::new(198, 51, 100, 2),
+            src_port: 12_345,
+            dst_port: 54_321,
+        }
+    }
+
+    #[test]
+    fn explicit_peer_identification_is_consumed_as_the_generator_seed() {
+        let mut config = SendConfig {
+            identification: Some(73),
+            ..SendConfig::default()
+        };
+        let mut identifications = take_peer_identification_generator(&mut config).unwrap();
+
+        assert_eq!(config.identification, None);
+        assert_eq!(identifications.next_id(), Ok(73));
+    }
+
+    #[test]
+    fn peer_does_not_consume_an_identification_for_an_unfragmented_send() {
+        let mut identifications = IdentificationGenerator::new(u32::MAX);
+        let datagrams = build_peer_outgoing_datagrams(
+            addrs(),
+            b"small",
+            SendOptions::new(),
+            SendConfig::default(),
+            &mut identifications,
+        )
+        .unwrap();
+
+        assert_eq!(datagrams.len(), 1);
+        assert_eq!(identifications.next_id(), Ok(u32::MAX));
+    }
+
+    #[test]
+    fn peer_consumes_one_identification_when_fragmentation_is_required() {
+        let mut identifications = IdentificationGenerator::new(73);
+        let config = SendConfig {
+            max_datagram_len: 64,
+            peer: PeerFragmentLimits {
+                max_reassembled_size: 256,
+                max_segments: 8,
+            },
+            ..SendConfig::default()
+        };
+        let datagrams =
+            build_peer_outgoing_datagrams(addrs(), &[0x5a; 80], SendOptions::new(), config, &mut identifications)
+                .unwrap();
+
+        assert!(datagrams.len() > 1);
+        assert_eq!(identifications.next_id(), Ok(74));
     }
 }

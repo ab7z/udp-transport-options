@@ -210,6 +210,10 @@ pub enum SendError {
     #[error(transparent)]
     Socket(#[from] SocketError),
 
+    /// Automatic fragmentation needs a caller-allocated FRAG Identification value.
+    #[error("FRAG identification is required when fragmentation is used")]
+    FragmentIdentificationRequired,
+
     /// The requested datagram cannot fit in the configured size limit.
     #[error("datagram is too large: {len} bytes, max {max} bytes")]
     DatagramTooLarge {

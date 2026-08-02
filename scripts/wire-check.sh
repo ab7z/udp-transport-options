@@ -26,7 +26,8 @@ PCAP="$RUN_DIR/wire.pcap"
 # Keep in sync with examples/wire_probe.rs and scripts/wire-check.py.
 SRC_PORT=39424
 PORT_LO=39528
-PORT_HI=39537
+# Ten single-datagram scenarios plus the shared production-split port.
+PORT_HI=39538
 # Warm-up-only port just below the scenario range; the checker ignores it entirely.
 CANARY_PORT=39527
 

@@ -2,6 +2,11 @@
 
 Status: done
 
+> Historical terminology note (2026-07-13): in one's-complement arithmetic, data plus its stored
+> checksum validates to the all-ones representation (`0xFFFF`), whose complement is zero. Any older
+> shorthand in this step saying that the raw sum "yields zero" should be read in that precise sense;
+> the Outcome and Lean theorem already use the folded `0xFFFF` criterion.
+
 ## Goal
 
 Implement the one's-complement Internet checksum (RFC 1071) that backs both the UDP checksum and the

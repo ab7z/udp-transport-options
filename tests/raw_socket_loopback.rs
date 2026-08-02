@@ -9,12 +9,16 @@ use std::time::{Duration, Instant};
 
 use udp_transport_options::error::SocketError;
 use udp_transport_options::options::kind::OptionKind;
+use udp_transport_options::options::parse::OptionsIter;
 use udp_transport_options::options::serialize::OptionsBuilder;
+use udp_transport_options::options::typed::{Res, TypedOption};
 use udp_transport_options::socket::recv::RawReceiver;
 use udp_transport_options::socket::send::{RawSender, assemble_datagram};
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 const RECV_TIMEOUT: Duration = Duration::from_millis(100);
+// The fixture models a token previously received from the peer in a REQ.
+const RES_TOKEN: [u8; 4] = [5, 6, 7, 8];
 
 #[test]
 #[ignore = "requires Linux CAP_NET_RAW/root; run through scripts/vm-ubuntu-server.sh ignored"]
@@ -43,6 +47,11 @@ fn loopback_round_trip_preserves_surplus_and_filters_ports() -> Result<(), Box<d
         user_data,
         &options_body,
     );
+    let res = OptionsIter::new(&options_body[2..])
+        .map(|option| option.expect("fixed options body should parse"))
+        .find(|option| option.kind == OptionKind::Res)
+        .expect("round-tripped options should contain RES");
+    assert_eq!(Res::decode(res.value)?.token, RES_TOKEN);
 
     let (filter_src_port, filter_dst_port, wrong_dst_port) = distinct_ports();
     let filter_receiver = RawReceiver::bind(filter_dst_port, Some(filter_src_port), None)?;
@@ -116,6 +125,7 @@ fn raw_sender_or_skip() -> Result<Option<RawSender>, Box<dyn Error>> {
 fn options_body() -> Vec<u8> {
     let mut builder = OptionsBuilder::new();
     builder.push(OptionKind::Req, [1, 2, 3, 4]);
+    builder.push(OptionKind::Res, RES_TOKEN);
     builder.finish().expect("fixed options are serializable")
 }
 

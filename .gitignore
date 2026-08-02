@@ -24,3 +24,5 @@
 *.html
 /netlify-public/
 .env
+
+__pycache__/

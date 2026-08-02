@@ -1,5 +1,47 @@
 # Lean/RFC 9868 Validation
 
+## Aktualisierung 2026-07-13
+
+Der Text ab „Historischer Stand“ bleibt als nachvollziehbarer Step-3-Snapshot erhalten. Seine
+Aussagen über Branch `step-03-option-kind`, Commit `f14b785`, Stubmodule, damalige Testzahlen und
+„offene Steps 4-17“ beschreiben **nicht** den heutigen Checkout.
+
+Der aktuelle manuelle Lean-Modellbestand umfasst:
+
+- `Checksum`, `Wire`, `Kind`, `Tlv`, `Serialize`, `Ocs` und `Typed` für ausgewählte reine
+  Wire-/Options-Invarianten;
+- `Receive` als abstraktes Modell der UDP-Checksum-/OCS- und TLV/FRAG-Disposition, einschließlich
+  sofortigem Abbruch am ersten unsupported UNSAFE;
+- `FragSplit` als Arithmetikmodell für Größen, Offsets, RDOS, MRDS und Segmentgrenzen;
+- `Reassembly` als Intervall-/Coverage-Modell mit ausgewählten Timeout-/Limit-Konstanten;
+- `Api` als Modell für Sendepfadwahl, MRDS-Gate und die Länge/Form des reassemblierten Tails.
+
+`scripts/lean-gate.sh` baut diese Modelle und prüft für jedes Lean-Theorem, dass keine Axiome außer
+den zugelassenen Lean-Grundlagen vorkommen. Das ist ein belastbarer Nachweis **über die manuellen
+Modelle**, aber keine Extraktion des Rust-Codes und kein Beweis ihrer semantischen Äquivalenz zum
+Rust-Code.
+
+Insbesondere gelten folgende Nachweisgrenzen:
+
+- `FragSplit` modelliert keine Payload-/Options-Bytefolgen und beweist daher keine
+  Byte-für-Byte-Konkatenationsidentität des Produktions-Splitters.
+- `Reassembly` modelliert nicht die Rust-Cache-Transitionsfolge, Cache-Key-Ownership, Zeitstempel,
+  inklusive Timeoutgrenze, `gc(now)`, Ressourcen-Caps oder Isolation zweier Socket-Paare.
+- `Api` modelliert keine Payload-/Options-Inhalte und beweist daher keinen inhaltlichen
+  End-to-End-Roundtrip der öffentlichen API.
+- `Receive` ist ein abstraktes Dispositionsmodell, kein Beweis über den Byteparser oder die
+  vollständige Rust-Pipeline.
+- Raw Sockets, Kernelverhalten, Privilegien, tcpdump-Wirebilder und FF2-Pfade bleiben empirische
+  Testgegenstände und sind grundsätzlich außerhalb dieses Lean-Nachweises.
+
+Die Kopplung zwischen Modell und Implementierung erfolgt weiterhin über manuell gespiegelte
+Konstanten sowie Unit-, Property-, Fuzz-, Wire- und Integrationstests. Entsprechend lautet der
+zulässige Claim: „Ausgewählte RFC-9868-Invarianten sind in manuellen Lean-Modellen bewiesen.“ Ein
+Claim wie „Lean verifiziert die vollständige Rust-Implementierung als RFC-9868-konform“ bleibt
+falsch.
+
+## Historischer Stand (Step 3)
+
 Stand: 2026-06-12; Status-Update nach Step 3: 2026-06-20
 
 ## Kurzurteil

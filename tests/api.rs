@@ -2,11 +2,11 @@ use std::net::Ipv4Addr;
 use std::time::Instant;
 
 use udp_transport_options::api::{
-    ApiDelivery, DatagramAddrs, FragmentationMode, OptionSource, OptionStatus, ReceivePolicy, SendConfig, SendOptions,
-    build_datagram, build_outgoing_datagrams, decode_datagram,
+    ApiDelivery, DatagramAddrs, FragmentationMode, OcsStatus, OptionSource, OptionStatus, ReceivePolicy, SendConfig,
+    SendOptions, build_datagram, build_outgoing_datagrams, decode_datagram,
 };
 use udp_transport_options::error::{ReceivePolicyError, RecvError, SendError, SplitError};
-use udp_transport_options::frag::reassembly::{ReassemblyCache, ReassemblyLimits};
+use udp_transport_options::frag::reassembly::{FragKey, ReassemblyCache, ReassemblyLimits, ReassemblyOutcome};
 use udp_transport_options::frag::split::PeerFragmentLimits;
 use udp_transport_options::model::{kind, length};
 use udp_transport_options::options::RawOption;
@@ -111,6 +111,8 @@ fn low_level_raw_option_round_trip() {
     assert_eq!(received.reports[0].kind, OptionKind::Req);
     assert_eq!(received.reports[0].status, OptionStatus::Success);
     assert_eq!(received.reports[0].source, OptionSource::Datagram);
+    assert_eq!(received.ocs_reports[0].status, OcsStatus::Valid);
+    assert_eq!(received.ocs_reports[0].source, OptionSource::Datagram);
 }
 
 #[test]
@@ -128,6 +130,7 @@ fn empty_options_emit_plain_datagram() {
     assert_eq!(received.data, b"plain");
     assert!(received.options.is_empty());
     assert!(received.reports.is_empty());
+    assert_eq!(received.ocs_reports[0].status, OcsStatus::Absent);
 
     let min_config = SendConfig {
         max_datagram_len: 20 + usize::from(length::UDP_HEADER),
@@ -217,6 +220,129 @@ fn required_option_policy_filters_missing_or_failed_options() {
         panic!("successful datagram-level APC should satisfy required option policy");
     };
     assert_eq!(received.data, b"payload");
+}
+
+#[test]
+fn ocs_reporting_and_required_policy_cover_all_wire_states() {
+    let original = build_datagram(addrs(), b"payload", &[raw(OptionKind::Req, &[1, 2, 3, 4])]).unwrap();
+    let required = ReceivePolicy::new().require_ocs(true);
+    assert!(required.requires_ocs());
+
+    let ApiDelivery::Received(valid) =
+        decode_datagram(&original, &mut ReassemblyCache::new(), Instant::now(), &required).unwrap()
+    else {
+        panic!("valid OCS should satisfy the required policy");
+    };
+    assert_eq!(valid.ocs_reports[0].status, OcsStatus::Valid);
+
+    let mut unused = original.clone();
+    unused[26..28].fill(0);
+    let (ip, udp_at) = IpRepr::parse(&unused).unwrap();
+    let udp = UdpHeader::parse(&unused[udp_at..]).unwrap();
+    let layout = locate_surplus(&ip, &udp).unwrap();
+    unused[layout.ocs_at()..layout.ocs_at() + usize::from(length::OCS)].fill(0);
+    let ApiDelivery::Received(unused) =
+        decode_datagram(&unused, &mut ReassemblyCache::new(), Instant::now(), &required).unwrap()
+    else {
+        panic!("permitted zero OCS should satisfy the required policy");
+    };
+    assert_eq!(unused.ocs_reports[0].status, OcsStatus::Unused);
+
+    let mut invalid_zero = original.clone();
+    let (ip, udp_at) = IpRepr::parse(&invalid_zero).unwrap();
+    let udp = UdpHeader::parse(&invalid_zero[udp_at..]).unwrap();
+    let layout = locate_surplus(&ip, &udp).unwrap();
+    invalid_zero[layout.ocs_at()..layout.ocs_at() + usize::from(length::OCS)].fill(0);
+    let ApiDelivery::Received(reported) = decode_datagram(
+        &invalid_zero,
+        &mut ReassemblyCache::new(),
+        Instant::now(),
+        &ReceivePolicy::default(),
+    )
+    .unwrap() else {
+        panic!("default policy should expose an invalid-zero confirmation");
+    };
+    assert_eq!(reported.ocs_reports[0].status, OcsStatus::InvalidZero);
+    assert_eq!(
+        decode_datagram(&invalid_zero, &mut ReassemblyCache::new(), Instant::now(), &required,).unwrap(),
+        ApiDelivery::Filtered
+    );
+
+    let mut mismatch = original;
+    let last = mismatch.len() - 1;
+    mismatch[last] ^= 1;
+    let ApiDelivery::Received(reported) = decode_datagram(
+        &mismatch,
+        &mut ReassemblyCache::new(),
+        Instant::now(),
+        &ReceivePolicy::default(),
+    )
+    .unwrap() else {
+        panic!("default policy should expose a failed OCS confirmation");
+    };
+    assert_eq!(reported.ocs_reports[0].status, OcsStatus::Failed);
+    assert_eq!(
+        decode_datagram(&mismatch, &mut ReassemblyCache::new(), Instant::now(), &required).unwrap(),
+        ApiDelivery::Filtered
+    );
+
+    let plain = build_datagram(addrs(), b"payload", &[]).unwrap();
+    assert_eq!(
+        decode_datagram(&plain, &mut ReassemblyCache::new(), Instant::now(), &required).unwrap(),
+        ApiDelivery::Filtered
+    );
+}
+
+#[test]
+fn mixed_public_cache_insertion_yields_unobserved_fragment_set_ocs() {
+    let first = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_NON_TERMINAL)),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER),
+        rdos: None,
+    };
+    let second = Frag {
+        frag_start: frag_start(usize::from(length::FRAG_TERMINAL)),
+        identification: 0x0102_0304,
+        frag_offset: u16::from(length::UDP_HEADER) + 3,
+        rdos: Some(u16::from(length::UDP_HEADER) + 6),
+    };
+    let key = FragKey {
+        src: SRC,
+        dst: DST,
+        src_port: SRC_PORT,
+        dst_port: DST_PORT,
+        identification: 0x0102_0304,
+    };
+    let now = Instant::now();
+
+    let mut cache = ReassemblyCache::new();
+    assert_eq!(cache.insert(key, first, b"abc", now), ReassemblyOutcome::Incomplete);
+    let ApiDelivery::Received(received) = decode_datagram(
+        &fragment_datagram(second, &[], b"def"),
+        &mut cache,
+        now,
+        &ReceivePolicy::default(),
+    )
+    .unwrap() else {
+        panic!("mixed cache usage should deliver instead of panicking");
+    };
+    assert_eq!(received.data, b"abcdef");
+    assert_eq!(received.ocs_reports[0].status, OcsStatus::Unobserved);
+    assert_eq!(received.ocs_reports[0].source, OptionSource::FragmentSet);
+
+    let mut cache = ReassemblyCache::new();
+    assert_eq!(cache.insert(key, first, b"abc", now), ReassemblyOutcome::Incomplete);
+    assert_eq!(
+        decode_datagram(
+            &fragment_datagram(second, &[], b"def"),
+            &mut cache,
+            now,
+            &ReceivePolicy::new().require_ocs(true),
+        )
+        .unwrap(),
+        ApiDelivery::Filtered
+    );
 }
 
 #[test]
@@ -435,6 +561,20 @@ fn drop_all_option_bearing_preserves_udp_checksum_errors() {
 }
 
 #[test]
+fn drop_all_option_bearing_preserves_short_udp_length_errors() {
+    let mut datagram = build_datagram(addrs(), b"payload", &[raw(OptionKind::Req, &[1, 2, 3, 4])]).unwrap();
+    datagram[24..26].copy_from_slice(&7u16.to_be_bytes());
+    let policy = ReceivePolicy::new().drop_all_option_bearing(true);
+
+    assert!(matches!(
+        decode_datagram(&datagram, &mut ReassemblyCache::new(), Instant::now(), &policy),
+        Err(RecvError::Header(
+            udp_transport_options::error::HeaderError::UdpLengthInvalid { length: 7 }
+        ))
+    ));
+}
+
+#[test]
 fn drop_all_option_bearing_delivers_unusable_surplus() {
     let datagram = datagram_with_raw_surplus(b"hi", &[0]);
     let (ip, udp_at) = IpRepr::parse(&datagram).unwrap();
@@ -450,6 +590,7 @@ fn drop_all_option_bearing_delivers_unusable_surplus() {
     assert_eq!(received.data, b"hi");
     assert!(received.options.is_empty());
     assert!(received.reports.is_empty());
+    assert_eq!(received.ocs_reports[0].status, OcsStatus::Absent);
 }
 
 #[test]
@@ -460,7 +601,7 @@ fn drop_all_option_bearing_filters_fragments_before_buffering() {
             max_reassembled_size: 256,
             max_segments: 8,
         },
-        identification: 0x0102_0304,
+        identification: Some(0x0102_0304),
         ..SendConfig::default()
     };
     let datagrams = build_outgoing_datagrams(addrs(), &[0x5a; 80], SendOptions::new(), config).unwrap();
@@ -549,6 +690,22 @@ fn disabled_fragmentation_rejects_oversized_payload() {
 }
 
 #[test]
+fn automatic_fragmentation_requires_an_explicit_low_level_identification() {
+    let config = SendConfig {
+        max_datagram_len: 64,
+        peer: PeerFragmentLimits {
+            max_reassembled_size: 256,
+            max_segments: 8,
+        },
+        ..SendConfig::default()
+    };
+    assert!(matches!(
+        build_outgoing_datagrams(addrs(), &[0xaa; 80], SendOptions::new(), config),
+        Err(SendError::FragmentIdentificationRequired)
+    ));
+}
+
+#[test]
 fn auto_fragmentation_reassembles_within_mrds() {
     let config = SendConfig {
         max_datagram_len: 64,
@@ -556,7 +713,7 @@ fn auto_fragmentation_reassembles_within_mrds() {
             max_reassembled_size: 256,
             max_segments: 8,
         },
-        identification: 0x0102_0304,
+        identification: Some(0x0102_0304),
         ..SendConfig::default()
     };
     let datagrams = build_outgoing_datagrams(addrs(), &[0x5a; 80], SendOptions::new(), config).unwrap();
@@ -577,12 +734,35 @@ fn auto_fragmentation_reassembles_within_mrds() {
         panic!("last fragment should complete reassembly");
     };
     assert_eq!(received.data, vec![0x5a; 80]);
+    assert!(
+        received
+            .ocs_reports
+            .iter()
+            .any(|report| { report.status == OcsStatus::Valid && report.source == OptionSource::FragmentSet })
+    );
+
+    let required = ReceivePolicy::new().require_ocs(true);
+    let mut cache = ReassemblyCache::with_limits(ReassemblyLimits {
+        max_reassembled_size: 256,
+        max_segments: 8,
+        max_pending_partials: 8,
+        timeout: udp_transport_options::model::limits::REASSEMBLY_TIMEOUT_MAX,
+    });
+    let mut last = ApiDelivery::Buffered;
+    for datagram in &datagrams {
+        last = decode_datagram(datagram, &mut cache, Instant::now(), &required).unwrap();
+    }
+    assert!(matches!(last, ApiDelivery::Received(_)));
 }
 
 #[test]
 fn auto_fragmentation_without_options_uses_full_default_mrds() {
     let payload = vec![0x5a; 2918];
-    let datagrams = build_outgoing_datagrams(addrs(), &payload, SendOptions::new(), SendConfig::default()).unwrap();
+    let config = SendConfig {
+        identification: Some(0x0102_0304),
+        ..SendConfig::default()
+    };
+    let datagrams = build_outgoing_datagrams(addrs(), &payload, SendOptions::new(), config).unwrap();
     assert_eq!(datagrams.len(), 2);
 
     let mut cache = ReassemblyCache::new();
@@ -605,7 +785,7 @@ fn over_mrds_send_fails_before_emitting_fragments() {
             max_reassembled_size: 40,
             max_segments: 8,
         },
-        identification: 0x0102_0304,
+        identification: Some(0x0102_0304),
         ..SendConfig::default()
     };
     assert!(matches!(

@@ -3,7 +3,7 @@
 This document describes the internal architecture of `udp-transport-options`, a userspace reference
 implementation of [RFC 9868](https://www.rfc-editor.org/rfc/rfc9868.txt) (Transport Options for UDP,
 October 2025) in Rust. It goes deeper than `CLAUDE.md`: it states each module's inputs and outputs,
-lists the concrete public types and method signatures, explains the three design rules
+lists the concrete public types and method signatures, explains the four design rules
 with their rationale, and walks the send and receive data flows step by step.
 
 The companion thesis asks two research questions, and the architecture is shaped to answer them:
@@ -13,10 +13,11 @@ The companion thesis asks two research questions, and the architecture is shaped
 - **FF2:** how far does the surplus area survive along real network paths, and how do NAT and filter
   devices treat datagrams that carry it?
 
-> Status note: the crate is built step by step (see `docs/plan/ROADMAP.md`). The type definitions in
-> this document are taken verbatim from the committed skeleton; the method signatures are the planned
-> contracts that the steps will implement. Where a signature is planned rather than already present in
-> source, it is labelled "(planned)".
+> Status note (2026-07-13): the in-scope endpoint implementation is present; the types and signatures
+> below describe the current architecture, not the original bootstrap skeleton. Remaining limitations
+> are named explicitly rather than hidden behind "planned" wording. The Step 17 harness covers local,
+> controlled namespace/veth, routed, Linux NAT, and negative filter paths; it does not yet answer FF2
+> over real external paths or surplus-specific middleboxes.
 
 ## 1. Overview and design goals
 
@@ -183,6 +184,11 @@ form, terminates on EOL, and reports a single `ParseError` on malformed input wi
 (RFC 9868 Sec. 10). Input: the surplus-area bytes after the OCS. Output: a stream of `OptionRef`
 borrowing those bytes, or one `ParseError`. Root-free.
 
+Transmitters use the default form through total length 254 and the extended form above it. The parser
+also rejects bounded extended encodings with total length `4..=254`; that receiver behavior is a
+documented local strictness policy, not an additional literal RFC receiver MUST. Per Sec. 10 and
+Erratum 8834, a claimed overrun makes the complete options area malformed.
+
 ### `options/serialize` (pure, hand-rolled)
 
 `OptionsBuilder`: emits the OCS-led options body with a zeroed two-byte OCS placeholder, canonical
@@ -201,12 +207,14 @@ wire/send layer. Input: owned `RawOption`s. Output: the OCS-led body with the pl
 ### `options/ocs` (pure, hand-rolled)
 
 OCS computation and validation (RFC 9868 Sec. 9). Computation is a two-pass back-patch: serialize the
-surplus area with the OCS field zero, run the RFC 1071 sum over the whole surplus area plus the 16-bit
-surplus length, then write the one's complement of the folded sum into the OCS field (a would-be
+OCS-aligned body with the OCS field zero, run the RFC 1071 sum from OCS through the end plus the
+16-bit full surplus length, then write the one's complement of the folded sum into the OCS field (a would-be
 `0x0000` is written as its one's-complement equivalent `0xFFFF`, keeping a used OCS non-zero as
 Sec. 9 requires when the UDP checksum is non-zero). Validation recomputes the sum over the same
 bytes (including the stored OCS) and requires the result to be the one's-complement zero. Built on `wire/checksum`. Input:
-the surplus-area bytes (and length). Output: the OCS value, or a pass/fail verdict. Root-free.
+the bytes beginning at OCS and the full surplus length. The odd-start pad is checked separately for
+zero; it is included only through the length addend, not prepended to the aligned checksum word stream.
+Output: the OCS value, or a pass/fail verdict. Root-free.
 
 ### `options/typed` (pure)
 
@@ -230,7 +238,9 @@ the FRAG option. Non-terminal fragments use the 10-byte FRAG form; the terminal 
 0`; multi-fragment payload bytes use offsets relative to the original UDP header. MDS/path MTU
 selects the per-fragment surplus budget; minimal OCS+FRAG fragment bodies provide S-12/S-14 data
 budgets; MRDS caps the reassembled datagram size and segment count.
-Input: original UDP user data, an optional OCS-led per-datagram options body, and size/ID config.
+Input: original UDP user data, a fully prepared OCS-led per-datagram options body whose original OCS
+is zero for this path, and size/ID config. The original UDP checksum is likewise represented as zero;
+each emitted fragment receives its own UDP checksum and OCS in the later send stage.
 Output: an ordered list of OCS-led fragment surplus bodies ready for `assemble_datagram(..., b"",
 body)`. Root-free.
 
@@ -238,8 +248,10 @@ body)`. Root-free.
 
 Reassembly on the receive side (RFC 9868 Sec. 11.4). The cache is keyed by `FragKey`, with
 offset-sorted insertion, overlap detection (overlap aborts), exact duplicate suppression (bytes and
-per-fragment options must both match), a timeout (<= 2 minutes), garbage collection, and per-datagram
-plus global DoS limits. The global pending-partial cap limits retained incomplete state, not
+per-fragment options must both match), a configurable timeout clamped to the 120-second RFC default
+maximum, caller-driven garbage collection, and per-datagram plus per-cache DoS limits. Expiry occurs
+at `elapsed >= timeout`; no background task reclaims state without insertion or `gc(now)`. The
+pending-partial cap limits retained incomplete state, not
 immediately complete atomic fragments. A completed datagram tail is returned for one re-feed into the
 pipeline together with coalesced SAFE per-fragment options
 (currently MDS/MRDS minima and the most recently received REQ/RES tokens). A FRAG reappearing there
@@ -247,7 +259,12 @@ with non-empty reassembled data follows the RFC 9868 Sec. 11.4 rule (all options
 delivered), and a nested FRAG with empty data is rejected as a local anti-loop policy (the RFC does not
 define nested fragmentation). Input: one fragment's `FragKey`, `Frag` fields, fragment data, optional
 validated per-fragment options, and caller-supplied timestamp. Output: a `ReassemblyOutcome`
-(`Incomplete`, `Complete { tail, udp_length, fragment_options }`, or `Abort(reason)`). Root-free.
+(`Incomplete`, `Complete { tail, udp_length, fragment_options, fragment_option_failures,
+fragment_ocs_nonzero }`, or `Abort(reason)`). Root-free.
+
+One cache instance is scoped to one source/destination address-and-port pair. `Peer` enforces this by
+ownership; low-level callers must do the same because sharing one cache would share its pending-state
+budget across socket pairs, contrary to the Sec. 11.4 resource-isolation SHOULD NOT.
 
 ### `recv/pipeline` (pure)
 
@@ -261,8 +278,9 @@ correctness. Input: the raw IP-datagram bytes plus a mutable `ReassemblyCache` a
 ### `socket/send` (privileged: Linux, root)
 
 The raw send path using `IP_HDRINCL` (RFC 9868 Sec. 15; locked decision). Its pure
-`assemble_datagram` helper builds the IP header, the UDP header (with UDP Length < IP Total Length,
-which is what creates the surplus area), and the surplus area; it computes the UDP checksum and the
+`assemble_datagram` helper builds the IP header, the UDP header (with
+`UDP Length < IPv4 Total Length - IPv4 IHL*4`, which creates the surplus area), and the surplus area;
+it computes the UDP checksum and the
 OCS by hand. The privileged `RawSender` wrapper only opens/configures the raw socket and transmits
 the assembled bytes. Input: addresses, ports, payload, and options. Output: a sent datagram or
 `SocketError`. Needs `CAP_NET_RAW`. All `unsafe` FFI is confined here behind safe wrappers.
@@ -271,7 +289,10 @@ the assembled bytes. Input: addresses, ports, payload, and options. Output: a se
 
 The raw receive path using `SOCK_RAW` `IPPROTO_UDP`. It reads full IP datagrams with the surplus area
 intact, filters by destination port and optionally source port in userspace, and returns the raw
-bytes for the later `recv::pipeline`. It mitigates raw-socket noise with an optional own-source skip
+bytes for the later `recv::pipeline`. It parses only the header state needed for demultiplexing and
+sampled-logs `UDP Length < 8` before rejecting it because that malformed value cannot safely reach
+the pipeline; UDP checksum, upper-bound, OCS, and TLV semantics remain pipeline work. It mitigates
+raw-socket noise with an optional own-source skip
 and by holding a dummy `SOCK_DGRAM` on the destination port to absorb ICMP port-unreachable. Input:
 the socket. Output: raw IP-datagram bytes for the pipeline. Needs `CAP_NET_RAW`.
 
@@ -291,9 +312,13 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
 `ReceivePolicy` can require successfully processed APC/MDS/MRDS/REQ/RES options from the datagram or
-the coalesced fragment set, or drop all datagrams with a usable option-bearing surplus layout after
+the coalesced fragment set, require an acceptable OCS via `require_ocs(bool)`, or drop all datagrams
+with a usable option-bearing surplus layout after
 the UDP checksum boundary. Tails too short to hold the aligned OCS are delivered without options,
 matching `process_datagram`.
+Required-option matching is currently source-agnostic: a success from either `Datagram` or
+`FragmentSet` satisfies it. The policy has no named-omission list and cannot express independent
+datagram-versus-fragment-set requirements; those Sec. 15 controls remain a documented API gap.
 `SendOptions` selects typed/raw options and automatic APC generation, while `SendConfig` controls the
 datagram size budget, peer MRDS, FRAG enablement, and FRAG Identification.
 Raw option guards are based on the canonical wire Kind byte: `OptionKind::Other(3)` is still FRAG
@@ -301,6 +326,10 @@ and `OptionKind::Other(2)` is still APC for API validation, even though callers 
 the named variants. High-level send rejects duplicate reportable APC/MDS/MRDS/REQ/RES Kinds instead
 of emitting intentionally duplicated per-datagram options.
 The API deliberately does not expose option ordering or per-fragment boundary control.
+OCS status is represented separately from TLV status as `OcsReport`; the API never invents an
+`OptionKind` for the fixed OCS field. Direct `Res` construction is pass-through: callers MUST ensure
+that every transmitted RES token was previously received by that transmitter in REQ. The library
+does not auto-respond and does not attest provenance for caller-supplied RES.
 
 ## 3. The data model
 
@@ -447,14 +476,14 @@ pub struct OptionRef<'a> {
 }
 
 // Borrowing iterator over the option region after the OCS; total and non-panicking; yields one
-// ParseError and then halts on malformed input. (planned)
+// ParseError and then halts on malformed input.
 pub struct OptionsIter<'a> { /* private: remaining bytes */ }
 
 impl<'a> OptionsIter<'a> {
-    pub fn new(options_bytes: &'a [u8]) -> OptionsIter<'a>;  // (planned)
+    pub fn new(options_bytes: &'a [u8]) -> OptionsIter<'a>;
 }
 impl<'a> Iterator for OptionsIter<'a> {
-    type Item = Result<OptionRef<'a>, ParseError>;          // (planned)
+    type Item = Result<OptionRef<'a>, ParseError>;
 }
 ```
 
@@ -554,7 +583,13 @@ pub struct FragKey {
 
 pub enum ReassemblyOutcome {
     Incomplete,
-    Complete { tail: Vec<u8>, udp_length: u16, fragment_options: Vec<RawOption> },
+    Complete {
+        tail: Vec<u8>,
+        udp_length: u16,
+        fragment_options: Vec<RawOption>,
+        fragment_option_failures: Vec<OptionKind>,
+        fragment_ocs_nonzero: Option<bool>,
+    },
     Abort(AbortReason),
 }
 
@@ -564,10 +599,10 @@ pub struct ReassemblyLimits {
     pub max_reassembled_size: usize, // default IPv4 MRDS 2926, including UDP header
     pub max_segments: usize,         // default 2
     pub max_pending_partials: usize, // default REASSEMBLY_MAX_PENDING_PARTIALS
-    pub timeout: Duration,           // default REASSEMBLY_TIMEOUT_MAX
+    pub timeout: Duration,           // default/clamped maximum REASSEMBLY_TIMEOUT_MAX
 }
 
-// The reassembly cache (state owned by the receiver); pure, no I/O.
+// The reassembly cache (state owned per socket pair by the receiver); pure, no I/O.
 pub struct ReassemblyCache { /* private */ }
 
 impl ReassemblyCache {
@@ -601,6 +636,7 @@ pub enum Delivery {
         options: Vec<RawOption>,    // successfully processed options
         option_bearing: bool,       // true when a usable UDP-options surplus layout was present
         reports: Vec<OptionReport>, // datagram status plus coalesced FragmentSet status
+        ocs_reports: Vec<OcsReport>,// fixed-field OCS status for datagram/fragment set
     },
     Buffered,                    // the datagram was a fragment; nothing to deliver yet
     Dropped,                     // fragment-local failure; no user delivery
@@ -608,9 +644,14 @@ pub enum Delivery {
 
 pub enum OptionStatus { Success, Failed, Ignored }
 pub enum OptionSource { Datagram, FragmentSet }
+pub enum OcsStatus { Absent, Valid, Unused, Failed, InvalidZero, Unobserved }
 pub struct OptionReport {
     pub kind: OptionKind,
     pub status: OptionStatus,
+    pub source: OptionSource,
+}
+pub struct OcsReport {
+    pub status: OcsStatus,
     pub source: OptionSource,
 }
 
@@ -639,6 +680,7 @@ pub enum SplitError {
     ReassembledDatagramTooLarge { len: usize, max: usize },
     SegmentLimitExceeded { needed: usize, max: u8 },
     FragmentCapacityTooSmall { required: usize, max: usize },
+    FragmentSurplusTooLarge { len: usize, max: usize },
     RdosTooLarge { rdos: usize, max: usize },
     FragmentOffsetTooLarge { offset: usize, max: usize },
     OptionsBodyTooShort { len: usize },
@@ -655,6 +697,7 @@ pub enum SendError {
     Serialize(SerializeError),
     Split(SplitError),
     Socket(SocketError),
+    FragmentIdentificationRequired,
     DatagramTooLarge { len: usize, max: usize },
     InvalidConfig { reason: &'static str },
 }
@@ -689,10 +732,15 @@ pub struct SendConfig {
     pub max_datagram_len: usize,
     pub peer: PeerFragmentLimits,
     pub fragmentation: FragmentationMode,
-    pub identification: u32,
+    pub identification: Option<u32>, // explicit low-level ID, or OS-random Peer generator seed
 }
-pub struct ReceivePolicy { /* required options + drop-all-option-bearing */ }
-pub struct ReceivedDatagram { pub data: Vec<u8>, pub options: Vec<RawOption>, pub reports: Vec<OptionReport> }
+pub struct ReceivePolicy { /* required options/OCS + drop-all-option-bearing */ }
+pub struct ReceivedDatagram {
+    pub data: Vec<u8>,
+    pub options: Vec<RawOption>,
+    pub reports: Vec<OptionReport>,
+    pub ocs_reports: Vec<OcsReport>,
+}
 pub enum ApiDelivery { Received(ReceivedDatagram), Buffered, Dropped, Filtered }
 pub struct SendOutcome { pub datagrams: usize, pub bytes: usize }
 pub struct Peer { /* raw sockets, cache, policy, identification generator */ }
@@ -712,7 +760,7 @@ pub fn decode_datagram(
 ) -> Result<ApiDelivery, RecvError>;
 ```
 
-## 4. The three design rules
+## 4. The four design rules
 
 ### Rule 1: parse borrowed, decode owned
 
@@ -776,7 +824,8 @@ The crate uses no threads, no async, and no background tasks -- in the library, 
 tests, and the examples. All state is owned and mutated on one call stack. Time-based behaviour (the
 FRAG reassembly timeout and garbage collection) is **caller-driven**: `ReassemblyCache::gc(&mut self,
 now: Instant)` takes the current time as a parameter and the application decides when to call it, so a
-single socket pair cannot pin memory -- there is no background sweeper thread. This keeps the receive
+cache insertion enforces expiry at the timeout boundary while idle stale entries persist until the
+caller invokes `gc(now)`. There is no background sweeper thread. This keeps the receive
 path deterministic and trivially testable, and it matches the staged evaluation harness (Step 0.5 /
 Step 17): each spike binary (the client and the server) is itself single-threaded and synchronous, and
 the shell harness (`scripts/spike.sh`) orchestrates them as two separate sequential processes -- there
@@ -786,10 +835,10 @@ is no in-process threading or async.
 
 ### 5.1 Send walkthrough
 
-Goal: emit a UDP datagram whose IP Total Length is larger than its UDP Length, so the trailing bytes
-form a surplus area carrying the OCS and the options (RFC 9868 Sec. 7). The kernel does not fill in
-the UDP checksum or the OCS for a raw send, so the crate computes both. With `IP_HDRINCL`, the crate
-builds the IP header itself, which is what lets UDP Length be smaller than IP Total Length.
+Goal: emit a UDP datagram for which
+`UDP Length < IPv4 Total Length - IPv4 IHL*4`, so the IP transport-payload tail carries the OCS and
+options (RFC 9868 Sec. 7). The kernel does not fill in the UDP checksum or OCS for a raw send, so the
+crate computes both.
 
 ```
  caller: addresses, ports, payload, typed options [, fragment if > single-datagram capacity]
@@ -798,41 +847,44 @@ builds the IP header itself, which is what lets UDP Length be smaller than IP To
  (1) options::serialize::OptionsBuilder
         - emit the OCS-led body: OCS placeholder, canonical TLVs, EOL, even zero-fill
         - reserve the OCS as body[0..2] (placeholder 0x0000); odd-start pad is added by wire/send
-        |   produces: options body with OCS = 0
+        |   produces: fully prepared original options body with OCS = 0
         v
- (2) options::ocs  (back-patch)
-        - RFC 1071 sum over the whole surplus area (OCS field zero) + the 16-bit surplus length
+ (2) choose single datagram or frag::split
+        - single: keep original payload/options body
+        - FRAG: consume that prepared original representation; original UDP checksum and OCS are zero
+        - produce empty-UDP-data fragment bodies with FRAG and fragment data
+        v
+ (3) options::ocs  (per emitted datagram/fragment back-patch)
+        - RFC 1071 sum from aligned OCS through area end (OCS zero) + full 16-bit surplus length
         - write the one's complement of the folded sum into the OCS field
         |   produces: surplus-area bytes with a valid OCS
         v
- (3) wire/surplus + wire/udp
+ (4) wire/surplus + wire/udp
         - UDP Length = 8 + user-data length (NOT including the surplus area)
-        - if the surplus area starts on an odd offset, prepend one zero pad byte (covered by OCS,
-          not by the UDP checksum)
+        - if the surplus area starts on an odd offset, prepend one separately validated zero pad;
+          its length is in the OCS length addend but its byte is before the aligned OCS word stream
         - wire/udp::compute_checksum over pseudo-header + UDP header + user data only
         |   produces: UDP header bytes + checksum
         v
- (4) socket/send::assemble_datagram  (pure, via IpRepr/UdpHeader)
+ (5) socket/send::assemble_datagram  (pure, via IpRepr/UdpHeader)
         - IP Total Length = IHL*4 + UDP Length + surplus-area length
         - assemble: IP header | UDP header | user data | [pad] | OCS | options
         |   produces: a full IP datagram on the stack
         v
- (5) socket/send  (privileged: Linux, IP_HDRINCL)   <-- the only privileged step
+ (6) socket/send  (privileged: Linux, IP_HDRINCL)   <-- the only privileged step
         - write the datagram on a SOCK_RAW socket with IP_HDRINCL set
-        - assert on the wire: IP Total Length > UDP Length when an options body is present
+        - assert: UDP Length < IP transport-payload length when an options body is present
         |
         v
  datagram on the wire
 ```
 
-For a payload too large for a single datagram (the fragment size S derives from the path MTU, with
-MDS as a hint -- never from MRDS), step (1) is preceded by `frag/split`, which produces one FRAG
-fragment per output datagram: each fragment has empty UDP user data (UDP Length 8) and carries its
-data in the surplus area after all of the fragment's options; non-terminal fragments use the 10-byte
-FRAG form and the terminal fragment the 12-byte form with the RDOS (RFC 9868 Sec. 11.4). The
-reassembled size (UDP header + data + per-datagram options) is capped by the peer's MRDS (default
-2926 when none received); a payload over that cap is rejected, not fragmented. Steps (2)
-through (5) then run per fragment.
+For a payload too large for a single datagram, step (2) invokes `frag/split` only after step (1) has
+fully prepared the original options, as RFC 9868 Sec. 11.4 requires. The fragment size S derives from
+the path MTU, with MDS as a hint -- never from MRDS. Each fragment has empty UDP user data (UDP
+Length 8) and carries data after all fragment options; non-terminal fragments use Length 10 and the
+terminal fragment Length 12 with RDOS. The reassembled size is capped by peer MRDS (default 2926);
+payload beyond it is rejected. Steps (3) through (6) then finalize and send each fragment.
 
 ### 5.2 Receive walkthrough (ASCII state machine)
 
@@ -849,7 +901,7 @@ application delivery.
         v
  +-------------------------------------------------------------------------------+
  | (A) wire/ip::parse + wire/udp::parse                                           |
- |     check 8 <= UDP Length <= IP payload length                                 |
+ |     check 8 <= UDP Length <= IP payload length; sampled-log either violation   |
  +-------------------------------------------------------------------------------+
         | invalid lengths --------------------------------> [DROP datagram]
         v ok
@@ -870,10 +922,11 @@ application delivery.
  +-------------------------------------------------------------------------------+
  | (D) OCS gate (the RFC 9868 Sec. 14 matrix over OCS value x UDP-checksum value) |
  |       OCS == 0: "unused", valid ONLY if the UDP checksum was also zero         |
- |       OCS != 0: validate via options::ocs (RFC 1071 sum over the whole surplus |
- |                 area incl. the stored OCS + the 16-bit surplus length folds to |
+ |       OCS != 0: validate via options::ocs (RFC 1071 sum from aligned OCS        |
+ |                 through area end + the full 16-bit surplus length folds to     |
  |                 the one's-complement zero, 0xFFFF)                             |
  +-------------------------------------------------------------------------------+
+        | record OcsReport (Absent/Valid/Unused/Failed/InvalidZero; Datagram source)
         | (OCS == 0 and UDP cksum != 0) -> options ignored (legacy emulation)
         |        -------------------------------> Delivery::Payload { data, options: [] }
         | (OCS != 0 and validation fails) -> ParseError::OcsMismatch
@@ -891,13 +944,14 @@ application delivery.
         | other unexpected length of a known SAFE option -> ignore that option only
         |        (Sec. 10; exception: a malformed FRAG counts as unsupported UNSAFE)
         | unknown SAFE option   -> ignore it, keep going
-        | unknown UNSAFE option before a valid FRAG context -> terminate option processing,
-        |        drop the user data, deliver a zero-length datagram (Sec. 10, 12, 14)
+        | unknown UNSAFE -> terminate immediately; do not scan later bytes for FRAG
+        |        no earlier trusted FRAG: zero-length delivery (Sec. 10, 12, 14)
         | sub-minimum FRAG Length -> malformed surplus, deliver payload with options discarded
-        | unknown UNSAFE option after valid empty-payload FRAG -> fragment-local failure
+        | unknown UNSAFE option after an already valid empty-payload FRAG -> fragment-local failure
         |        -------------------------------> Delivery::Dropped
         | malformed per-fragment TLV after valid empty-payload FRAG -> Delivery::Dropped
-        | malformed FRAG at or above the minimum length -> unsupported UNSAFE, even with non-empty user data
+        | unsupported FRAG format with empty user data -> unsupported UNSAFE
+        | correctly framed FRAG with non-empty user data -> defer to (F), regardless of Frag. Start
         | valid empty-payload FRAG -> stop option parsing at Frag. Start; bytes at or after
         |        that offset are fragment data, not more options
         v parsed options
@@ -912,17 +966,19 @@ application delivery.
  +-------------------------------------------------------------------------------+
 | (G) FRAG reassembly cache                                                      |
 |     insert by FragKey, offset-sort, suppress exact duplicates (bytes+options), |
-|     abort overlap and enforce timeout plus per-datagram/global limits          |
+|     abort overlap and enforce timeout plus per-datagram/per-cache limits       |
 +-------------------------------------------------------------------------------+
         | Incomplete -> Delivery::Buffered
         | Abort(_) -> Delivery::Dropped
         | valid empty-payload FRAG plus UNSAFE/malformed per-fragment option -> Delivery::Dropped
         v
- Completion path: Complete { tail, udp_length, fragment_options, fragment_option_failures }
+ Completion path: Complete { tail, udp_length, fragment_options, fragment_option_failures,
+        fragment_ocs_nonzero }
         is re-fed ONCE into process_datagram.
         A reassembled datagram with no FRAG lands at (F) -> Delivery::Payload
         { data, options }; coalesced per-fragment SAFE options are prepended only when the option is
-        usable per-fragment and no fragment failed that option kind. APC is per-datagram only.
+        usable per-fragment and no fragment failed that option kind. APC is per-datagram only. The
+        fragment set also contributes its coalesced `OcsReport` with `OptionSource::FragmentSet`.
         A FRAG with non-empty data hits the (F) non-empty branch (options ignored, data delivered,
         Sec. 11.4); a nested FRAG with empty data is rejected -- local anti-loop policy, never a
         second re-feed (the RFC does not define nested fragmentation)
@@ -941,12 +997,13 @@ Disposition summary:
 | Malformed TLV (sub-minimum/under/overrun)  | delivered    | discarded  | `Payload { options: [] }`        |
 | Unexpected length, known SAFE option       | delivered    | rest kept  | that option ignored (Sec. 10)    |
 | Sub-minimum FRAG Length                    | delivered    | discarded  | generic malformed-surplus case   |
-| Malformed FRAG or invalid `Frag. Start`    | zero-length  | discarded  | treated as unsupported UNSAFE    |
+| Unsupported FRAG format, empty UDP data    | zero-length  | discarded  | treated as unsupported UNSAFE    |
+| Correctly framed FRAG, non-empty UDP data, unusable `Frag. Start` | delivered | discarded | FRAG exception; original data |
 | Valid FRAG, user data non-empty            | delivered    | discarded  | `Payload { options: [] }` (Sec. 11.4) |
 | Valid FRAG, bytes after `Frag. Start`      | deferred     | not parsed  | fragment data, `Buffered`        |
 | Unknown SAFE option                        | delivered    | rest kept  | option ignored                   |
-| Unknown UNSAFE option (no FRAG)            | zero-length  | discarded  | user data dropped; zero-length delivery (Sec. 12, 14) |
-| Unknown UNSAFE option (valid empty FRAG, before or after FRAG) | not delivered| discarded  | `Dropped`; not inserted into reassembly    |
+| Unknown UNSAFE before any trusted FRAG     | zero-length  | discarded  | stop; later FRAG bytes not inspected       |
+| Unknown UNSAFE after trusted empty FRAG    | not delivered| discarded  | `Dropped`; not inserted into reassembly    |
 | Malformed per-fragment option before data  | not delivered| discarded  | `Dropped`; no zero-length frame  |
 | FRAG, more fragments needed                | -            | -          | `Buffered`                       |
 | FRAG, overlap / cap / timeout              | not delivered| discarded  | `Dropped` / abort state          |
@@ -958,13 +1015,14 @@ Disposition summary:
 
 ### Error model
 
-Three enums separate "the options were bad" from "the datagram was bad" from "the receive operation
-failed":
+Separate enums distinguish option-area failures, datagram failures, send failures, and raw-socket
+failures:
 
 - `ParseError` says *why* the surplus area or its options were rejected: `InvalidLength { kind, len }`
   (a Length wrong for its Kind), `Overrun { offset }` (an option claims to extend past the surplus
   area), `DuplicateFrag`, `NonZeroPad` (the single odd-offset alignment pad byte was non-zero), and
-  `OcsMismatch` (the OCS did not validate to zero). Per RFC 9868 (Sec. 14), a `ParseError` over the
+  `OcsMismatch` (the OCS did not validate to one's-complement zero). Per RFC 9868 (Sec. 10, Sec. 14,
+  and Verified Technical Erratum 8834), a `ParseError` over the
   surplus area does not fail the receive: the options are discarded but the UDP payload is still
   delivered. This is exactly why `ParseError` is a distinct, recoverable type and not merged into
   `RecvError`.
@@ -973,7 +1031,9 @@ failed":
   mismatch, a non-UDP protocol, or a UDP Length below 8. Unlike a `ParseError`, a `HeaderError`
   means the datagram itself cannot be trusted and is dropped (the first row of the disposition
   table), never "payload delivered, options discarded". Produced by `IpRepr::parse` and
-  `UdpHeader::parse`; how a drop is reported (and logged) is the Step-10 pipeline's decision.
+  `UdpHeader::parse`. The raw receive boundary sampled-logs `UDP Length < 8` before rejecting it;
+  the pure pipeline sampled-logs the upper-bound violation (`UDP Length > IP transport-payload
+  length`).
 - `SocketError` is the raw-socket failure type: `Io(std::io::Error)` for ordinary I/O failures and
   `PermissionDenied` for missing `CAP_NET_RAW` / root.
 - `SendError` covers the public send API: serialization failure, split failure, socket failure,
@@ -1000,15 +1060,19 @@ per packet indefinitely:
 | `MRDS_DEFAULT_IPV4`             | 2926 bytes    | reassembled-size cap when no MRDS option was seen    |
 | `MIN_REASSEMBLY_SEGMENTS`       | 2             | the minimum fragment count an implementation supports|
 | `REASSEMBLY_TIMEOUT_MAX`        | 120 s         | upper bound on how long a partial may live           |
-| `REASSEMBLY_MAX_PENDING_PARTIALS` | 64          | global incomplete-datagram cap per cache             |
+| `REASSEMBLY_MAX_PENDING_PARTIALS` | 64          | incomplete-datagram cap within one pair-owned cache  |
 | `NOP_RUN_DOS_THRESHOLD`         | 7             | a run of NOPs beyond this is logged as a possible DoS |
 
 Additional reassembly defenses (implemented as cache policy in `frag/reassembly`, surfaced as
-`AbortReason`): per-datagram byte and segment caps and a global partial cap (`LimitExceeded`), overlap
+`AbortReason`): per-datagram byte and segment caps and a per-cache partial cap (`LimitExceeded`), overlap
 abort with exact duplicate suppression (`Overlap`), the timeout plus garbage collection, and the rule that a completed
 datagram is re-fed exactly once so reassembly cannot loop. The `NOP_RUN_DOS_THRESHOLD` is enforced in
-the parser path: a NOP flood is logged via the sampled `log` diagnostics (it does not need root, so
-it is covered by the pure tests).
+the parser path: a NOP flood is detected and logged via sampled `log` diagnostics (it does not need
+root, so it is covered by the pure tests). Parsing remains linear through the IPv4-bounded datagram;
+it does not stop only because a run exceeds seven, so the RFC Sec. 25.2 work-limiting recommendation
+is only partially implemented. The design deliberately has no fixed non-padding-TLV count cap:
+the zero-copy scan allocates nothing and a global count limit could reject valid extensible option
+sets. This is the documented NFR-04 opt-out, not a claimed RFC guarantee.
 
 ## 7. Dependency rationale
 
@@ -1020,7 +1084,7 @@ the reference implementation and feeds FF1).
   `socket`/`setsockopt`. The protocol is the contribution, not the socket boilerplate.
 - **`libc`** (`IP_HDRINCL`, FFI constants): platform constants and calls
   that `socket2` does not expose; confined to `socket/`.
-- **`thiserror`** (deriving `Display`/`Error` on the two enums): removes boilerplate; it does not
+- **`thiserror`** (deriving `Display`/`Error` on the error enums): removes boilerplate; it does not
   touch any protocol logic.
 - **`crc32c`** (the APC CRC32C, Castagnoli): a SIMD-accelerated, vector-checked CRC32C. APC carries a
   known checksum (CRC32C in network byte order, RFC 9868 Sec. 11.3, Fig. 9), not a thesis subject; a
@@ -1033,8 +1097,8 @@ the reference implementation and feeds FF1).
 Hand-rolled on purpose (no crate):
 
 - **The RFC 1071 Internet checksum** (`wire/checksum`): it is the shared primitive behind both the UDP
-  checksum and the OCS, and demonstrating it correctly (odd-length padding, end-around carry, the
-  `sum + complement == 0` property) is part of the thesis.
+  checksum and the OCS, and demonstrating it correctly (odd-length padding, end-around carry, and
+  validation to a folded sum of `0xFFFF`, whose complement is zero) is part of the thesis.
 - **The TLV parser and serializer** (`options/parse`, `options/serialize`): the zero-copy parse, the
   extended-length form, the canonical ordering, the NOP alignment, and the EOL/zero-fill are the core
   mechanism of RFC 9868 Sec. 10.

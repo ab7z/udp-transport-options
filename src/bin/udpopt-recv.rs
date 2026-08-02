@@ -6,11 +6,14 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use clap::Parser;
+use log::{LevelFilter, Log, Metadata, Record};
 use udp_transport_options::error::{RecvError, SocketError};
 use udp_transport_options::frag::reassembly::{ReassemblyCache, ReassemblyLimits};
 use udp_transport_options::options::RawOption;
 use udp_transport_options::options::kind::OptionKind;
-use udp_transport_options::recv::pipeline::{Delivery, OptionReport, OptionSource, OptionStatus, process_datagram};
+use udp_transport_options::recv::pipeline::{
+    Delivery, OcsReport, OcsStatus, OptionReport, OptionSource, OptionStatus, process_datagram,
+};
 use udp_transport_options::socket::recv::RawReceiver;
 use udp_transport_options::wire::ip::IpRepr;
 use udp_transport_options::wire::surplus::locate_surplus;
@@ -78,7 +81,28 @@ struct WireSummary {
     surplus_len: usize,
 }
 
+struct StderrLogger;
+
+impl Log for StderrLogger {
+    fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+        metadata.level() <= log::Level::Warn
+    }
+
+    fn log(&self, record: &Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("udpopt-recv: {}: {}", record.level(), record.args());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+static LOGGER: StderrLogger = StderrLogger;
+
 fn main() -> ExitCode {
+    if log::set_logger(&LOGGER).is_ok() {
+        log::set_max_level(LevelFilter::Warn);
+    }
     match run(Args::parse()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(CliError::Permission) => {
@@ -109,6 +133,7 @@ fn run(args: Args) -> Result<(), CliError> {
     });
 
     let mut received = 0usize;
+    let mut processing_error = false;
     while received < args.count {
         let Some(datagram) = receiver.recv().map_err(CliError::from_socket)? else {
             break;
@@ -120,6 +145,7 @@ fn run(args: Args) -> Result<(), CliError> {
 
         let summary = summarize(&datagram);
         let delivery = process_datagram(&datagram, &mut cache, Instant::now());
+        processing_error |= summary.is_err() || delivery.is_err();
         if args.json {
             print_json(received, summary, delivery.as_ref());
         } else {
@@ -127,7 +153,13 @@ fn run(args: Args) -> Result<(), CliError> {
         }
     }
 
-    Ok(())
+    if processing_error {
+        Err(CliError::Message(
+            "one or more received datagrams failed header, checksum, or option processing".into(),
+        ))
+    } else {
+        Ok(())
+    }
 }
 
 fn summarize(datagram: &[u8]) -> Result<WireSummary, RecvError> {
@@ -153,15 +185,17 @@ fn print_text(index: usize, summary: Result<WireSummary, RecvError>, delivery: R
                 options,
                 option_bearing,
                 reports,
+                ocs_reports,
             }),
         ) => {
             println!(
-                "recv[{index}] payload={} payload_len={} option_bearing={} options={} reports={} surplus={} {}:{} -> {}:{}",
+                "recv[{index}] payload={} payload_len={} option_bearing={} options={} reports={} ocs_reports={} surplus={} {}:{} -> {}:{}",
                 hex(data),
                 data.len(),
                 option_bearing,
                 option_list(options),
                 report_list(reports),
+                ocs_report_list(ocs_reports),
                 wire.surplus_len,
                 wire.src,
                 wire.src_port,
@@ -195,10 +229,11 @@ fn print_json(index: usize, summary: Result<WireSummary, RecvError>, delivery: R
                 options,
                 option_bearing,
                 reports,
+                ocs_reports,
             }),
         ) => {
             println!(
-                "{{\"index\":{index},\"delivery\":\"payload\",\"src\":\"{}\",\"dst\":\"{}\",\"src_port\":{},\"dst_port\":{},\"ip_total_len\":{},\"udp_len\":{},\"surplus_len\":{},\"payload_len\":{},\"payload_hex\":\"{}\",\"option_bearing\":{},\"options\":\"{}\",\"reports\":\"{}\"}}",
+                "{{\"index\":{index},\"delivery\":\"payload\",\"src\":\"{}\",\"dst\":\"{}\",\"src_port\":{},\"dst_port\":{},\"ip_total_len\":{},\"udp_len\":{},\"surplus_len\":{},\"payload_len\":{},\"payload_crc32c\":{},\"payload_hex\":\"{}\",\"option_bearing\":{},\"options\":\"{}\",\"reports\":\"{}\",\"ocs_reports\":\"{}\"}}",
                 wire.src,
                 wire.dst,
                 wire.src_port,
@@ -207,10 +242,12 @@ fn print_json(index: usize, summary: Result<WireSummary, RecvError>, delivery: R
                 wire.udp_len,
                 wire.surplus_len,
                 data.len(),
+                crc32c::crc32c(data),
                 hex(data),
                 option_bearing,
                 json_escape(&option_list(options)),
-                json_escape(&report_list(reports))
+                json_escape(&report_list(reports)),
+                json_escape(&ocs_report_list(ocs_reports))
             );
         }
         (Ok(wire), Ok(Delivery::Buffered | Delivery::Dropped)) => {
@@ -260,6 +297,25 @@ fn report_list(reports: &[OptionReport]) -> String {
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn ocs_report_list(reports: &[OcsReport]) -> String {
+    reports
+        .iter()
+        .map(|report| format!("{}:{}", ocs_status_name(report.status), source_name(report.source)))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn ocs_status_name(status: OcsStatus) -> &'static str {
+    match status {
+        OcsStatus::Absent => "absent",
+        OcsStatus::Valid => "valid",
+        OcsStatus::Unused => "unused",
+        OcsStatus::Failed => "failed",
+        OcsStatus::InvalidZero => "invalid-zero",
+        OcsStatus::Unobserved => "unobserved",
+    }
 }
 
 fn kind_name(kind: OptionKind) -> String {

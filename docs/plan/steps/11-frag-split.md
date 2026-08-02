@@ -2,6 +2,14 @@
 
 Status: done
 
+> Current RFC clarification (2026-07-13): the original datagram's complete options representation is
+> prepared before splitting, with the original OCS zero on the fragmenting path; the unsent original
+> UDP checksum SHOULD also be zero. Each emitted fragment then receives its own UDP checksum and OCS.
+> Identification uniqueness is over the source/destination address-and-port tuple for at least the
+> reassembly timeout. Low-level automatic fragmentation therefore requires an explicit ID, while
+> `Peer` owns a per-peer generator seeded from OS randomness by default. The Lean `FragSplit` model
+> proves sizing/offset/RDOS arithmetic; it does not model payload bytes or prove concatenation identity.
+
 ## Goal
 
 Split an oversized datagram into FRAG fragments.

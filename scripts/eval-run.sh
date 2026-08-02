@@ -146,12 +146,19 @@ run_scenario() {
     shift 3
     ip netns exec "$DST_NS" "$RECV_BIN" --dst-port "$port" --timeout-ms 3000 --count "$count" \
         --max-segments 8 --json \
-        >"$RUN_DIR/recv-$name.jsonl" &
+        >"$RUN_DIR/recv-$name.jsonl" 2>"$RUN_DIR/recv-$name.log" &
     local recv_pid=$!
     sleep 0.2
     ip netns exec "$SRC_NS" "$SEND_BIN" --src "$SRC_IP" --dst "$DST_IP" --src-port 40000 --dst-port "$port" "$@" \
         --manifest "$RUN_DIR/send-$name.jsonl" >"$RUN_DIR/send-$name.log"
-    wait "$recv_pid" || true
+    if wait "$recv_pid"; then
+        :
+    else
+        local recv_status=$?
+        cat "$RUN_DIR/recv-$name.log" >&2 || true
+        echo "error: receiver for $name exited with status $recv_status" >&2
+        return "$recv_status"
+    fi
 }
 
 run_scenario baseline 41000 1 --payload plain
@@ -161,15 +168,23 @@ run_scenario near-mtu 41003 1 --payload-size 1392 --apc --mds "$MDS_SIZE"
 run_scenario frag 41004 8 --payload-size 256 --max-datagram-len 96 --peer-mrds-segments 8
 
 stop_captures
-python3 "$SCRIPT_DIR/eval-check.py" \
-    --sender-pcap "$RUN_DIR/sender.pcap" \
-    --receiver-pcap "$RUN_DIR/receiver.pcap" \
-    --port-base "$PORT_BASE" \
-    --port-count "$SCENARIOS" \
-    --expect-surplus-port "$((PORT_BASE + 1))" \
-    --expect-surplus-port "$((PORT_BASE + 2))" \
-    --expect-surplus-port "$((PORT_BASE + 3))" \
-    --expect-surplus-port "$((PORT_BASE + 4))" \
-    ${EVAL_REQUIRE_INTACT:+--require-intact} | tee "$RUN_DIR/verdicts.jsonl"
+CHECK_ARGS=(
+    --sender-pcap "$RUN_DIR/sender.pcap"
+    --receiver-pcap "$RUN_DIR/receiver.pcap"
+    --port-base "$PORT_BASE"
+    --port-count "$SCENARIOS"
+    --expect-surplus-port "$((PORT_BASE + 1))"
+    --expect-surplus-port "$((PORT_BASE + 2))"
+    --expect-surplus-port "$((PORT_BASE + 3))"
+    --expect-surplus-port "$((PORT_BASE + 4))"
+    --run-dir "$RUN_DIR"
+    --topology "$TOPOLOGY"
+)
+if [ -n "$EVAL_REQUIRE_INTACT" ]; then
+    CHECK_ARGS+=(--require-intact)
+elif [ "$TOPOLOGY" = filter ]; then
+    CHECK_ARGS+=(--require-dropped)
+fi
+python3 "$SCRIPT_DIR/eval-check.py" "${CHECK_ARGS[@]}" | tee "$RUN_DIR/verdicts.jsonl"
 
 echo "eval-run: artifacts in $RUN_DIR"

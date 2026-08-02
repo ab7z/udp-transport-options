@@ -45,7 +45,7 @@ proptest! {
                 max_reassembled_size: 512,
                 max_segments: 8,
             },
-            identification,
+            identification: Some(identification),
             ..SendConfig::default()
         };
         let datagrams = build_outgoing_datagrams(addrs(), &payload, send_options(&option_seed), config)

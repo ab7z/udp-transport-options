@@ -1,6 +1,7 @@
 # Step 10.5: Wire-verification lane (tcpdump + independent checker + tshark)
 
-Status: done; verified on `achim` (wire lane exit 0, 10/10 scenarios; mutation check red, rc=1)
+Status: done; original 10/10 lane verified on `achim`; the 2026-07-13 production-split extension
+passed the `achim` wire lane on 2026-08-02 (`wire-check: PASS (11/11 scenarios)`)
 
 ## Goal
 
@@ -44,6 +45,7 @@ mismatch.
 | 7 | `cksum0-ocs0` | hand-built: UDP checksum 0, OCS left 0 | the legal "OCS unused" pairing (Sec. 9); kernel leaves the zero UDP checksum untouched |
 | 8 | `frag-data-nonterm` | FRAG + REQ + 64 bytes fragment data | Frag.Start points exactly at the fragment data; OCS covers options + data |
 | 9 | `frag-data-term` | as 8, terminal (RDOS = 8 + 128) | terminal fragment with data |
+| 10 | `production-split` | five fragments from `frag::split`, sent terminal/first/rest-reversed | independent OCS/FRAG checks plus gap/overlap-free reassembly of the payload and APC/RES trailer |
 
 Scenarios 0 and 7 are hand-built (via `IpRepr::write`/`UdpHeader::write`) because
 `assemble_datagram` cannot emit them: it asserts an OCS-led body and always computes a real UDP
@@ -51,6 +53,12 @@ checksum and OCS. Scenario 5 brute-forces the filler through the production `ocs
 (deterministic ascending scan, at most 65536 folds). Scenarios 8/9 append the fragment data to the
 `OptionsBuilder::finish` body; `patch_frag_start` then points exactly at the data start, which the
 checker re-derives from the captured layout instead of trusting the golden.
+
+Scenario 10 is the remediation evidence for the actual production splitter. The Python checker
+deduplicates the two loopback tap copies, validates every fragment's UDP checksum, OCS, FRAG
+Identification/Start/Offset/terminal RDOS and surplus budget, then reconstructs the tail in offset
+order and independently verifies the 90-byte payload plus APC and provenance-declared RES. It shares
+no Rust parser or reassembly code.
 
 ## Findings
 
@@ -111,16 +119,17 @@ Ubuntu Server; tshark 4.6.4 was installed and recorded here).
 
 - Receiver dispositions (the Step 10 matrix) are not wire-observable; they stay with the pure
   pipeline tests and the Step 15 loopback suite.
-- FRAG split/reassembly *logic* is Steps 11/12 -- the wire image of data-carrying fragments is
-  already pinned here, and the lane should gain split-produced scenarios once `frag::split`
-  exists.
+- General FRAG state-machine dispositions remain Steps 11/12. This lane now includes one
+  production-split, five-fragment wire/reconstruction scenario; it is not an exhaustive reassembly
+  state-machine oracle.
 - CLI end-to-end waits for Steps 14/15; real paths, middleboxes, and offloads are Step 17 / FF2.
 - The UDP-checksum-zero case pins the *sender* wire image only; the receive-side disposition
   matrix around it is Step 10's.
 
 ## Tasks
 
-- [x] `examples/wire_probe.rs`: 10 scenarios, hand-built shapes for 0/7, brute-forced OCS filler.
+- [x] `examples/wire_probe.rs`: 10 single-datagram scenarios plus one production-split scenario;
+      hand-built shapes for 0/7 and a brute-forced OCS filler.
 - [x] `scripts/wire-check.py`: independent pcap/IPv4/UDP/TLV/OCS/CRC32C checker + goldens + tshark
       cross-check.
 - [x] `scripts/wire-check.sh`: capture orchestration, artifacts, exit gate.
@@ -130,8 +139,10 @@ Ubuntu Server; tshark 4.6.4 was installed and recorded here).
 
 ## Definition of Done
 
-- `scripts/vm-ubuntu-server.sh wire` exits 0 and prints `wire-check: PASS (10/10 scenarios)`.
-  (Verified on achim: tcpdump 4.99.6, tshark 4.6.4, python3 3.14.)
+- `scripts/vm-ubuntu-server.sh wire` exits 0 and prints `wire-check: PASS (11/11 scenarios)`.
+  The predecessor 10/10 lane was verified on achim (tcpdump 4.99.6, tshark 4.6.4, python3 3.14);
+  the new production-split scenario still needs that remote rerun because the 2026-07-13 attempt
+  timed out before execution.
 - Mutation proof: flipping a single surplus byte in the captured pcap makes the checker fail.
   (Verified: `b[-3] ^= 1` on the capture -> OCS re-derivation mismatch + golden TLV mismatch +
   fragment-pattern mismatch, exit 1; the clean capture re-checks to exit 0.)

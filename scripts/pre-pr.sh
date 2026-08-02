@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Mandatory local verification gate: run before opening or *updating* any PR.
 #
-# Lanes, fail-fast in order: host fmt/clippy/tests (property tests at PROPTEST_CASES, default
-# 1024), the Lean gate (formal specs build + kernel axiom audit, scripts/lean-gate.sh), the achim
-# cross verify (build + test + fmt + clippy for aarch64-unknown-linux-musl; the ssh runner
-# forwards no environment, so proptest runs its default 256 cases there), the achim wire lane
-# (tcpdump capture + independent checker; needs passwordless sudo on achim, see
-# scripts/wire-check.sh), and a time-boxed libFuzzer smoke per fuzz target on this host.
+# Lanes, fail-fast in order: host fmt/clippy/doc/tests (property tests at PROPTEST_CASES, default
+# 1024), the eval-checker Python unit tests (tests/test_eval_check.py), the Lean gate (formal
+# specs build + kernel axiom audit, scripts/lean-gate.sh), the achim cross verify (build + test +
+# fmt + clippy for aarch64-unknown-linux-musl; the ssh runner forwards no environment, so proptest
+# runs its default 256 cases there), the achim root lane (ignored integration tests under sudo),
+# the achim wire lane (tcpdump capture + independent checker; needs passwordless sudo on achim,
+# see scripts/wire-check.sh), and a time-boxed libFuzzer smoke per fuzz target on this host.
 #
 # One-time prerequisites:  rustup toolchain install nightly && cargo install cargo-fuzz
 # (cargo +nightly overrides the rust-toolchain.toml pin for the fuzz lane only.)
@@ -45,9 +46,12 @@ lane() {
 start=$SECONDS
 lane "fmt" cargo fmt --check
 lane "clippy host" cargo clippy --all-targets -- -D warnings
+lane "doc host" cargo doc --no-deps
 lane "test host ($PROPTEST_CASES proptest cases)" env PROPTEST_CASES="$PROPTEST_CASES" cargo test
+lane "eval checker unit tests" python3 -m unittest discover -s tests -p 'test_eval_check.py'
 lane "lean gate (build + axiom audit)" scripts/lean-gate.sh
 lane "achim verify" scripts/vm-ubuntu-server.sh verify
+lane "achim root (ignored integration tests)" scripts/vm-ubuntu-server.sh ignored
 lane "achim wire (tcpdump + tshark second oracle)" scripts/vm-ubuntu-server.sh wire
 for target in "${FUZZ_TARGETS[@]}"; do
     mkdir -p "fuzz/corpus/$target" "fuzz/seeds/$target"

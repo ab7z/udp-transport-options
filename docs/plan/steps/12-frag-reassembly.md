@@ -2,6 +2,15 @@
 
 Status: implemented
 
+> Current scope and proof note (2026-07-13): `FragKey` is the UDP address/port 4-tuple plus FRAG
+> Identification (the IP protocol is implicit), not a separate UDP 5-tuple plus another field. One
+> cache is owned per address/port pair; its pending-partial cap is per cache, and low-level callers
+> have the same non-sharing precondition. Timeout expiry is inclusive (`elapsed >= timeout`), the
+> default/configured value is clamped to 120 seconds, insertion enforces expiry, and idle cleanup is
+> caller-driven via `gc(now)`. The current Lean `Reassembly` file models interval/coverage rules and
+> constants/examples; it does not prove the Rust cache state machine, GC, timestamps, caps, or pair
+> isolation. The stronger proof claims below are retained as the historical Step 12 plan.
+
 ## Goal
 
 Reassemble FRAG fragments with overlap protection, timeouts, and DoS limits.

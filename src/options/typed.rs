@@ -161,9 +161,13 @@ impl TypedOption for Req {
 }
 
 /// Echo Response: echoes the token from a received [`Req`].
+///
+/// RFC 9868 requires a sender to use only a token it previously received in a REQ. This POD type
+/// cannot prove network provenance; constructing and sending a `Res` delegates that precondition to
+/// the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Res {
-    /// Echoed request token.
+    /// Token copied verbatim from a previously received REQ.
     pub token: [u8; 4],
 }
 

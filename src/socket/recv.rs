@@ -13,7 +13,8 @@ mod platform {
 
     use socket2::{Domain, Protocol, Socket, Type};
 
-    use crate::error::SocketError;
+    use crate::error::{HeaderError, SocketError};
+    use crate::recv::pipeline::warn_udp_length_below_min;
     use crate::socket::map_socket_error;
     use crate::wire::ip::IpRepr;
     use crate::wire::udp::UdpHeader;
@@ -56,7 +57,9 @@ mod platform {
         ///
         /// This method only parses enough header state to apply the userspace demux filters. It does
         /// not validate the UDP checksum, OCS, or option semantics; the pure receive pipeline owns
-        /// those decisions in Step 10.
+        /// those decisions in Step 10. A UDP Length below eight is dropped here and emitted through
+        /// the `log` facade because it cannot safely reach that pipeline; applications embedding the
+        /// library must install a logger to retain this required diagnostic.
         pub fn recv(&self) -> Result<Option<Vec<u8>>, SocketError> {
             let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
             let n = match self.socket.recv(&mut buf) {
@@ -72,13 +75,17 @@ mod platform {
             let Ok((ip, udp_at)) = IpRepr::parse(data) else {
                 return Ok(None);
             };
+            let udp = match UdpHeader::parse(&data[udp_at..]) {
+                Ok(udp) => udp,
+                Err(HeaderError::UdpLengthInvalid { length }) => {
+                    warn_udp_length_below_min(length);
+                    return Ok(None);
+                }
+                Err(_) => return Ok(None),
+            };
             if self.own_src == Some(ip.src) {
                 return Ok(None);
             }
-
-            let Ok(udp) = UdpHeader::parse(&data[udp_at..]) else {
-                return Ok(None);
-            };
             if udp.dst_port != self.dst_port {
                 return Ok(None);
             }

@@ -38,6 +38,7 @@ inductive TrustedOptionsState where
   | ordinary
   | malformedTlv
   | unsupportedUnsafe
+  | unsupportedUnsafeBeforeFrag
   | unsupportedUnsafeThenMalformed
   | validFragEmpty
   | validFragEmptyWithUnsupportedUnsafe
@@ -78,6 +79,7 @@ def trustedOptionsDisposition (state : TrustedOptionsState) : OptionsDisposition
   | .ordinary => .deliverWithOptions
   | .malformedTlv => .deliverWithoutOptions
   | .unsupportedUnsafe => .zeroLengthDelivery
+  | .unsupportedUnsafeBeforeFrag => .zeroLengthDelivery
   | .unsupportedUnsafeThenMalformed => .zeroLengthDelivery
   | .validFragEmpty => .buffered
   | .validFragEmptyWithUnsupportedUnsafe => .dropped
@@ -129,6 +131,12 @@ theorem invalid_ocs_discards_options (udp : UdpChecksumState)
 bytes would be malformed.** -/
 theorem unsupported_unsafe_precedes_later_malformed_tlv :
     trustedOptionsDisposition .unsupportedUnsafeThenMalformed = .zeroLengthDelivery := by
+  rfl
+
+/-- **An unsupported UNSAFE option terminates processing before a later FRAG can establish fragment
+context, so the ordinary legacy-compatible zero-length disposition applies.** -/
+theorem unsupported_unsafe_precedes_later_frag :
+    trustedOptionsDisposition .unsupportedUnsafeBeforeFrag = .zeroLengthDelivery := by
   rfl
 
 /-- **A malformed FRAG is treated as unsupported UNSAFE, not as the valid-FRAG non-empty-data

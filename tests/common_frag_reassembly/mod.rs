@@ -45,7 +45,7 @@ pub fn check_reassembly_invariants(
     payload: &[u8],
     per_datagram_options_body: &[u8],
     mut config: SplitConfig,
-    reverse: bool,
+    permutation_seed: &[u8],
 ) {
     config.peer = PeerFragmentLimits {
         max_reassembled_size: u16::MAX,
@@ -69,10 +69,7 @@ pub fn check_reassembly_invariants(
         identification: config.identification,
     };
 
-    let mut order: Vec<usize> = (0..fragments.len()).collect();
-    if reverse {
-        order.reverse();
-    }
+    let order = fragment_order(fragments.len(), permutation_seed);
     let mut completed = None;
     for (position, index) in order.iter().copied().enumerate() {
         let (frag, data) = parsed_frag(&fragments[index].surplus_body);
@@ -92,6 +89,15 @@ pub fn check_reassembly_invariants(
     assert_eq!(tail, expected_tail(payload, per_datagram_options_body));
     assert_eq!(usize::from(udp_length), usize::from(length::UDP_HEADER) + payload.len());
     assert!(cache.is_empty());
+}
+
+fn fragment_order(fragment_count: usize, permutation_seed: &[u8]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..fragment_count).collect();
+    for (seed_index, upper) in (1..fragment_count).rev().enumerate() {
+        let choice = permutation_seed.get(seed_index).copied().unwrap_or(0);
+        order.swap(upper, usize::from(choice) % (upper + 1));
+    }
+    order
 }
 
 fn parsed_frag(surplus_body: &[u8]) -> (Frag, &[u8]) {
