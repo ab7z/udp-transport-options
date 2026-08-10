@@ -68,15 +68,15 @@ On a Linux host everything runs natively and self-contained: `cargo test`,
 `sudo cargo test -- --ignored` (root-gated raw-socket lane), and
 `scripts/spike.sh` need nothing beyond the pinned Rust toolchain and `iproute2`.
 
-## Cross-compiling and the achim Linux test host
+## Cross-compiling and the Linux test hosts
 
 The raw-socket paths only run on Linux, and macOS cannot receive raw UDP at all,
-so everything is **cross-compiled on the Mac** for `aarch64-unknown-linux-musl`
-(statically linked via Rust's bundled `rust-lld`, no extra toolchain needed) and
-only **executed** on the `achim` SSH host. Test binaries are shipped and run there
-transparently by the cargo runner `scripts/achim-runner.sh` (wired up in
-`.cargo/config.toml`); achim itself stays a bare network testbed without any Rust
-toolchain.
+so Linux binaries are **cross-compiled on the Mac** for either `aarch64-unknown-linux-musl`
+or `x86_64-unknown-linux-musl` (statically linked via Rust's bundled `rust-lld`, no
+extra linker toolchain needed) and only **executed** on a matching SSH host. Test
+binaries are shipped and run there transparently by the cargo runner
+`scripts/achim-runner.sh` (wired up in `.cargo/config.toml`); the remote host stays a
+bare network testbed without a Rust toolchain.
 
 ```sh
 scripts/vm-ubuntu-server.sh bootstrap      # one-time: add the local musl target; check ssh/sudo/rsync
@@ -106,11 +106,17 @@ scripts/vm-ubuntu-server.sh eval veth
 scripts/vm-ubuntu-server.sh eval router
 scripts/vm-ubuntu-server.sh eval nat
 scripts/vm-ubuntu-server.sh eval filter
+
+# x86_64 Linux host example:
+VM_UBUNTU_SERVER_HOST=root@x86-test-host \
+VM_UBUNTU_SERVER_TARGET=x86_64-unknown-linux-musl \
+scripts/vm-ubuntu-server.sh verify
 ```
 
 Set `VM_UBUNTU_SERVER_HOST` to use a different SSH alias, or `VM_UBUNTU_SERVER_DIR` to use another
-remote run directory (binaries land in its `bin/`). The host needs passwordless `sudo` and `rsync`,
-nothing else.
+remote run directory (binaries land in its `bin/`). Set `VM_UBUNTU_SERVER_TARGET` to the musl target
+matching the remote `uname -m`; it defaults to `aarch64-unknown-linux-musl`. The host needs
+passwordless `sudo` and `rsync`, nothing else.
 
 See [`docs/evaluation.md`](docs/evaluation.md) for the FF2/P2 verdict taxonomy, capture artifacts,
 offload notes, and Wireshark/tshark interpretation limits. These lanes cover namespace/veth, routed,

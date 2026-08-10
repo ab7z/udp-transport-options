@@ -121,9 +121,10 @@ stable (no renumbering).
   (cross-compiled test binaries execute on `achim` via the cargo runner).
 - Integration (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh ignored` (the runner executes
   the test binaries under sudo on `achim`).
-- On macOS, all Linux runtime steps are cross-compiled for `aarch64-unknown-linux-musl` and only
-  *executed* on `achim` via `scripts/vm-ubuntu-server.sh`, e.g. `verify` for the normal lane and
-  `ignored` for root-gated tests; `achim` carries no Rust toolchain.
+- On macOS, all Linux runtime steps are cross-compiled for either `aarch64-unknown-linux-musl` or
+  `x86_64-unknown-linux-musl` and only *executed* on a matching SSH host via
+  `scripts/vm-ubuntu-server.sh`, e.g. `verify` for the normal lane and `ignored` for root-gated
+  tests; remote test hosts carry no Rust toolchain.
 - Wire (root, Linux on `achim`): `scripts/vm-ubuntu-server.sh wire` (Step 10.5) -- tcpdump captures
   the `wire_probe` scenario set on loopback; `scripts/wire-check.py` independently re-derives the
   IP/UDP checksums, the OCS, and the APC CRC32C, checks golden surplus bytes typed from

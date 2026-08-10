@@ -171,13 +171,15 @@ Linux only at runtime. The raw-socket paths need `CAP_NET_RAW` (or root). There 
 macOS raw sockets cannot receive UDP. Loopback (`127.0.0.1`) is used for integration tests; a
 network-namespace/veth setup is used for the staged evaluation (see `docs/plan/steps/17-*`).
 
-On macOS, develop locally and **cross-compile** for `aarch64-unknown-linux-musl` (statically linked
-via `rust-lld`, see `.cargo/config.toml`); binaries only *run* on the `achim` SSH host, driven by
-`scripts/vm-ubuntu-server.sh <cmd>`. `cargo test --target ...` executes every test binary on `achim`
-through the cargo runner `scripts/achim-runner.sh`; the root-gated lanes run them under sudo there
+On macOS, develop locally and **cross-compile** for either `aarch64-unknown-linux-musl` or
+`x86_64-unknown-linux-musl` (statically linked via `rust-lld`, see `.cargo/config.toml`); binaries
+only *run* on a matching SSH host, driven by `scripts/vm-ubuntu-server.sh <cmd>`. The host and target
+are selected through `VM_UBUNTU_SERVER_HOST` and `VM_UBUNTU_SERVER_TARGET`; their architectures must
+match. `cargo test --target ...` executes every test binary remotely through the cargo runner
+`scripts/achim-runner.sh`; the root-gated lanes run them under sudo there
 (`scripts/vm-ubuntu-server.sh ignored`, `scripts/vm-ubuntu-server.sh spike`,
-`scripts/vm-ubuntu-server.sh wire`). achim carries no Rust
-toolchain. See the README "Cross-compiling and the achim Linux test host" section.
+`scripts/vm-ubuntu-server.sh wire`). Remote test hosts carry no Rust toolchain. See the README
+"Cross-compiling and the Linux test hosts" section.
 
 ## Git workflow
 
