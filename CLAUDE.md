@@ -13,9 +13,10 @@ The contribution is twofold and equally weighted:
 2. an empirical study of how far the surplus area survives real network paths and middleboxes
    (research questions FF1 and FF2 in the thesis).
 
-The current Step 17 harness is controlled and local: namespace/veth, routed, Linux NAT, and a
-filter negative control. It does not yet measure real external paths or surplus-specific
-middleboxes, and there is no implemented tunnel lane; do not describe FF2 as complete.
+The Step 17 harness is controlled and local: namespace/veth, routed, Linux NAT, and a filter
+negative control. A later external campaign at commit `7b11140` added initial Hetzner path
+observations and an ephemeral WireGuard control. The repository still has no reproducible tunnel
+lane, and the limited external observations do not complete FF2.
 
 The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
 git commit per step on `main`. The authoritative plan is `docs/plan/ROADMAP.md`,

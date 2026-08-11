@@ -119,7 +119,7 @@ matching the remote `uname -m`; it defaults to `aarch64-unknown-linux-musl`. The
 passwordless `sudo` and `rsync`, nothing else.
 
 See [`docs/evaluation.md`](docs/evaluation.md) for the FF2/P2 verdict taxonomy, capture artifacts,
-offload notes, and Wireshark/tshark interpretation limits. These lanes cover namespace/veth, routed,
-Linux NAT, and a filter negative control; they do not yet measure real external paths or
-surplus-specific middleboxes, and there is no implemented tunnel lane. FF2 therefore remains only
-partially evidenced.
+offload notes, and Wireshark/tshark interpretation limits. The reproducible repository lanes cover
+namespace/veth, routing, Linux NAT, and a filter negative control. A separate external campaign at
+commit `7b11140` added initial Hetzner path observations and an ephemeral WireGuard control. It found
+both survival and loss boundaries, but it does not complete FF2.

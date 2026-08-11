@@ -3,7 +3,8 @@
 This runbook describes the reproducible Linux lanes for measuring whether RFC 9868 UDP surplus bytes
 survive a path. The endpoint implementation is the Step 14 CLI pair; tcpdump pcaps are the path
 evidence; `scripts/eval-check.py` compares sender and receiver captures. These are controlled local
-experiments, not measurements over real external paths.
+experiments. The separate external campaign described below reuses the same evidence principles but
+is not a committed, reproducible lane of this runbook.
 
 ## What The Verdicts Mean
 
@@ -114,16 +115,52 @@ those cases.
 
 ## Scope Limits
 
-There is no implemented tunnel topology or tunnel script. Conceptually, a future tunnel case must
-not be treated as proof that on-path devices handled UDP surplus: a tunnel encapsulates the original
-IP packet, so those devices see tunnel traffic rather than the inner UDP surplus. Such a lane would
-be an encapsulation/MTU control only.
+There is no implemented tunnel topology or tunnel script in the reproducible repository lanes. A
+tunnel result must not be treated as proof that on-path devices handled UDP surplus: a tunnel
+encapsulates the original IP packet, so those devices see tunnel traffic rather than the inner UDP
+surplus. Such a result is an encapsulation/MTU control only.
 
 The `filter` topology drops the complete experiment port range. It is a negative control for the
 capture/verdict machinery, not a surplus-specific filtering experiment. None of the current lanes
 intentionally strips or rewrites only the surplus area. The veth/router/NAT/filter results establish
-reproducible behavior for those local Linux topologies; real external paths and diverse
-middleboxes remain future FF2 work.
+reproducible behavior for those local Linux topologies. The external campaign below adds one path,
+but diverse external paths and middleboxes remain FF2 work.
+
+## External Campaign: 2026-08-10/11
+
+Campaign `20260810T200118Z` measured a Linux guest to a Hetzner host using repository commit
+`7b11140a91ec730bf5d8351e7b00653d41f3c255`. It recorded sender-side, local Mac, and Hetzner
+captures. The campaign is an initial external data point, not a new completed roadmap step.
+
+The equal-size full UDP controls arrived intact at Hetzner over native IPv4 and native IPv6. In the
+IPv4 control, both compared datagrams had IPv4 Total Length 58. The full datagram used UDP Length 38
+with 30 payload bytes. The typed RFC 9868 datagram used UDP Length 12 with four payload bytes and a
+26-byte surplus area. Both IPv6 probes used IPv6 Payload Length 38. The equal IP sizes exclude
+packet size alone as the cause of the typed packets' different treatment. The IPv6 probe was a
+campaign-only wire diagnostic and does not extend the crate's IPv4-only endpoint scope.
+
+With VMware NAT enabled, the typed IPv4 datagram was intact before the local NAT boundary. After
+that boundary, IPv4 Total Length was exactly `IPv4 IHL + UDP Length`: 32 bytes instead of 58, with
+the four UDP payload bytes preserved and the 26 surplus bytes absent. The evidence places this
+normalization at the VMware NAT/macOS VMnet boundary, but it cannot distinguish `vmnet-natd` from
+the macOS VMnet API internally.
+
+Bridging the guest directly to the physical network bypassed that normalization. The typed IPv4
+datagram and a separate typed IPv6 datagram both retained the same 26 surplus bytes in the guest and
+local `en0` captures. One typed packet of each IP version was not observed in the corresponding
+Hetzner `eth0` capture, while its equal-size full UDP control arrived. This localizes loss to an
+interval after `en0` and before Hetzner `eth0`; a single packet per IP version does not identify the
+public device or provider that dropped it.
+
+An ephemeral WireGuard control then carried the inner IPv4 datagrams over native outer IPv6. The
+typed inner datagram was observed intact on Hetzner `wg-uoe`, with the same 26-byte surplus area and
+a valid OCS. This proves that encapsulation can deliver a non-empty surplus area to the Hetzner host
+after decapsulation. It does not prove that the public path carried native RFC 9868 UDP, because the
+on-path devices saw WireGuard traffic instead of the inner datagram.
+
+These observations provide useful FF2 boundaries, but they do not explain the implementation reason
+for the VMware normalization, locate the later public drop point, or cover enough independent paths
+and middleboxes to complete FF2.
 
 ## FF1 Soll-Ist Hook
 
