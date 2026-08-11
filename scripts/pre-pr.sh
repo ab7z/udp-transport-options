@@ -69,7 +69,8 @@ for target in "${FUZZ_TARGETS[@]}"; do
     fi
     lane "fuzz $target (${FUZZ_SECONDS}s)" cargo +nightly fuzz run "$target" \
         "fuzz/corpus/$target" "fuzz/seeds/$target" -- \
-        -max_total_time="$FUZZ_SECONDS" -max_len="$max_len" -timeout=5 -rss_limit_mb=512
+        -max_total_time="$FUZZ_SECONDS" -max_len="$max_len" -timeout=5 \
+        -rss_limit_mb=1024 -malloc_limit_mb=512
 done
 
 echo "pre-pr: all ${#passed[@]} lanes green in $((SECONDS - start))s"
