@@ -4,6 +4,57 @@
 //! and hand the bytes to the receive pipeline. Mitigates raw-socket noise (own-source copies and
 //! ICMP port-unreachable when no normal UDP socket is bound).
 
+use std::net::Ipv4Addr;
+
+use crate::error::HeaderError;
+use crate::recv::pipeline::warn_udp_length_below_min;
+use crate::wire::ip::IpRepr;
+use crate::wire::udp::UdpHeader;
+
+/// The userspace demux decision for one raw datagram.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum FilterVerdict {
+    /// The datagram matches the filters; deliver its first `len` bytes (the IPv4 Total Length).
+    Deliver { len: usize },
+    /// Noise: unparseable headers, an own-source copy, or a port mismatch. A raw `IPPROTO_UDP`
+    /// socket sees every UDP datagram on the host, so on a public host this is the common case;
+    /// it must never end a receive call the way a timeout does.
+    Filtered,
+}
+
+/// Applies the userspace demux filters to one raw IPv4 datagram.
+///
+/// Only enough header state is parsed to demux; the UDP checksum, the OCS, and option semantics
+/// stay with the pure receive pipeline. A UDP Length below eight is sampled-logged here because it
+/// cannot safely reach that pipeline.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn filter_datagram(data: &[u8], dst_port: u16, src_port: Option<u16>, own_src: Option<Ipv4Addr>) -> FilterVerdict {
+    let Ok((ip, udp_at)) = IpRepr::parse(data) else {
+        return FilterVerdict::Filtered;
+    };
+    let udp = match UdpHeader::parse(&data[udp_at..]) {
+        Ok(udp) => udp,
+        Err(HeaderError::UdpLengthInvalid { length }) => {
+            warn_udp_length_below_min(length);
+            return FilterVerdict::Filtered;
+        }
+        Err(_) => return FilterVerdict::Filtered,
+    };
+    if own_src == Some(ip.src) {
+        return FilterVerdict::Filtered;
+    }
+    if udp.dst_port != dst_port {
+        return FilterVerdict::Filtered;
+    }
+    if src_port.is_some_and(|src_port| udp.src_port != src_port) {
+        return FilterVerdict::Filtered;
+    }
+    FilterVerdict::Deliver {
+        len: usize::from(ip.total_len),
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use std::io;
@@ -13,11 +64,9 @@ mod platform {
 
     use socket2::{Domain, Protocol, Socket, Type};
 
-    use crate::error::{HeaderError, SocketError};
-    use crate::recv::pipeline::warn_udp_length_below_min;
+    use super::{FilterVerdict, filter_datagram};
+    use crate::error::SocketError;
     use crate::socket::map_socket_error;
-    use crate::wire::ip::IpRepr;
-    use crate::wire::udp::UdpHeader;
 
     const RECV_BUF_LEN: usize = u16::MAX as usize;
 
@@ -53,7 +102,13 @@ mod platform {
             self.socket.set_read_timeout(timeout).map_err(map_socket_error)
         }
 
-        /// Receives one matching raw IPv4 datagram, or `Ok(None)` for timeouts and filtered packets.
+        /// Receives raw datagrams until one matches the userspace demux filters; `Ok(None)` means
+        /// the read timed out.
+        ///
+        /// Filtered datagrams (unparseable headers, own-source copies, port mismatches) never end
+        /// the call: the loop keeps reading through them. Each raw read re-arms the configured
+        /// timeout, so the timeout bounds the idle time between raw datagrams, not the total wait
+        /// for a match.
         ///
         /// This method only parses enough header state to apply the userspace demux filters. It does
         /// not validate the UDP checksum, OCS, or option semantics; the pure receive pipeline owns
@@ -62,39 +117,22 @@ mod platform {
         /// library must install a logger to retain this required diagnostic.
         pub fn recv(&self) -> Result<Option<Vec<u8>>, SocketError> {
             let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
-            let n = match self.socket.recv(&mut buf) {
-                Ok(n) => n,
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
-                    return Ok(None);
-                }
-                Err(e) => return Err(map_socket_error(e)),
-            };
+            loop {
+                let n = match self.socket.recv(&mut buf) {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+                        return Ok(None);
+                    }
+                    Err(e) => return Err(map_socket_error(e)),
+                };
 
-            // SAFETY: `socket2::Socket::recv` initialized exactly the first `n` bytes.
-            let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
-            let Ok((ip, udp_at)) = IpRepr::parse(data) else {
-                return Ok(None);
-            };
-            let udp = match UdpHeader::parse(&data[udp_at..]) {
-                Ok(udp) => udp,
-                Err(HeaderError::UdpLengthInvalid { length }) => {
-                    warn_udp_length_below_min(length);
-                    return Ok(None);
+                // SAFETY: `socket2::Socket::recv` initialized exactly the first `n` bytes.
+                let data = unsafe { std::slice::from_raw_parts(buf.as_ptr().cast::<u8>(), n) };
+                match filter_datagram(data, self.dst_port, self.src_port, self.own_src) {
+                    FilterVerdict::Deliver { len } => return Ok(Some(data[..len].to_vec())),
+                    FilterVerdict::Filtered => {}
                 }
-                Err(_) => return Ok(None),
-            };
-            if self.own_src == Some(ip.src) {
-                return Ok(None);
             }
-            if udp.dst_port != self.dst_port {
-                return Ok(None);
-            }
-            if self.src_port.is_some_and(|src_port| udp.src_port != src_port) {
-                return Ok(None);
-            }
-
-            let datagram_len = usize::from(ip.total_len);
-            Ok(Some(data[..datagram_len].to_vec()))
         }
     }
 }
@@ -139,3 +177,110 @@ mod platform {
 }
 
 pub use platform::RawReceiver;
+
+#[cfg(test)]
+mod tests {
+    use std::net::Ipv4Addr;
+
+    use super::{FilterVerdict, filter_datagram};
+    use crate::wire::ip::IpRepr;
+    use crate::wire::udp::{HEADER_LEN, UdpHeader};
+
+    const SRC: Ipv4Addr = Ipv4Addr::new(192, 0, 2, 1);
+    const DST: Ipv4Addr = Ipv4Addr::new(198, 51, 100, 2);
+    const SRC_PORT: u16 = 40_000;
+    const DST_PORT: u16 = 40_001;
+
+    fn datagram(src: Ipv4Addr, src_port: u16, dst_port: u16, user_data: &[u8]) -> Vec<u8> {
+        let udp_len = HEADER_LEN + user_data.len();
+        let total_len = 20 + udp_len;
+        let ip = IpRepr {
+            src,
+            dst: DST,
+            ihl: 5,
+            total_len: u16::try_from(total_len).expect("test datagram fits in u16"),
+        };
+        let mut out = vec![0u8; total_len];
+        ip.write(&mut out);
+        UdpHeader {
+            src_port,
+            dst_port,
+            length: u16::try_from(udp_len).expect("test UDP length fits in u16"),
+            checksum: 0,
+        }
+        .write(&mut out[20..]);
+        out[28..].copy_from_slice(user_data);
+        out
+    }
+
+    #[test]
+    fn matching_datagram_is_delivered_truncated_to_ip_total_len() {
+        let mut data = datagram(SRC, SRC_PORT, DST_PORT, b"hello");
+        let total_len = data.len();
+        data.extend_from_slice(&[0xaa, 0xbb]);
+        assert_eq!(
+            filter_datagram(&data, DST_PORT, Some(SRC_PORT), None),
+            FilterVerdict::Deliver { len: total_len }
+        );
+    }
+
+    #[test]
+    fn absent_src_port_filter_accepts_any_source_port() {
+        let data = datagram(SRC, 55_555, DST_PORT, b"x");
+        let len = data.len();
+        assert_eq!(
+            filter_datagram(&data, DST_PORT, None, None),
+            FilterVerdict::Deliver { len }
+        );
+    }
+
+    #[test]
+    fn foreign_traffic_is_filtered() {
+        // The public-host regression: each of these datagrams ended `udpopt-recv` silently.
+        let wrong_dst = datagram(SRC, SRC_PORT, DST_PORT + 1, b"scan");
+        assert_eq!(
+            filter_datagram(&wrong_dst, DST_PORT, Some(SRC_PORT), None),
+            FilterVerdict::Filtered
+        );
+
+        let wrong_src = datagram(SRC, SRC_PORT + 1, DST_PORT, b"scan");
+        assert_eq!(
+            filter_datagram(&wrong_src, DST_PORT, Some(SRC_PORT), None),
+            FilterVerdict::Filtered
+        );
+
+        let own_copy = datagram(SRC, SRC_PORT, DST_PORT, b"echo");
+        assert_eq!(
+            filter_datagram(&own_copy, DST_PORT, Some(SRC_PORT), Some(SRC)),
+            FilterVerdict::Filtered
+        );
+    }
+
+    #[test]
+    fn unparseable_headers_are_filtered() {
+        assert_eq!(filter_datagram(&[], DST_PORT, None, None), FilterVerdict::Filtered);
+
+        let valid = datagram(SRC, SRC_PORT, DST_PORT, b"ok");
+        assert_eq!(
+            filter_datagram(&valid[..19], DST_PORT, None, None),
+            FilterVerdict::Filtered
+        );
+
+        let mut ip_only = vec![0u8; 20];
+        IpRepr {
+            src: SRC,
+            dst: DST,
+            ihl: 5,
+            total_len: 20,
+        }
+        .write(&mut ip_only);
+        assert_eq!(filter_datagram(&ip_only, DST_PORT, None, None), FilterVerdict::Filtered);
+
+        let mut bad_udp_len = datagram(SRC, SRC_PORT, DST_PORT, b"");
+        bad_udp_len[24..26].copy_from_slice(&7u16.to_be_bytes());
+        assert_eq!(
+            filter_datagram(&bad_udp_len, DST_PORT, None, None),
+            FilterVerdict::Filtered
+        );
+    }
+}

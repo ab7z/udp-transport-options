@@ -146,7 +146,7 @@ pub enum OcsStatus {
     /// The fragment-set OCS state was not observed by the receive pipeline.
     ///
     /// Reported only with [`OptionSource::FragmentSet`] when at least one fragment entered the
-    /// shared [`ReassemblyCache`](crate::frag::reassembly::ReassemblyCache) through its public
+    /// shared [`ReassemblyCache`] through its public
     /// insertion methods, which carry no OCS observation. It never satisfies a required-OCS
     /// receive policy.
     Unobserved,
