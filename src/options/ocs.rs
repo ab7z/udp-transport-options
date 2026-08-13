@@ -182,4 +182,60 @@ mod tests {
         assert_eq!(check_pad(1, true), Err(ParseError::NonZeroPad));
         assert_eq!(check_pad(1, false), Ok(()));
     }
+
+    // Golden vectors, derived by hand from RFC 9868 Section 9 before running them against this
+    // implementation: fold 16-bit big-endian words starting at the OCS field (the optional pad
+    // byte sits on the far side of the 2-byte grid and contributes nothing), add the full surplus
+    // length including any pad, invert. The expected constants below come from that manual
+    // arithmetic (cross-checked with an independent Python fold), not from `Checksum`, so a
+    // folding error shared by `compute` and `validate` cannot mask itself here. Every vector keeps
+    // the folded sum non-palindromic, so the byte-swapped sum of a one-byte mis-grouping (the
+    // error class the wire-checker odd-pad bug fell into) cannot validate.
+
+    #[test]
+    fn golden_even_start_tlv_body() {
+        // Sum: 0xdead + 0xbeef -> 0x9d9d (end-around carry); + 0x0100 -> 0x9e9d;
+        // + len 0x0008 -> 0x9ea5. OCS = !0x9ea5 = 0x615a.
+        let mut body = [0, 0, 0xde, 0xad, 0xbe, 0xef, 0x01, 0x00];
+        compute(&mut body, 8);
+
+        assert_eq!(&body[..2], &[0x61, 0x5a]);
+        assert_eq!(validate(&body, 8, 0x1234), OcsCheck::Valid);
+
+        let mut swapped = body;
+        swapped.swap(0, 1);
+        assert_eq!(validate(&swapped, 8, 0x1234), OcsCheck::Error(ParseError::OcsMismatch));
+    }
+
+    #[test]
+    fn golden_odd_start_pad_in_length_not_in_fold() {
+        // Surplus layout: one pad byte, OCS, options 0x01 0x02 0x03 0x04; surplus_len = 1 + 2 + 4.
+        // Sum: 0x0102 + 0x0304 = 0x0406; + len 0x0007 -> 0x040d. OCS = !0x040d = 0xfbf2.
+        let mut body = [0, 0, 0x01, 0x02, 0x03, 0x04];
+        compute(&mut body, 7);
+
+        assert_eq!(&body[..2], &[0xfb, 0xf2]);
+        assert_eq!(validate(&body, 7, 0x1234), OcsCheck::Valid);
+        // Forgetting the pad byte in the length must fail validation.
+        assert_eq!(validate(&body, 6, 0x1234), OcsCheck::Error(ParseError::OcsMismatch));
+
+        let mut swapped = body;
+        swapped.swap(0, 1);
+        assert_eq!(validate(&swapped, 7, 0x1234), OcsCheck::Error(ParseError::OcsMismatch));
+    }
+
+    #[test]
+    fn golden_dangling_tail_byte_is_high_byte() {
+        // Sum: 0xab00 (a trailing odd byte is the high byte of the final word) + len 0x0003
+        // -> 0xab03. OCS = !0xab03 = 0x54fc.
+        let mut body = [0, 0, 0xab];
+        compute(&mut body, 3);
+
+        assert_eq!(&body[..2], &[0x54, 0xfc]);
+        assert_eq!(validate(&body, 3, 0x1234), OcsCheck::Valid);
+
+        let mut swapped = body;
+        swapped.swap(0, 1);
+        assert_eq!(validate(&swapped, 3, 0x1234), OcsCheck::Error(ParseError::OcsMismatch));
+    }
 }
