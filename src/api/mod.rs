@@ -243,7 +243,8 @@ pub struct PeerConfig {
     pub send: SendConfig,
     /// Receive policy.
     pub receive: ReceivePolicy,
-    /// Raw receive timeout.
+    /// Raw receive timeout: the total deadline one receive call may spend waiting, including
+    /// time spent skipping unrelated raw datagrams.
     pub read_timeout: Option<Duration>,
 }
 

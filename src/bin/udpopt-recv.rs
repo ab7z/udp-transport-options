@@ -37,7 +37,7 @@ struct Args {
     #[arg(long)]
     own_src: Option<Ipv4Addr>,
 
-    /// Receive timeout in milliseconds.
+    /// Receive timeout in milliseconds; 0 waits forever.
     #[arg(long, default_value_t = 2000)]
     timeout_ms: u64,
 
@@ -122,9 +122,8 @@ fn run(args: Args) -> Result<(), CliError> {
     }
 
     let receiver = RawReceiver::bind(args.dst_port, args.src_port, args.own_src).map_err(CliError::from_socket)?;
-    receiver
-        .set_read_timeout(Some(Duration::from_millis(args.timeout_ms)))
-        .map_err(CliError::from_socket)?;
+    let timeout = (args.timeout_ms > 0).then(|| Duration::from_millis(args.timeout_ms));
+    receiver.set_read_timeout(timeout).map_err(CliError::from_socket)?;
     let mut cache = ReassemblyCache::with_limits(ReassemblyLimits {
         max_reassembled_size: args.max_reassembled_size,
         max_segments: args.max_segments,
@@ -151,6 +150,13 @@ fn run(args: Args) -> Result<(), CliError> {
         } else {
             print_text(received, summary, delivery.as_ref());
         }
+    }
+
+    if received < args.count {
+        log::warn!(
+            "receive timeout: stopped after {received} of {} matching datagrams",
+            args.count
+        );
     }
 
     if processing_error {

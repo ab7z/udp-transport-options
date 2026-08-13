@@ -60,7 +60,7 @@ mod platform {
     use std::io;
     use std::mem::MaybeUninit;
     use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use socket2::{Domain, Protocol, Socket, Type};
 
@@ -69,6 +69,10 @@ mod platform {
     use crate::socket::map_socket_error;
 
     const RECV_BUF_LEN: usize = u16::MAX as usize;
+
+    /// Lower bound for the per-read `SO_RCVTIMEO` while a deadline is pending: a zero timeout
+    /// means "block forever" to the kernel.
+    const MIN_READ_TIMEOUT: Duration = Duration::from_millis(1);
 
     /// Raw IPv4 receiver for UDP datagrams, with userspace port filtering.
     #[derive(Debug)]
@@ -97,18 +101,26 @@ mod platform {
             })
         }
 
-        /// Configures the raw receive timeout.
+        /// Configures the raw receive timeout: the total deadline one [`Self::recv`] call may
+        /// spend waiting, including time spent skipping filtered datagrams.
+        ///
+        /// `Some(Duration::ZERO)` is indistinguishable from `None` at the `SO_RCVTIMEO` level
+        /// and therefore also means "block forever".
         pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), SocketError> {
             self.socket.set_read_timeout(timeout).map_err(map_socket_error)
         }
 
         /// Receives raw datagrams until one matches the userspace demux filters; `Ok(None)` means
-        /// the read timed out.
+        /// the configured read timeout expired without a match.
         ///
         /// Filtered datagrams (unparseable headers, own-source copies, port mismatches) never end
-        /// the call: the loop keeps reading through them. Each raw read re-arms the configured
-        /// timeout, so the timeout bounds the idle time between raw datagrams, not the total wait
-        /// for a match.
+        /// the call: the loop keeps reading through them. The configured timeout bounds the whole
+        /// call as one deadline, including the time spent skipping filtered datagrams:
+        /// `SO_RCVTIMEO` is re-armed with the remaining time before each raw read, so steady
+        /// unrelated traffic cannot extend the wait indefinitely. Without a configured timeout the
+        /// call blocks until a match arrives. Concurrent `recv` calls on a shared reference are
+        /// unsupported: the deadline re-arms `SO_RCVTIMEO` on the shared socket (the repository
+        /// is single-threaded by contract).
         ///
         /// This method only parses enough header state to apply the userspace demux filters. It does
         /// not validate the UDP checksum, OCS, or option semantics; the pure receive pipeline owns
@@ -116,8 +128,35 @@ mod platform {
         /// the `log` facade because it cannot safely reach that pipeline; applications embedding the
         /// library must install a logger to retain this required diagnostic.
         pub fn recv(&self) -> Result<Option<Vec<u8>>, SocketError> {
+            let configured = self.socket.read_timeout().map_err(map_socket_error)?;
+            // A timeout too large for the monotonic clock is as good as no deadline.
+            let Some(deadline) = configured.and_then(|timeout| Instant::now().checked_add(timeout)) else {
+                return self.recv_with_deadline(None);
+            };
+            let result = self.recv_with_deadline(Some(deadline));
+            // recv_with_deadline shrinks SO_RCVTIMEO towards the deadline; restore the configured
+            // value so the next call starts from a full timeout again. If the restore fails, the
+            // error is surfaced and the socket may keep the shrunk value until the next
+            // successful set_read_timeout.
+            let restored = self.socket.set_read_timeout(configured).map_err(map_socket_error);
+            match (result, restored) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+            }
+        }
+
+        fn recv_with_deadline(&self, deadline: Option<Instant>) -> Result<Option<Vec<u8>>, SocketError> {
             let mut buf = [MaybeUninit::<u8>::uninit(); RECV_BUF_LEN];
             loop {
+                if let Some(deadline) = deadline {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Ok(None);
+                    }
+                    self.socket
+                        .set_read_timeout(Some(remaining.max(MIN_READ_TIMEOUT)))
+                        .map_err(map_socket_error)?;
+                }
                 let n = match self.socket.recv(&mut buf) {
                     Ok(n) => n,
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {

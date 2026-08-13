@@ -5,6 +5,8 @@ mod common_assemble;
 use std::error::Error;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use udp_transport_options::error::SocketError;
@@ -103,6 +105,86 @@ fn loopback_round_trip_preserves_surplus_and_filters_ports() -> Result<(), Box<d
     assert!(recv_until(&own_src_receiver, Duration::from_millis(600))?.is_none());
 
     Ok(())
+}
+
+#[test]
+#[ignore = "requires Linux CAP_NET_RAW/root; run through scripts/vm-ubuntu-server.sh ignored"]
+fn recv_deadline_holds_under_filtered_noise() -> Result<(), Box<dyn Error>> {
+    // Follow-up to the PR 27 review: SO_RCVTIMEO re-arms per raw read, so before the deadline fix
+    // a steady stream of filtered datagrams kept `recv` from ever returning `None`.
+    let (src_port, dst_port, noise_port) = distinct_ports();
+    let receiver = match RawReceiver::bind(dst_port, Some(src_port), None) {
+        Ok(receiver) => receiver,
+        Err(SocketError::PermissionDenied) => {
+            if std::env::var_os("ACHIM_SUDO").is_some() {
+                return Err(Box::new(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "ACHIM_SUDO=1 but CAP_NET_RAW/root is unavailable",
+                )));
+            }
+            eprintln!("skipping raw-socket deadline test: CAP_NET_RAW/root is unavailable");
+            return Ok(());
+        }
+        Err(error) => return Err(Box::new(error)),
+    };
+    receiver.set_read_timeout(Some(Duration::from_millis(300)))?;
+
+    // Bound to the noise target port: suppresses ICMP port-unreachable and later proves that
+    // noise really flowed while `recv` was blocking.
+    let noise_sink = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, noise_port))?;
+    noise_sink.set_nonblocking(true)?;
+
+    // The noise source is a child process, not a thread (repo rule: no threads anywhere,
+    // including tests): this test binary re-invoked on the `noise_sender_child` helper.
+    let mut noise = Command::new(std::env::current_exe()?)
+        .args(["--ignored", "--exact", "noise_sender_child"])
+        .env("NOISE_TARGET_PORT", noise_port.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let start = Instant::now();
+    let result = receiver.recv();
+    let elapsed = start.elapsed();
+    let _ = noise.kill();
+    noise.wait()?;
+
+    let mut sink_buf = [0u8; 16];
+    let noise_flowed = noise_sink.recv_from(&mut sink_buf).is_ok();
+
+    eprintln!("recv elapsed under filtered noise: {elapsed:?}");
+    assert!(result?.is_none(), "no datagram matches the src/dst port filters");
+    assert!(
+        noise_flowed,
+        "the noise child never delivered a datagram; the run proves nothing"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(250),
+        "recv returned before the deadline: {elapsed:?}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "recv did not honor the deadline under filtered noise: {elapsed:?}"
+    );
+    Ok(())
+}
+
+/// Helper for `recv_deadline_holds_under_filtered_noise`, run as a child process. Without
+/// `NOISE_TARGET_PORT` in the environment (the normal `--ignored` lane) it is a no-op.
+#[test]
+#[ignore = "no-op helper; driven by recv_deadline_holds_under_filtered_noise via NOISE_TARGET_PORT"]
+fn noise_sender_child() {
+    let Ok(port) = std::env::var("NOISE_TARGET_PORT") else {
+        return;
+    };
+    let port: u16 = port.parse().expect("NOISE_TARGET_PORT is a UDP port number");
+    let socket = UdpSocket::bind(SocketAddrV4::new(LOOPBACK, 0)).expect("noise source socket");
+    // Datagrams well inside the parent's 300 ms timeout, hard-capped so a regression in the
+    // parent fails its elapsed assertion instead of hanging both processes.
+    for _ in 0..200 {
+        let _ = socket.send_to(b"noise", SocketAddrV4::new(LOOPBACK, port));
+        thread::sleep(Duration::from_millis(25));
+    }
 }
 
 fn raw_sender_or_skip() -> Result<Option<RawSender>, Box<dyn Error>> {
