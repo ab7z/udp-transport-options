@@ -18,6 +18,12 @@ negative control. A later external campaign at commit `7b11140` added initial He
 observations and an ephemeral WireGuard control. The repository still has no reproducible tunnel
 lane, and the limited external observations do not complete FF2.
 
+The single canonical result record for the external campaigns from 2026-08-10 and 2026-08-11 is
+[`docs/campaign-2026-08-11-bidirectional.md`](docs/campaign-2026-08-11-bidirectional.md). It combines
+the `[codex]` and `[claude]` results. Update that file in place and do not create separate
+harness-specific campaign result files. Raw pcaps, manifests, scripts, and archives remain separate
+evidence and are not replacement result documents.
+
 The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
 git commit per step on `main`. The authoritative plan is `docs/plan/ROADMAP.md`,
 with a per-step file under `docs/plan/steps/`.
