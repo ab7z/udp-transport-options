@@ -17,10 +17,14 @@ field against this script's own decoding, so two independent decoders must agree
 Python 3 standard library only (achim carries no extra packages).
 """
 
+import os
 import struct
 import sys
 
-SRC_IP = "127.0.0.1"
+# WIRE_SRC_ADDR/WIRE_DST_ADDR mirror the examples/wire_probe.rs overrides for a real-path capture;
+# the default is the loopback lane.
+SRC_IP = os.environ.get("WIRE_SRC_ADDR", "127.0.0.1")
+DST_IP = os.environ.get("WIRE_DST_ADDR", "127.0.0.1")
 # Keep in sync with examples/wire_probe.rs and scripts/wire-check.sh.
 SRC_PORT = 0x9A00
 PORT_BASE = 0x9A68
@@ -334,8 +338,8 @@ SCENARIOS = [
 
 
 def check_scenario(spec, pkt, err):
-    if pkt.src != SRC_IP or pkt.dst != SRC_IP:
-        err(f"addresses {pkt.src} -> {pkt.dst} are not loopback")
+    if pkt.src != SRC_IP or pkt.dst != DST_IP:
+        err(f"addresses {pkt.src} -> {pkt.dst} do not match the expected {SRC_IP} -> {DST_IP}")
     if pkt.src_port != SRC_PORT:
         err(f"source port {pkt.src_port} != {SRC_PORT}")
     if pkt.ihl != 20:
@@ -443,8 +447,8 @@ def check_tlv_grammar(spec, region, options, end, err):
 
 def decode_production_fragment(pkt, err):
     """Independently decodes one fragment emitted by Rust's production splitter."""
-    if pkt.src != SRC_IP or pkt.dst != SRC_IP:
-        err(f"addresses {pkt.src} -> {pkt.dst} are not loopback")
+    if pkt.src != SRC_IP or pkt.dst != DST_IP:
+        err(f"addresses {pkt.src} -> {pkt.dst} do not match the expected {SRC_IP} -> {DST_IP}")
     if pkt.src_port != SRC_PORT:
         err(f"source port {pkt.src_port} != {SRC_PORT}")
     if pkt.ihl != 20:

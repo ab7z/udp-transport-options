@@ -12,9 +12,14 @@
 //! One destination port per scenario (`PORT_BASE` + scenario index). The checker owns the mirrored
 //! scenario table and fails on any port-set or byte mismatch, so the constants below must stay in
 //! sync with `scripts/wire-check.py`.
+//!
+//! `WIRE_SRC_ADDR`/`WIRE_DST_ADDR` override the loopback addresses so the same scenario set can be
+//! sent over a real path and captured on the far host's ingress interface; the checker verifies
+//! all checksums from the captured bytes themselves and carries no address expectations.
 
 use std::net::Ipv4Addr;
 use std::process;
+use std::sync::LazyLock;
 use std::thread;
 use std::time::Duration;
 
@@ -28,6 +33,19 @@ use udp_transport_options::wire::ip::IpRepr;
 use udp_transport_options::wire::udp::{self, UdpHeader};
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
+static SRC_ADDR: LazyLock<Ipv4Addr> = LazyLock::new(|| addr_env("WIRE_SRC_ADDR"));
+static DST_ADDR: LazyLock<Ipv4Addr> = LazyLock::new(|| addr_env("WIRE_DST_ADDR"));
+
+fn addr_env(var: &str) -> Ipv4Addr {
+    match std::env::var(var) {
+        Ok(value) => value.parse().unwrap_or_else(|_| {
+            eprintln!("wire_probe FAIL: {var}={value} is not an IPv4 address");
+            process::exit(64);
+        }),
+        Err(_) => LOOPBACK,
+    }
+}
+
 /// Fixed source port, above the spike marker range (`0x9868` + case index) so stale spike traffic
 /// can never collide with this lane.
 const SRC_PORT: u16 = 0x9a00;
@@ -89,8 +107,8 @@ fn hand_built_datagram(user: &[u8], dst_port: u16, zero_udp_checksum: bool, opti
     let total_len = u16::try_from(natural_start + options_body.len()).expect("total length fits the 16-bit field");
 
     let ip = IpRepr {
-        src: LOOPBACK,
-        dst: LOOPBACK,
+        src: *SRC_ADDR,
+        dst: *DST_ADDR,
         ihl: 5,
         total_len,
     };
@@ -157,7 +175,7 @@ fn production_split_datagrams(dst_port: u16) -> Vec<Vec<u8>> {
 
     fragments
         .into_iter()
-        .map(|fragment| assemble_datagram(LOOPBACK, LOOPBACK, SRC_PORT, dst_port, b"", &fragment.surplus_body))
+        .map(|fragment| assemble_datagram(*SRC_ADDR, *DST_ADDR, SRC_PORT, dst_port, b"", &fragment.surplus_body))
         .collect()
 }
 
@@ -202,8 +220,8 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "canon-even",
             datagram: assemble_datagram(
-                LOOPBACK,
-                LOOPBACK,
+                *SRC_ADDR,
+                *DST_ADDR,
                 SRC_PORT,
                 port(1),
                 b"wire",
@@ -230,8 +248,8 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "pad-odd",
             datagram: assemble_datagram(
-                LOOPBACK,
-                LOOPBACK,
+                *SRC_ADDR,
+                *DST_ADDR,
                 SRC_PORT,
                 port(2),
                 b"odd",
@@ -241,8 +259,8 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "frag-nonterm",
             datagram: assemble_datagram(
-                LOOPBACK,
-                LOOPBACK,
+                *SRC_ADDR,
+                *DST_ADDR,
                 SRC_PORT,
                 port(3),
                 b"",
@@ -252,8 +270,8 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "frag-term",
             datagram: assemble_datagram(
-                LOOPBACK,
-                LOOPBACK,
+                *SRC_ADDR,
+                *DST_ADDR,
                 SRC_PORT,
                 port(4),
                 b"",
@@ -263,8 +281,8 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "ocs-forced-ffff",
             datagram: assemble_datagram(
-                LOOPBACK,
-                LOOPBACK,
+                *SRC_ADDR,
+                *DST_ADDR,
                 SRC_PORT,
                 port(5),
                 b"",
@@ -274,8 +292,8 @@ fn scenarios() -> Vec<Scenario> {
         Scenario {
             name: "ext-len",
             datagram: assemble_datagram(
-                LOOPBACK,
-                LOOPBACK,
+                *SRC_ADDR,
+                *DST_ADDR,
                 SRC_PORT,
                 port(6),
                 b"",
@@ -293,11 +311,11 @@ fn scenarios() -> Vec<Scenario> {
         },
         Scenario {
             name: "frag-data-nonterm",
-            datagram: assemble_datagram(LOOPBACK, LOOPBACK, SRC_PORT, port(8), b"", &frag_data_nonterm),
+            datagram: assemble_datagram(*SRC_ADDR, *DST_ADDR, SRC_PORT, port(8), b"", &frag_data_nonterm),
         },
         Scenario {
             name: "frag-data-term",
-            datagram: assemble_datagram(LOOPBACK, LOOPBACK, SRC_PORT, port(9), b"", &frag_data_term),
+            datagram: assemble_datagram(*SRC_ADDR, *DST_ADDR, SRC_PORT, port(9), b"", &frag_data_term),
         },
     ]
 }
@@ -317,12 +335,14 @@ fn main() {
     let split_port = PORT_BASE + u16::try_from(all.len()).expect("scenario count fits u16");
     let split_datagrams = production_split_datagrams(split_port);
     println!(
-        "wire_probe: {LOOPBACK} -> {LOOPBACK} (src port {SRC_PORT}), {} scenarios",
+        "wire_probe: {} -> {} (src port {SRC_PORT}), {} scenarios",
+        *SRC_ADDR,
+        *DST_ADDR,
         all.len() + 1
     );
     for (index, scenario) in all.iter().enumerate() {
         let dst_port = PORT_BASE + u16::try_from(index).expect("scenario count fits u16");
-        if let Err(err) = sender.send(LOOPBACK, &scenario.datagram) {
+        if let Err(err) = sender.send(*DST_ADDR, &scenario.datagram) {
             eprintln!("wire_probe FAIL: {} (port {dst_port}): {err}", scenario.name);
             process::exit(1);
         }
@@ -345,7 +365,7 @@ fn main() {
     );
     for fragment_index in split_order {
         let datagram = &split_datagrams[fragment_index];
-        if let Err(err) = sender.send(LOOPBACK, datagram) {
+        if let Err(err) = sender.send(*DST_ADDR, datagram) {
             eprintln!("wire_probe FAIL: production-split fragment {fragment_index} (port {split_port}): {err}");
             process::exit(1);
         }
