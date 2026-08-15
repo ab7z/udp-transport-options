@@ -47,8 +47,9 @@ case "$SCENARIO" in
         RECV_EXTRA="--max-reassembled-size 6008 --max-segments 4 --max-pending-partials 64 --reassembly-timeout-ms 60000"
         ;;
     p2netem)
-        echo "S-51 ist durch das E1-Freigabetor gesperrt (p2-plan.md Abschnitt 4):" >&2
-        echo "erst achim-Probelauf archivieren, dann explizites Go einholen." >&2
+        echo "S-51 wurde am 2026-08-15 begruendet gestrichen (Entscheidung E1 = No-Go)." >&2
+        echo "Begruendung: p2-ergebnisse.md, Abschnitt 'S-51: begruendete Streichung'." >&2
+        echo "Kein tc-Eingriff auf mcs; dieses Szenario ist absichtlich nicht implementiert." >&2
         exit 65
         ;;
     *) echo "unknown scenario: $SCENARIO" >&2; exit 64 ;;
