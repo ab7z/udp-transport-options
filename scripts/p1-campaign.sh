@@ -28,16 +28,20 @@ cd "$(dirname "$0")/.."
 RUN_ROOT="target/p1-campaign-$STAMP/$SCENARIO"
 mkdir -p "$RUN_ROOT"
 
-MCS_SSH=ab@46.225.188.39
-MCS_IP=46.225.188.39
-MCS_IF=eth0
-MCS_DIR=/home/ab/uoe-s00
-MCS_SUDO=sudo
-BLU_SSH=root@178.254.35.195
-BLU_IP=178.254.35.195
-BLU_IF=venet0
-BLU_DIR=/root/uoe-s00
-BLU_SUDO=
+# Role A defaults to mcs, role B to 1blu; override from the environment to measure another host
+# pair without editing the driver. A_NAME/B_NAME only label directions and artifact directories.
+MCS_SSH=${MCS_SSH:-ab@46.225.188.39}
+MCS_IP=${MCS_IP:-46.225.188.39}
+MCS_IF=${MCS_IF:-eth0}
+MCS_DIR=${MCS_DIR:-/home/ab/uoe-s00}
+MCS_SUDO=${MCS_SUDO:-sudo}
+BLU_SSH=${BLU_SSH:-root@178.254.35.195}
+BLU_IP=${BLU_IP:-178.254.35.195}
+BLU_IF=${BLU_IF:-venet0}
+BLU_DIR=${BLU_DIR:-/root/uoe-s00}
+BLU_SUDO=${BLU_SUDO-}
+A_NAME=${A_NAME:-mcs}
+B_NAME=${B_NAME:-1blu}
 
 DST_PORT=47101
 SRC_PORT=47102
@@ -318,8 +322,8 @@ run_direction() {
 # --- dispatch ------------------------------------------------------------------------------------
 
 : >"$RUN_ROOT/results.md"
-run_direction a-mcs-to-1blu "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
+run_direction "a-$A_NAME-to-$B_NAME" "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
     "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO"
-run_direction b-1blu-to-mcs "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
+run_direction "b-$B_NAME-to-$A_NAME" "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
     "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO"
 echo "done: $RUN_ROOT"
