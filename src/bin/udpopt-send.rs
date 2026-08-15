@@ -5,13 +5,20 @@ use std::io::{self, Write};
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::thread::sleep;
+use std::time::Duration;
 
 use clap::Parser;
 use udp_transport_options::api::{DatagramAddrs, FragmentationMode, SendConfig, SendOptions, build_outgoing_datagrams};
 use udp_transport_options::error::{SendError, SocketError};
 use udp_transport_options::frag::split::{IdentificationGenerator, PeerFragmentLimits};
+use udp_transport_options::model::length;
 use udp_transport_options::options::typed::{Mds, Mrds, Req, Res};
-use udp_transport_options::socket::send::RawSender;
+use udp_transport_options::socket::send::{RawSender, assemble_datagram};
+
+const IPV4_HEADER_LEN: usize = 20;
+const UDP_LENGTH_AT: usize = IPV4_HEADER_LEN + 4;
+const UDP_CHECKSUM_AT: usize = IPV4_HEADER_LEN + 6;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Send RFC 9868 UDP-options datagrams over a Linux raw socket")]
@@ -96,6 +103,32 @@ struct Args {
     #[arg(long)]
     identification: Option<u32>,
 
+    /// Raw surplus-area option bytes, written after the two-byte OCS field, which stays correct.
+    /// Replaces the built option set and is never fragmented.
+    #[arg(long)]
+    raw_options_hex: Option<String>,
+
+    /// Overwrite the two-byte OCS field after the correct value was computed.
+    #[arg(long)]
+    ocs_hex: Option<String>,
+
+    /// Overwrite the surplus-area alignment pad byte, which exists only for an odd payload length.
+    #[arg(long)]
+    pad_hex: Option<String>,
+
+    /// Write a zero UDP checksum field after assembly.
+    #[arg(long)]
+    udp_cksum_zero: bool,
+
+    /// Emit only these datagram indices of every logical send, in this order. Repeat an index to
+    /// duplicate that datagram; omit one to drop it.
+    #[arg(long, value_delimiter = ',')]
+    frag_emit: Option<Vec<usize>>,
+
+    /// Wait this many milliseconds between the emitted datagrams of one logical send.
+    #[arg(long, default_value_t = 0)]
+    frag_gap_ms: u64,
+
     /// Print each emitted IPv4 datagram as hex.
     #[arg(long)]
     hexdump: bool,
@@ -123,6 +156,12 @@ fn run(args: Args) -> Result<(), CliError> {
     if args.count == 0 {
         return Err(CliError::Message("count must be at least 1".into()));
     }
+    if args.raw_options_hex.is_some() && builds_options(&args) {
+        return Err(CliError::Message(
+            "--raw-options-hex replaces the option set; drop --apc, --mds, --mrds-size, --req and --res".into(),
+        ));
+    }
+    let faults = WireFaults::parse(&args)?;
 
     let addrs = DatagramAddrs {
         src: args.src,
@@ -159,11 +198,23 @@ fn run(args: Args) -> Result<(), CliError> {
             .checked_add(u64::try_from(index).expect("usize index fits u64"))
             .ok_or_else(|| CliError::Message("sequence number overflow".into()))?;
         let payload = payload_for(&args, seq)?;
-        let options = send_options(&args)?;
-        let (datagrams, identification) =
-            build_datagrams_for_send(addrs, &payload, options, base_config, &mut identifications)?;
+        let (mut datagrams, identification) = match &args.raw_options_hex {
+            Some(body_hex) => (vec![raw_options_datagram(&args, &payload, body_hex)?], None),
+            None => {
+                let options = send_options(&args)?;
+                build_datagrams_for_send(addrs, &payload, options, base_config, &mut identifications)?
+            }
+        };
+        for datagram in &mut datagrams {
+            faults.apply(datagram)?;
+        }
+        let order = emit_order(args.frag_emit.as_deref(), datagrams.len())?;
         let mut sent_bytes = 0usize;
-        for (datagram_index, datagram) in datagrams.iter().enumerate() {
+        for (position, datagram_index) in order.iter().copied().enumerate() {
+            if position > 0 && args.frag_gap_ms > 0 {
+                sleep(Duration::from_millis(args.frag_gap_ms));
+            }
+            let datagram = &datagrams[datagram_index];
             sent_bytes = sent_bytes
                 .checked_add(sender.send(args.dst, datagram).map_err(CliError::from_socket)?)
                 .ok_or_else(|| CliError::Message("sent byte count overflow".into()))?;
@@ -174,7 +225,7 @@ fn run(args: Args) -> Result<(), CliError> {
         println!(
             "sent seq={seq} payload={} datagrams={} bytes={} {}:{} -> {}:{}",
             payload.len(),
-            datagrams.len(),
+            order.len(),
             sent_bytes,
             args.src,
             args.src_port,
@@ -193,7 +244,7 @@ fn run(args: Args) -> Result<(), CliError> {
                 identification,
                 payload.len(),
                 crc32c::crc32c(&payload),
-                datagrams.len(),
+                order.len(),
                 sent_bytes
             )?;
         }
@@ -225,6 +276,138 @@ fn build_datagrams_for_send(
             Ok((datagrams, Some(identification)))
         }
         result => result.map(|datagrams| (datagrams, None)),
+    }
+}
+
+/// Builds one datagram whose surplus area carries caller-supplied option bytes verbatim.
+///
+/// The OCS stays correct, so a receiver rejecting the datagram rejects the option bytes themselves
+/// and not their checksum. Use `--ocs-hex` to break the OCS on purpose.
+fn raw_options_datagram(args: &Args, payload: &[u8], body_hex: &str) -> Result<Vec<u8>, CliError> {
+    let mut body = vec![0u8; usize::from(length::OCS)];
+    body.extend_from_slice(&parse_hex_vec(body_hex)?);
+    let upper_bound = IPV4_HEADER_LEN + usize::from(length::UDP_HEADER) + payload.len() + 1 + body.len();
+    if upper_bound > usize::from(u16::MAX) {
+        return Err(CliError::Message(format!(
+            "raw-options datagram exceeds the 16-bit length fields: up to {upper_bound} bytes"
+        )));
+    }
+
+    let datagram = assemble_datagram(args.src, args.dst, args.src_port, args.dst_port, payload, &body);
+    if datagram.len() > args.max_datagram_len {
+        return Err(CliError::Message(format!(
+            "raw-options datagram is too large: {} bytes, max {} bytes",
+            datagram.len(),
+            args.max_datagram_len
+        )));
+    }
+    Ok(datagram)
+}
+
+/// Where the surplus area of an assembled datagram begins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SurplusLayout {
+    starts_at: usize,
+    needs_pad: bool,
+}
+
+impl SurplusLayout {
+    fn ocs_at(self) -> usize {
+        self.starts_at + usize::from(self.needs_pad)
+    }
+}
+
+fn surplus_layout(datagram: &[u8]) -> Option<SurplusLayout> {
+    if datagram.len() < IPV4_HEADER_LEN + usize::from(length::UDP_HEADER) {
+        return None;
+    }
+    let udp_len = usize::from(u16::from_be_bytes([
+        datagram[UDP_LENGTH_AT],
+        datagram[UDP_LENGTH_AT + 1],
+    ]));
+    let starts_at = IPV4_HEADER_LEN.checked_add(udp_len)?;
+    (starts_at < datagram.len()).then_some(SurplusLayout {
+        starts_at,
+        needs_pad: !starts_at.is_multiple_of(2),
+    })
+}
+
+/// Deliberate wire faults applied to every assembled datagram.
+#[derive(Debug, Default)]
+struct WireFaults {
+    ocs: Option<[u8; 2]>,
+    pad: Option<u8>,
+    zero_udp_checksum: bool,
+}
+
+impl WireFaults {
+    fn parse(args: &Args) -> Result<Self, CliError> {
+        Ok(Self {
+            ocs: args.ocs_hex.as_deref().map(parse_ocs_field).transpose()?,
+            pad: args.pad_hex.as_deref().map(parse_pad_byte).transpose()?,
+            zero_udp_checksum: args.udp_cksum_zero,
+        })
+    }
+
+    fn apply(&self, datagram: &mut [u8]) -> Result<(), CliError> {
+        if self.zero_udp_checksum {
+            datagram[UDP_CHECKSUM_AT..UDP_CHECKSUM_AT + 2].fill(0);
+        }
+        if self.ocs.is_none() && self.pad.is_none() {
+            return Ok(());
+        }
+
+        let layout = surplus_layout(datagram)
+            .ok_or_else(|| CliError::Message("--ocs-hex and --pad-hex need a datagram with a surplus area".into()))?;
+        if let Some(pad) = self.pad {
+            if !layout.needs_pad {
+                return Err(CliError::Message(
+                    "--pad-hex needs an alignment pad, which only an odd payload length creates".into(),
+                ));
+            }
+            datagram[layout.starts_at] = pad;
+        }
+        if let Some(ocs) = self.ocs {
+            datagram[layout.ocs_at()..layout.ocs_at() + ocs.len()].copy_from_slice(&ocs);
+        }
+        Ok(())
+    }
+}
+
+fn emit_order(requested: Option<&[usize]>, built: usize) -> Result<Vec<usize>, CliError> {
+    let Some(requested) = requested else {
+        return Ok((0..built).collect());
+    };
+    if requested.is_empty() {
+        return Err(CliError::Message(
+            "--frag-emit needs at least one datagram index".into(),
+        ));
+    }
+    if let Some(index) = requested.iter().find(|index| **index >= built) {
+        return Err(CliError::Message(format!(
+            "--frag-emit index {index} is out of range; this send built {built} datagram(s)"
+        )));
+    }
+    Ok(requested.to_vec())
+}
+
+fn builds_options(args: &Args) -> bool {
+    args.apc || args.mds.is_some() || args.mrds_size.is_some() || args.req.is_some() || args.res.is_some()
+}
+
+fn parse_ocs_field(input: &str) -> Result<[u8; 2], CliError> {
+    parse_hex_vec(input)?
+        .try_into()
+        .map_err(|bytes: Vec<u8>| CliError::Message(format!("--ocs-hex must be exactly 2 bytes, got {}", bytes.len())))
+}
+
+fn parse_pad_byte(input: &str) -> Result<u8, CliError> {
+    match parse_hex_vec(input)?[..] {
+        [byte] => Ok(byte),
+        ref bytes => Err(CliError::Message(format!(
+            "--pad-hex must be exactly 1 byte, got {}",
+            bytes.len()
+        ))),
     }
 }
 
@@ -310,6 +493,24 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use udp_transport_options::error::ParseError;
+    use udp_transport_options::options::ocs::{self, OcsCheck};
+
+    fn args_from(extra: &[&str]) -> Args {
+        let mut argv = vec!["udpopt-send", "--src", "192.0.2.1", "--dst", "198.51.100.2"];
+        argv.extend_from_slice(extra);
+        Args::parse_from(argv)
+    }
+
+    fn udp_checksum_field(datagram: &[u8]) -> u16 {
+        u16::from_be_bytes([datagram[UDP_CHECKSUM_AT], datagram[UDP_CHECKSUM_AT + 1]])
+    }
+
+    fn validate_ocs(datagram: &[u8]) -> OcsCheck {
+        let layout = surplus_layout(datagram).expect("assembled datagram carries a surplus area");
+        let surplus_len = u16::try_from(datagram.len() - layout.starts_at).expect("surplus length fits u16");
+        ocs::validate(&datagram[layout.ocs_at()..], surplus_len, udp_checksum_field(datagram))
+    }
 
     fn addrs() -> DatagramAddrs {
         DatagramAddrs {
@@ -354,6 +555,112 @@ mod tests {
         assert!(datagrams.len() > 1);
         assert_eq!(identification, Some(u32::MAX));
         assert!(identifications.next_id().is_err());
+    }
+
+    #[test]
+    fn raw_option_bytes_reach_the_wire_under_a_correct_ocs() {
+        // A deliberately malformed MDS: Kind 4 with Length 200 overruns the surplus area.
+        let args = args_from(&["--raw-options-hex", "04c80000"]);
+        let datagram = raw_options_datagram(&args, b"even", "04c80000").unwrap();
+
+        let layout = surplus_layout(&datagram).unwrap();
+        assert!(!layout.needs_pad);
+        assert_eq!(
+            &datagram[layout.ocs_at() + usize::from(length::OCS)..],
+            &[0x04, 0xc8, 0x00, 0x00]
+        );
+        assert_eq!(validate_ocs(&datagram), OcsCheck::Valid);
+    }
+
+    #[test]
+    fn an_odd_payload_creates_the_pad_that_pad_hex_corrupts() {
+        let args = args_from(&["--raw-options-hex", "0a020000", "--pad-hex", "ff"]);
+        let mut datagram = raw_options_datagram(&args, b"odd", "0a020000").unwrap();
+        let layout = surplus_layout(&datagram).unwrap();
+        assert!(layout.needs_pad);
+
+        WireFaults::parse(&args).unwrap().apply(&mut datagram).unwrap();
+
+        assert_eq!(datagram[layout.starts_at], 0xff);
+        // The pad sits outside the OCS fold, so only the receiver's pad check can catch it.
+        assert_eq!(validate_ocs(&datagram), OcsCheck::Valid);
+    }
+
+    #[test]
+    fn pad_hex_is_rejected_when_the_datagram_has_no_pad() {
+        let args = args_from(&["--raw-options-hex", "0a020000", "--pad-hex", "ff"]);
+        let mut datagram = raw_options_datagram(&args, b"even", "0a020000").unwrap();
+
+        let error = WireFaults::parse(&args).unwrap().apply(&mut datagram).unwrap_err();
+
+        assert!(error.to_string().contains("alignment pad"));
+    }
+
+    #[test]
+    fn ocs_hex_overwrites_the_computed_checksum() {
+        let args = args_from(&["--raw-options-hex", "0a020000", "--ocs-hex", "dead"]);
+        let mut datagram = raw_options_datagram(&args, b"even", "0a020000").unwrap();
+        assert_eq!(validate_ocs(&datagram), OcsCheck::Valid);
+
+        WireFaults::parse(&args).unwrap().apply(&mut datagram).unwrap();
+
+        let layout = surplus_layout(&datagram).unwrap();
+        assert_eq!(&datagram[layout.ocs_at()..layout.ocs_at() + 2], &[0xde, 0xad]);
+        assert_eq!(validate_ocs(&datagram), OcsCheck::Error(ParseError::OcsMismatch));
+    }
+
+    #[test]
+    fn a_zero_ocs_under_a_zero_udp_checksum_is_the_unused_disposition() {
+        let args = args_from(&["--raw-options-hex", "0a020000", "--ocs-hex", "0000", "--udp-cksum-zero"]);
+        let mut datagram = raw_options_datagram(&args, b"even", "0a020000").unwrap();
+        assert_ne!(udp_checksum_field(&datagram), 0);
+
+        WireFaults::parse(&args).unwrap().apply(&mut datagram).unwrap();
+
+        assert_eq!(udp_checksum_field(&datagram), 0);
+        assert_eq!(validate_ocs(&datagram), OcsCheck::Unused);
+    }
+
+    #[test]
+    fn a_zero_ocs_under_a_live_udp_checksum_orders_the_options_ignored() {
+        let args = args_from(&["--raw-options-hex", "0a020000", "--ocs-hex", "0000"]);
+        let mut datagram = raw_options_datagram(&args, b"even", "0a020000").unwrap();
+
+        WireFaults::parse(&args).unwrap().apply(&mut datagram).unwrap();
+
+        assert_ne!(udp_checksum_field(&datagram), 0);
+        assert_eq!(validate_ocs(&datagram), OcsCheck::IgnoreOptions);
+    }
+
+    #[test]
+    fn frag_emit_drops_duplicates_and_reorders_datagrams() {
+        assert_eq!(emit_order(None, 3).unwrap(), vec![0, 1, 2]);
+        assert_eq!(emit_order(Some(&[0]), 2).unwrap(), vec![0]);
+        assert_eq!(emit_order(Some(&[0, 0, 1]), 2).unwrap(), vec![0, 0, 1]);
+        assert_eq!(emit_order(Some(&[1, 0]), 2).unwrap(), vec![1, 0]);
+    }
+
+    #[test]
+    fn frag_emit_rejects_an_empty_list_and_out_of_range_indices() {
+        assert!(
+            emit_order(Some(&[]), 2)
+                .unwrap_err()
+                .to_string()
+                .contains("at least one")
+        );
+        assert!(
+            emit_order(Some(&[0, 2]), 2)
+                .unwrap_err()
+                .to_string()
+                .contains("index 2 is out of range")
+        );
+    }
+
+    #[test]
+    fn raw_options_and_built_options_are_mutually_exclusive() {
+        assert!(builds_options(&args_from(&["--apc"])));
+        assert!(builds_options(&args_from(&["--mds", "1200"])));
+        assert!(!builds_options(&args_from(&["--raw-options-hex", "0a020000"])));
     }
 }
 
