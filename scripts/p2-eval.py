@@ -292,6 +292,26 @@ def eval_p2frag(out, attempts, egress, ingress, rows):
     report(spec["label"], spec["etikett"], eg, eg_gate, ing,
            f"{len(got_frag)}+{len(got_ctl)}", f"{spec['frag_delivered']}+{spec['control_delivered']}", problems)
 
+    # S-24r: unequal per-fragment option sets (MDS only in fragment 1) must still reassemble.
+    spec = plan["s24r"]
+    seqs = set(range(spec["seq"], spec["seq"] + spec["n"]))
+    ids = set(range(spec["ids"][0], spec["ids"][1] + 1))
+    eg, eg_gate = gate_summary(egress, frag_ids=ids)
+    ing, _ = gate_summary(ingress, frag_ids=ids)
+    got = [row for seq in sorted(seqs) for row in by_seq.get(seq, [])]
+    problems = []
+    if eg != 2 * spec["n"] or eg_gate:
+        problems.append(f"Egress {eg} (Gate-Fehler {eg_gate}) statt {2 * spec['n']}")
+    if len(got) != spec["delivered"]:
+        problems.append(f"{len(got)} statt {spec['delivered']} zugestellt")
+    for row in got:
+        if row.get("payload_len") != spec["paylen"]:
+            problems.append(f"payload_len={row.get('payload_len')} statt {spec['paylen']}")
+    report(spec["label"], spec["etikett"], eg, eg_gate, ing, len(got), spec["delivered"], problems)
+    s24r_obs = (f"S-24r Beobachtung: options='{got[0].get('options', '')}', "
+                f"reports='{got[0].get('reports', '')}', ocs='{got[0].get('ocs_reports', '')}'"
+                if got else "S-24r Beobachtung: nichts zugestellt")
+
     # S-45: overlap cells, attributed via FRAG ids on the wire and fill bytes in delivered rows.
     fills_delivered = {}
     for row in delivered:
@@ -314,6 +334,7 @@ def eval_p2frag(out, attempts, egress, ingress, rows):
         report(spec["label"], spec["etikett"], eg, eg_gate, ing, len(got), spec["delivered"], problems)
 
     print()
+    print(f"- {s24r_obs}")
     print(f"- Empfaengerzeilen: payload {len(delivered)}, buffered {buffered}, dropped {dropped}")
     print(f"- Abweichungen gegenueber dem Zellplan: {len(findings)}")
     for finding in findings:

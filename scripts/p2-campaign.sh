@@ -37,7 +37,7 @@ CANARY_PORT=47103
 
 RECV_EXTRA=
 case "$SCENARIO" in
-    p2opt) EXPECTED=90 ;;
+    p2opt) EXPECTED=84 ;;
     p2frag)
         EXPECTED=0
         RECV_EXTRA="--max-reassembled-size 6008 --max-segments 4 --reassembly-timeout-ms 5000"
@@ -201,6 +201,15 @@ for k in 0 1 2 3 4 5; do
     # Z3 like Z1 with APC in both originals
     send_hex z3b 0 "$PAY_A4" "--identification $((63260 + k)) --max-datagram-len 1000 --peer-mrds-segments 3 --apc --frag-emit 0"
     send_hex z3a 0 "$PAY_A4" "--identification $((63260 + k)) --max-datagram-len 1500 --apc --frag-emit 1"
+done
+# S-24r (decision gate E3, taken: the S-19 hand-built technique holds): two raw fragments of one
+# set where only the FIRST carries a per-fragment MDS option. Unequal per-fragment option sets are
+# explicitly allowed (rfc9868 :1169); a reject on inequality would be an implementation finding.
+# Fragment 1: OCS + MDS(1472) + FRAG(len 10, FragStart 24, offset 8) + 64 bytes (leading seq).
+# Fragment 2: OCS + FRAG(len 12, FragStart 22, offset 72, RDOS 136) + 64 bytes fill.
+for k in 0 1 2 3 4 5; do
+    send_hex s24a $((2680 + k)) "" "--raw-options-hex 040405c0030a0018$(printf '%08x' $((63400 + k)))0008$(printf '%016x' $((2680 + k)))$(Z 56)"
+    send_hex s24b $((2680 + k)) "" "--raw-options-hex 030c0016$(printf '%08x' $((63400 + k)))00480088$(printf 'bb%.0s' $(seq 1 64))"
 done
 EOF
         ;;

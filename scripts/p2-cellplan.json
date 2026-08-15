@@ -1,7 +1,7 @@
 {
   "_kommentar": "Maschinenlesbarer Zellplan der P2-Kampagne (Plan v2). p2-eval.py liest Sollwerte NUR von hier. Etiketten: rfc-soll (RFC-Zitat im Plan), impl-ist (Code-Beleg, keine RFC-Vorgabe), versuchssoll (Mess-/Pfaderwartung). Report-Strings am 2026-08-15 auf mcs-Loopback kalibriert (p2cal.sh); Sollwerte selbst wurden vor der Kalibrierung im Plan v2 vorregistriert.",
   "p2opt": {
-    "expected_rows": 90,
+    "expected_rows": 84,
     "classes": {
       "a": {"label": "S-07a EOL ohne Fill", "seq": 2000, "n": 6, "etikett": "rfc-soll",
             "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64},
@@ -44,6 +44,9 @@
     "s34":  {"label": "S-34 Pending plus Parallelverkehr", "frag_seq": 2500, "control_seq": 2510,
              "groups": 6, "controls_per_group": 10, "etikett": "versuchssoll",
              "frag_delivered": 6, "control_delivered": 60, "control_paylen": 1200},
+    "s24r": {"label": "S-24r ungleiche Per-Fragment-Optionssaetze (MDS nur in Fragment 1)",
+             "seq": 2680, "n": 6, "ids": [63400, 63405], "etikett": "rfc-soll",
+             "delivered": 6, "paylen": 128},
     "s45": {
       "z0": {"label": "S-45 Z0 exaktes Duplikat (MAY-Spielraum)", "fill": "a0", "ids": [63200, 63205],
              "n": 6, "etikett": "rfc-soll", "delivered": 6, "egress_frags": 18},
