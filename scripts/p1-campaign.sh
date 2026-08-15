@@ -7,7 +7,8 @@
 #   scripts/p1-campaign.sh <scenario>
 #
 # Scenarios: p1opt (single-datagram option negatives S-04/S-05/S-06/S-08/S-10/S-11/S-13/S-20/S-21),
-# p1frag (fragment disturbance S-41/S-42/S-43/S-44).
+# p1frag (fragment disturbance S-41/S-42/S-43/S-44), p1coll (Identification collisions S-32/S-33/
+# S-52).
 #
 # Path constraint measured on 2026-08-15: this path enforces a legacy UDP checksum over the ENTIRE
 # IP payload, with the pseudo-header length taken from the IP total length instead of the UDP Length
@@ -45,7 +46,7 @@ CANARY_PORT=47103
 RECV_EXTRA=
 case "$SCENARIO" in
     p1opt) EXPECTED=90 ;;
-    p1frag)
+    p1frag | p1coll)
         EXPECTED=0
         RECV_EXTRA="--max-reassembled-size 6008 --max-segments 4 --reassembly-timeout-ms 5000"
         ;;
@@ -115,6 +116,10 @@ make_sender_script() { # $1 src_ip, $2 dst_ip
 #!/usr/bin/env bash
 set -u
 cd "\$(dirname "\$0")"
+SEND_SRC=$1
+SEND_DST=$2
+SEND_SPORT=$SRC_PORT
+SEND_DPORT=$DST_PORT
 send() {
     local cls="\$1" seq="\$2" pay="\$3" extra="\$4" rc=0
     ../udpopt-send --src $1 --dst $2 --src-port $SRC_PORT --dst-port $DST_PORT \\
@@ -186,6 +191,63 @@ for k in 0 1 2 3 4 5; do
     send f $((600 + k)) 2000 "--identification $((60500 + k)) --frag-emit 0"
     sleep 1
     send f $((600 + k)) 2000 "--identification $((60500 + k)) --frag-emit 1"
+done
+EOF
+        ;;
+    p1coll) cat <<'EOF'
+# Identification collisions. Two logical datagrams A and B of equal size share one 4-tuple; their
+# fragments are emitted one at a time so they interleave. The payload is derived from the sequence
+# number, so repeating a send with the same --seq-start reproduces the same fragment bytes exactly.
+#
+# S-32 distinct Identifications, interleaved: both sets must reassemble independently.
+for k in 0 1 2 3 4 5; do
+    send a $((100 + k)) 2000 "--identification $((61000 + k)) --frag-emit 0"
+    send a $((150 + k)) 2000 "--identification $((61100 + k)) --frag-emit 0"
+    send a $((100 + k)) 2000 "--identification $((61000 + k)) --frag-emit 1"
+    send a $((150 + k)) 2000 "--identification $((61100 + k)) --frag-emit 1"
+done
+# S-33 shared Identification with overlapping offsets: A0 and B0 claim the same offset with
+# different content, which must abort the set rather than deliver a mixture.
+for k in 0 1 2 3 4 5; do
+    send b $((200 + k)) 2000 "--identification $((61200 + k)) --frag-emit 0"
+    send b $((250 + k)) 2000 "--identification $((61200 + k)) --frag-emit 0"
+    send b $((200 + k)) 2000 "--identification $((61200 + k)) --frag-emit 1"
+    send b $((250 + k)) 2000 "--identification $((61200 + k)) --frag-emit 1"
+done
+# S-52 shared Identification, complementary halves, no overlap: the first fragment of A plus the
+# terminal fragment of B form a complete set of a datagram that was never sent. Whatever the
+# receiver does here follows the RFC; a delivered mixture is a robustness finding, not a defect.
+for k in 0 1 2 3 4 5; do
+    send c $((300 + k)) 2000 "--identification $((61300 + k)) --frag-emit 0"
+    send c $((350 + k)) 2000 "--identification $((61300 + k)) --frag-emit 1"
+done
+# S-52 with APC on both originals: the terminal fragment carries B's APC, which cannot match a
+# mixed payload. This is the end-to-end check the RFC leaves optional.
+for k in 0 1 2 3 4 5; do
+    send d $((400 + k)) 2000 "--apc --identification $((61400 + k)) --frag-emit 0"
+    send d $((450 + k)) 2000 "--apc --identification $((61400 + k)) --frag-emit 1"
+done
+# S-52 with payloads that differ in every byte. --payload-size derives the payload from the sequence
+# number and only varies its first eight bytes, so the tails of A and B would be identical and a
+# mixture would be invisible in the bytes. Filling A with 0xa1 and B with 0xb2 makes the boundary
+# readable straight from the delivered payload.
+PAY_A=$(printf 'a1%.0s' $(seq 1 2000))
+PAY_B=$(printf 'b2%.0s' $(seq 1 2000))
+send_hex() {
+    local cls="$1" hex="$2" extra="$3" rc=0
+    ../udpopt-send --src "$SEND_SRC" --dst "$SEND_DST" --src-port "$SEND_SPORT" --dst-port "$SEND_DPORT" \
+        --count 1 --manifest manifest.jsonl --payload-hex "$hex" \
+        $extra >>send.log 2>&1 || rc=$?
+    echo "attempt class=$cls seq=0 payload=2000 rc=$rc" >>send.log
+    sleep 0.05
+}
+for k in 0 1 2 3 4 5; do
+    send_hex f "$PAY_A" "--identification $((61600 + k)) --frag-emit 0"
+    send_hex f "$PAY_B" "--identification $((61600 + k)) --frag-emit 1"
+done
+# Control: complete, undisturbed sends on the same path.
+for k in 0 1 2 3 4 5; do
+    send e $((500 + k)) 2000 "--identification $((61500 + k))"
 done
 EOF
         ;;

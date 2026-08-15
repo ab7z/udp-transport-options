@@ -219,6 +219,79 @@ def eval_p1frag(out, attempts, egress, ingress, rows):
         print(f"  - {finding}")
 
 
+P1COLL_CLASSES = {
+    "a": dict(label="S-32 verschiedene Identifications, verschachtelt", groups=6, expect=12),
+    "b": dict(label="S-33 gleiche Identification, ueberlappend", groups=6, expect=0),
+    "c": dict(label="S-52 gleiche Identification, komplementaer", groups=6, expect=None),
+    "d": dict(label="S-52 mit APC im Original", groups=6, expect=None),
+    "f": dict(label="S-52 mit unterscheidbaren Nutzdaten (0xa1 / 0xb2)", groups=6, expect=None),
+    "e": dict(label="Kontrolle: vollstaendige Sends", groups=6, expect=6),
+}
+
+
+def mixture_profile(row):
+    """Describes a delivered payload built from two differently filled originals."""
+    data = bytes.fromhex(row.get("payload_hex", ""))
+    if not data:
+        return None
+    a_bytes, b_bytes = data.count(0xA1), data.count(0xB2)
+    if a_bytes + b_bytes != len(data) or not (a_bytes and b_bytes):
+        return None
+    boundary = next(i for i, byte in enumerate(data) if byte != 0xA1)
+    return a_bytes, b_bytes, boundary
+
+
+def eval_p1coll(out, attempts, egress, ingress, rows, manifest):
+    """Reassembly under colliding Identifications.
+
+    A delivered datagram counts as a mixture when its CRC32C differs from the CRC the sender
+    recorded for that sequence number: the payload then contains bytes of a datagram that was
+    never sent as such.
+    """
+    expected_crc = {row["seq"]: row["payload_crc32c"] for row in manifest}
+    delivered = [row for row in rows if row.get("delivery") == "payload"]
+    buffered = sum(1 for row in rows if row.get("delivery") == "buffered")
+    dropped = sum(1 for row in rows if row.get("delivery") == "dropped")
+
+    print(f"\n## {out.name}\n")
+    print("| Klasse | Sendeversuche | zugestellt | davon unversehrt | davon Mischung | APC-Meldung |")
+    print("|---|---|---|---|---|---|")
+    # The 0xa1/0xb2 class carries no sequence number, so its rows are recognised by their fill.
+    mixtures = [row for row in delivered if mixture_profile(row)]
+    summary = {}
+    for cls, spec in P1COLL_CLASSES.items():
+        seqs = sorted({seq for klass, seq, _, _ in attempts if klass == cls})
+        sent = sum(1 for klass, _, _, _ in attempts if klass == cls)
+        if cls == "f":
+            got = mixtures
+        else:
+            got = [row for row in delivered if row_seq(row) in seqs and row not in mixtures]
+        intact = sum(1 for row in got if row.get("payload_crc32c") == expected_crc.get(row_seq(row)))
+        mixed = len(got) - intact
+        apc = ", ".join(sorted({r for row in got for r in row.get("reports", "").split(",") if "APC" in r})) or "-"
+        summary[cls] = (len(got), intact, mixed)
+        print(f"| {spec['label']} | {sent} | {len(got)} | {intact} | {mixed} | {apc} |")
+
+    egress_frags = sum(1 for _, udp_len, _ in egress if udp_len == 8)
+    ingress_frags = sum(1 for _, udp_len, _ in ingress if udp_len == 8)
+    print()
+    print(f"- Fragmente auf dem Draht: Egress {egress_frags}, Ingress {ingress_frags}")
+    print(f"- Empfaengerzeilen: payload {len(delivered)}, buffered {buffered}, dropped {dropped}")
+    for row in mixtures[:1]:
+        a_bytes, b_bytes, boundary = mixture_profile(row)
+        print(f"- **Mischung nachgewiesen**: zugestelltes Datagramm aus {a_bytes} Byte von A und "
+              f"{b_bytes} Byte von B, Schnitt bei Byte {boundary}, reports='{row.get('reports')}', "
+              f"ocs='{row.get('ocs_reports')}'. Dieses Datagramm wurde nie gesendet.")
+    for cls, spec in P1COLL_CLASSES.items():
+        got, intact, mixed = summary[cls]
+        if spec["expect"] is None:
+            print(f"- {spec['label']}: Messgroesse, kein Sollwert; {got} zugestellt, davon {mixed} Mischungen")
+        elif got != spec["expect"]:
+            print(f"- ABWEICHUNG {spec['label']}: {got} zugestellt, erwartet {spec['expect']}")
+        elif mixed:
+            print(f"- ABWEICHUNG {spec['label']}: {mixed} Mischungen trotz erwarteter Unversehrtheit")
+
+
 def main():
     if len(sys.argv) != 4:
         print(__doc__.strip(), file=sys.stderr)
@@ -235,6 +308,8 @@ def main():
         eval_p1opt(run_dir, attempts, egress, ingress, rows)
     elif scenario == "p1frag":
         eval_p1frag(run_dir, attempts, egress, ingress, rows)
+    elif scenario == "p1coll":
+        eval_p1coll(run_dir, attempts, egress, ingress, rows, read_rows(run_dir / "manifest.jsonl"))
     else:
         print(f"unknown scenario: {scenario}", file=sys.stderr)
         return 64
