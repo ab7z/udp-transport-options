@@ -372,5 +372,67 @@ class ArtifactValidationTests(unittest.TestCase):
                 )
 
 
+P2_SPEC = importlib.util.spec_from_file_location("p2_eval", ROOT / "scripts" / "p2-eval.py")
+assert P2_SPEC is not None and P2_SPEC.loader is not None
+p2_eval = importlib.util.module_from_spec(P2_SPEC)
+sys.modules[P2_SPEC.name] = p2_eval
+P2_SPEC.loader.exec_module(p2_eval)
+
+
+class P2EvalParserTests(unittest.TestCase):
+    """Fixture tests for the P2 evaluator's pcap decoding: FRAG option fields straight from the
+    surplus area and the legacy checksum-gate recomputation (finding P1-A)."""
+
+    def _packets(self, packets: list[bytes], ports: set[int]) -> list[dict]:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fixture.pcap"
+            write_raw_pcap(path, packets)
+            return list(p2_eval.pcap_packets(path, ports))
+
+    def test_decodes_terminal_frag_and_passes_gate(self) -> None:
+        data = bytes(range(64))
+        surplus = make_surplus(frag_region(0xFACE01, 8, data, rdos=8 + len(data)), 8)
+        packet = make_datagram(b"", surplus=surplus)
+        rows = self._packets([packet], {41001})
+        self.assertEqual(len(rows), 1)
+        frag = rows[0]["frag"]
+        self.assertIsNotNone(frag)
+        assert frag is not None
+        self.assertEqual(frag["id"], 0xFACE01)
+        self.assertEqual(frag["offset"], 8)
+        self.assertEqual(frag["rdos"], 8 + len(data))
+        self.assertTrue(frag["terminal"])
+        # a correct OCS keeps the whole-IP-payload legacy sum neutral, so the gate must pass
+        self.assertTrue(rows[0]["gate"])
+
+    def test_decodes_non_terminal_frag(self) -> None:
+        surplus = make_surplus(frag_region(0xBEEF02, 8, bytes(32)), 8)
+        rows = self._packets([make_datagram(b"", surplus=surplus)], {41001})
+        frag = rows[0]["frag"]
+        assert frag is not None
+        self.assertEqual((frag["id"], frag["terminal"], frag["rdos"]), (0xBEEF02, False, None))
+
+    def test_gate_fails_on_uncompensated_surplus_corruption(self) -> None:
+        surplus = make_surplus(frag_region(0xC0FE03, 8, bytes(32)), 8)
+        packet = bytearray(make_datagram(b"", surplus=surplus))
+        packet[-1] ^= 0xFF  # break the surplus without recomputing the OCS
+        rows = self._packets([bytes(packet)], {41001})
+        self.assertFalse(rows[0]["gate"])
+
+    def test_gate_passes_with_zero_udp_checksum_regardless_of_surplus(self) -> None:
+        surplus = make_surplus(frag_region(0xC0FE04, 8, bytes(32)), 8)
+        packet = bytearray(make_datagram(b"", surplus=surplus, udp_checksum_zero=True))
+        packet[-1] ^= 0xFF
+        rows = self._packets([bytes(packet)], {41001})
+        self.assertTrue(rows[0]["gate"])
+
+    def test_seq_and_port_filter(self) -> None:
+        payload = (0x2705).to_bytes(8, "big") + bytes(56)
+        rows = self._packets([make_datagram(payload), make_datagram(payload, dst_port=999)], {41001})
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["seq"], 0x2705)
+        self.assertIsNone(rows[0]["frag"])
+
+
 if __name__ == "__main__":
     unittest.main()

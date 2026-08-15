@@ -1,0 +1,72 @@
+{
+  "_kommentar": "Maschinenlesbarer Zellplan der P2-Kampagne (Plan v2). p2-eval.py liest Sollwerte NUR von hier. Etiketten: rfc-soll (RFC-Zitat im Plan), impl-ist (Code-Beleg, keine RFC-Vorgabe), versuchssoll (Mess-/Pfaderwartung). Report-Strings am 2026-08-15 auf mcs-Loopback kalibriert (p2cal.sh); Sollwerte selbst wurden vor der Kalibrierung im Plan v2 vorregistriert.",
+  "p2opt": {
+    "expected_rows": 90,
+    "classes": {
+      "a": {"label": "S-07a EOL ohne Fill", "seq": 2000, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64},
+      "b": {"label": "S-07b EOL + 8 Byte Nullfill", "seq": 2010, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64},
+      "c": {"label": "S-07c EOL + 64 Byte Nullfill", "seq": 2020, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64},
+      "d": {"label": "S-07d nur EOL + 32 Byte Nullfill", "seq": 2030, "n": 6, "etikett": "rfc-soll",
+            "options": "", "ocs": "valid:datagram", "reports": [], "paylen": 64},
+      "e": {"label": "S-09a 1 NOP vor REQ", "seq": 2100, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64},
+      "f": {"label": "S-09b 3 NOP vor REQ", "seq": 2110, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64},
+      "g": {"label": "S-09c exakt 7 NOP vor REQ (Schwelle)", "seq": 2120, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"],
+            "absent_reports": ["0x01"], "paylen": 64},
+      "h": {"label": "S-09d NOPs zwischen REQ und APC", "seq": 2130, "n": 6, "etikett": "rfc-soll",
+            "options_contains": ["REQ:deadbeef", "APC:"], "ocs": "valid:datagram",
+            "reports": ["REQ:success", "APC:success"], "paylen": 64},
+      "i": {"label": "S-22a Extended Length 300 gueltig", "seq": 2200, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram",
+            "reports": ["REQ:success", "0x14:ignored"], "paylen": 64},
+      "j": {"label": "S-22b Extended Length 254 (Senderverstoss)", "seq": 2210, "n": 6, "etikett": "impl-ist",
+            "options": "", "ocs": "valid:datagram", "reports": [], "paylen": 64},
+      "k": {"label": "S-22c Extended abgeschnitten", "seq": 2220, "n": 6, "etikett": "rfc-soll",
+            "options": "", "ocs": "valid:datagram", "reports": [], "paylen": 64},
+      "l": {"label": "S-23a TIME gueltig (TSval 1, TSecr 0)", "seq": 2300, "n": 6, "etikett": "impl-ist",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram",
+            "reports": ["REQ:success", "0x08:ignored"], "paylen": 64},
+      "m": {"label": "S-23b TIME Laenge 6 (unter Minimum 10)", "seq": 2310, "n": 6, "etikett": "rfc-soll",
+            "options": "", "ocs": "valid:datagram", "reports": [], "paylen": 64},
+      "o": {"label": "Kontrolle (P1-Referenz)", "seq": 2890, "n": 6, "etikett": "rfc-soll",
+            "options": "REQ:deadbeef", "ocs": "valid:datagram", "reports": ["REQ:success"], "paylen": 64}
+    }
+  },
+  "p2frag": {
+    "s19":  {"label": "S-19 FRAG atomar (Terminalfragment, Offset 0)", "seq": 2400, "n": 6,
+             "ids": [63000, 63005], "etikett": "rfc-soll", "delivered": 6, "paylen": 64,
+             "ocs_contains": "valid:fragment-set"},
+    "s34":  {"label": "S-34 Pending plus Parallelverkehr", "frag_seq": 2500, "control_seq": 2510,
+             "groups": 6, "controls_per_group": 10, "etikett": "versuchssoll",
+             "frag_delivered": 6, "control_delivered": 60, "control_paylen": 1200},
+    "s45": {
+      "z0": {"label": "S-45 Z0 exaktes Duplikat (MAY-Spielraum)", "fill": "a0", "ids": [63200, 63205],
+             "n": 6, "etikett": "rfc-soll", "delivered": 6, "egress_frags": 18},
+      "z1": {"label": "S-45 Z1 Teilueberlapp, identische Bytes", "fill": "a1", "ids": [63220, 63225],
+             "n": 6, "etikett": "rfc-soll", "delivered": 0, "egress_frags": 12},
+      "z2": {"label": "S-45 Z2 Teilueberlapp, verschiedene Bytes", "fill_a": "a3", "fill_b": "b2",
+             "ids": [63240, 63245], "n": 6, "etikett": "rfc-soll", "delivered": 0, "egress_frags": 12},
+      "z3": {"label": "S-45 Z3 wie Z1 mit APC im Original", "fill": "a4", "ids": [63260, 63265],
+             "n": 6, "etikett": "rfc-soll", "delivered": 0, "egress_frags": 12}
+    }
+  },
+  "p2s50": {
+    "runs_per_direction": 6,
+    "sets_per_run": 80,
+    "cache_limit": 64,
+    "controls_per_run": 20,
+    "seq_base": 5000,
+    "seq_stride": 100,
+    "id_base": 64000,
+    "id_stride": 80,
+    "probe_seq_base": 6200,
+    "probe_id_base": 64960,
+    "etikett": "impl-ist",
+    "erwartung": "Zustellmenge je Lauf = exakt die 64 Identifications, deren Erstfragmente laut Ingress-Capture zuerst eintrafen; 16 Ueberlauf-Sets nie zugestellt; Kontrollen 20/20; atomare Probe 1/1 auch am vollen Cache; alle Terminale der zugestellten Sets binnen 30 s nach ihrem Erstfragment (PCAP-Zeitstempel)."
+  }
+}
