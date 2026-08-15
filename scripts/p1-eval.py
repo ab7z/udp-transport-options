@@ -292,6 +292,77 @@ def eval_p1coll(out, attempts, egress, ingress, rows, manifest):
             print(f"- ABWEICHUNG {spec['label']}: {mixed} Mischungen trotz erwarteter Unversehrtheit")
 
 
+def eval_p1s49(out, attempts, egress, ingress, rows, manifest):
+    """S-49: loss quota over one long series of interleaved complete and withheld fragment sets.
+
+    The schedule itself is the expectation: class a sends both fragments and must be delivered
+    byte-intact, class b withholds the terminal fragment and must expire. The per-third table is
+    the drift check: the delivery rate must not degrade while expired sets accumulate underneath
+    the series.
+    """
+    expected_crc = {row["seq"]: row["payload_crc32c"] for row in manifest}
+    complete = sorted({seq for cls, seq, _, _ in attempts if cls == "a"})
+    withheld = sorted({seq for cls, seq, _, _ in attempts if cls == "b"})
+    errors = sum(1 for _, _, _, rc in attempts if rc != 0)
+    egress_frags = sum(1 for _, udp_len, _ in egress if udp_len == 8)
+    ingress_frags = sum(1 for _, udp_len, _ in ingress if udp_len == 8)
+    delivered = [row for row in rows if row.get("delivery") == "payload"]
+    buffered = sum(1 for row in rows if row.get("delivery") == "buffered")
+    dropped = sum(1 for row in rows if row.get("delivery") == "dropped")
+    by_seq = {}
+    for row in delivered:
+        seq = row_seq(row)
+        if seq is not None:
+            by_seq.setdefault(seq, []).append(row)
+
+    got_complete = [row for seq in complete for row in by_seq.get(seq, [])]
+    got_withheld = [row for seq in withheld for row in by_seq.get(seq, [])]
+    intact = sum(1 for row in got_complete
+                 if row.get("payload_crc32c") == expected_crc.get(row_seq(row)))
+
+    print(f"\n## {out.name}\n")
+    print("| Klasse | logische Sends | zugestellt | erwartet | unversehrt | Urteil |")
+    print("|---|---|---|---|---|---|")
+    findings = []
+    ok = len(got_complete) == len(complete) and intact == len(complete)
+    verdict = "konform" if ok else \
+        f"ABWEICHUNG: {len(got_complete)} zugestellt, davon {intact} unversehrt"
+    if not ok:
+        findings.append(f"vollstaendige Sets: {verdict}")
+    print(f"| vollstaendige Sets | {len(complete)} | {len(got_complete)} | {len(complete)} "
+          f"| {intact} | {verdict} |")
+    verdict = "konform" if not got_withheld else f"ABWEICHUNG: {len(got_withheld)} statt 0"
+    if got_withheld:
+        findings.append(f"zurueckgehaltene Sets: {verdict}")
+    print(f"| zurueckgehaltene Sets | {len(withheld)} | {len(got_withheld)} | 0 | - | {verdict} |")
+
+    # Drift check across the series, in thirds of one hundred logical sends.
+    print()
+    print("| Serienabschnitt | vollstaendig | zugestellt | zurueckgehalten | zugestellt (soll 0) |")
+    print("|---|---|---|---|---|")
+    base = min(complete + withheld)
+    for lo in range(0, len(complete) + len(withheld), 100):
+        seqs = set(range(base + lo, base + lo + 100))
+        comp = [seq for seq in complete if seq in seqs]
+        with_ = [seq for seq in withheld if seq in seqs]
+        got_c = sum(len(by_seq.get(seq, [])) for seq in comp)
+        got_w = sum(len(by_seq.get(seq, [])) for seq in with_)
+        if got_c != len(comp) or got_w != 0:
+            findings.append(f"Drift in seq {base + lo}..{base + lo + 99}: "
+                            f"{got_c}/{len(comp)} vollstaendige zugestellt, {got_w} zurueckgehaltene")
+        print(f"| seq {base + lo}..{base + lo + 99} | {len(comp)} | {got_c} | {len(with_)} | {got_w} |")
+
+    expected_frags = 2 * len(complete) + len(withheld)
+    print()
+    print(f"- Fragmente auf dem Draht: Egress {egress_frags} (soll {expected_frags}), "
+          f"Ingress {ingress_frags} (Differenz = Pfadverlust)")
+    print(f"- Empfaengerzeilen: payload {len(delivered)}, buffered {buffered}, dropped {dropped}")
+    print(f"- Senderfehler: {errors}")
+    print(f"- Abweichungen gegenueber der RFC-Erwartung: {len(findings)}")
+    for finding in findings:
+        print(f"  - {finding}")
+
+
 def main():
     if len(sys.argv) != 4:
         print(__doc__.strip(), file=sys.stderr)
@@ -310,6 +381,8 @@ def main():
         eval_p1frag(run_dir, attempts, egress, ingress, rows)
     elif scenario == "p1coll":
         eval_p1coll(run_dir, attempts, egress, ingress, rows, read_rows(run_dir / "manifest.jsonl"))
+    elif scenario == "p1s49":
+        eval_p1s49(run_dir, attempts, egress, ingress, rows, read_rows(run_dir / "manifest.jsonl"))
     else:
         print(f"unknown scenario: {scenario}", file=sys.stderr)
         return 64

@@ -8,7 +8,7 @@
 #
 # Scenarios: p1opt (single-datagram option negatives S-04/S-05/S-06/S-08/S-10/S-11/S-13/S-20/S-21),
 # p1frag (fragment disturbance S-41/S-42/S-43/S-44), p1coll (Identification collisions S-32/S-33/
-# S-52).
+# S-52), p1s49 (partial loss across a long fragment series, S-49).
 #
 # Path constraint measured on 2026-08-15: this path enforces a legacy UDP checksum over the ENTIRE
 # IP payload, with the pseudo-header length taken from the IP total length instead of the UDP Length
@@ -46,7 +46,7 @@ CANARY_PORT=47103
 RECV_EXTRA=
 case "$SCENARIO" in
     p1opt) EXPECTED=90 ;;
-    p1frag | p1coll)
+    p1frag | p1coll | p1s49)
         EXPECTED=0
         RECV_EXTRA="--max-reassembled-size 6008 --max-segments 4 --reassembly-timeout-ms 5000"
         ;;
@@ -248,6 +248,22 @@ done
 # Control: complete, undisturbed sends on the same path.
 for k in 0 1 2 3 4 5; do
     send e $((500 + k)) 2000 "--identification $((61500 + k))"
+done
+EOF
+        ;;
+    p1s49) cat <<'EOF'
+# S-49 partial loss across a long fragment series: 300 logical datagrams of 2000 bytes each (two
+# fragments under the default limits) in one uninterrupted series. Every tenth send withholds its
+# terminal fragment, so the schedule is 270 complete sets (class a) and 30 incomplete ones (class b)
+# under unique Identifications. The quota question: delivered must be exactly the 270 complete
+# sends, byte-intact, the 30 withheld seqs must expire, and the rate must hold across the series
+# while expired sets accumulate and age out underneath it.
+for k in $(seq 0 299); do
+    if [ $(((k + 1) % 10)) -eq 0 ]; then
+        send b $((1000 + k)) 2000 "--identification $((62000 + k)) --frag-emit 0"
+    else
+        send a $((1000 + k)) 2000 "--identification $((62000 + k))"
+    fi
 done
 EOF
         ;;
