@@ -37,6 +37,11 @@ BLU_IP=${BLU_IP:-178.254.35.195}
 BLU_IF=${BLU_IF:-venet0}
 BLU_DIR=${BLU_DIR:-/root/uoe-s00}
 BLU_SUDO=${BLU_SUDO-}
+# NAT-split endpoints (e.g. EC2 1:1 NAT): *_IP stays the wire/public address (the peer's --dst
+# and what the peer's capture sees); *_LOCAL_IP is the address on the local NIC (raw --src,
+# --own-src, and the local capture view). The defaults keep symmetric public-IP hosts unchanged.
+MCS_LOCAL_IP=${MCS_LOCAL_IP:-$MCS_IP}
+BLU_LOCAL_IP=${BLU_LOCAL_IP:-$BLU_IP}
 A_NAME=${A_NAME:-mcs}
 B_NAME=${B_NAME:-1blu}
 
@@ -312,9 +317,11 @@ EOF
 
 run_direction() {
     local name="$1" s_ssh="$2" s_ip="$3" s_if="$4" s_dir="$5" s_sudo="$6" \
-        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}"
+        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}" \
+        s_local="${12:-$3}" r_local="${13:-$8}"
     local srun="$s_dir/run-$SCENARIO-$name" rrun="$r_dir/run-$SCENARIO-$name"
-    local filter="udp and src host $s_ip and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local egfilter="udp and src host $s_local and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local infilter="udp and src host $s_ip and dst host $r_local and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
     local out="$RUN_ROOT/$name"
     mkdir -p "$out"
     echo "== $SCENARIO $name: $s_ip -> $r_ip =="
@@ -322,8 +329,8 @@ run_direction() {
     ssh "$r_ssh" "$r_sudo rm -rf $rrun && mkdir -p $rrun"
     ssh "$s_ssh" "$s_sudo rm -rf $srun && mkdir -p $srun"
 
-    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$filter"
-    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$filter"
+    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$infilter"
+    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$egfilter"
     canary_until_ready "$s_ssh" "$r_ip" "$r_ssh:$rrun/ingress.pcap" "$s_ssh:$srun/egress.pcap"
 
     local rcount="$EXPECTED"
@@ -332,10 +339,10 @@ run_direction() {
         scp -q scripts/p0-legacy-recv.py "$r_ssh:$rrun/p0-legacy-recv.py"
         ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup python3 p0-legacy-recv.py $DST_PORT $SRC_PORT >recv.jsonl 2>recv.log & echo \$! >recv.pid'"
     else
-        ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_ip --timeout-ms 0 --count $rcount $RECV_EXTRA --json >recv.jsonl 2>recv.log & echo \$! >recv.pid'"
+        ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_local --timeout-ms 0 --count $rcount $RECV_EXTRA --json >recv.jsonl 2>recv.log & echo \$! >recv.pid'"
     fi
 
-    make_sender_script "$s_ip" "$r_ip" >"$out/sender.sh"
+    make_sender_script "$s_local" "$r_ip" >"$out/sender.sh"
     scp -q "$out/sender.sh" "$s_ssh:$srun/sender.sh"
     ssh "$s_ssh" "$s_sudo bash $srun/sender.sh"
 
@@ -362,24 +369,26 @@ run_direction() {
 
 run_s36() {
     local name="$1" s_ssh="$2" s_ip="$3" s_if="$4" s_dir="$5" s_sudo="$6" \
-        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}"
+        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}" \
+        s_local="${12:-$3}" r_local="${13:-$8}"
     local srun="$s_dir/run-$SCENARIO-$name" rrun="$r_dir/run-$SCENARIO-$name"
-    local filter="udp and src host $s_ip and dst host $r_ip and ((src port $SRC_PORT and dst portrange 47101-47103) or dst port $CANARY_PORT)"
+    local egfilter="udp and src host $s_local and dst host $r_ip and ((src port $SRC_PORT and dst portrange 47101-47103) or dst port $CANARY_PORT)"
+    local infilter="udp and src host $s_ip and dst host $r_local and ((src port $SRC_PORT and dst portrange 47101-47103) or dst port $CANARY_PORT)"
     local out="$RUN_ROOT/$name" port
     mkdir -p "$out"
     echo "== $SCENARIO $name: $s_ip -> $r_ip =="
 
     ssh "$r_ssh" "$r_sudo rm -rf $rrun && mkdir -p $rrun"
     ssh "$s_ssh" "$s_sudo rm -rf $srun && mkdir -p $srun"
-    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$filter"
-    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$filter"
+    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$infilter"
+    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$egfilter"
     canary_until_ready "$s_ssh" "$r_ip" "$r_ssh:$rrun/ingress.pcap" "$s_ssh:$srun/egress.pcap"
 
     for port in 47101 47102 47103; do
-        ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $port --src-port $SRC_PORT --own-src $r_ip --timeout-ms 0 --count 30 --json >recv-$port.jsonl 2>recv-$port.log & echo \$! >recv-$port.pid'"
+        ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $port --src-port $SRC_PORT --own-src $r_local --timeout-ms 0 --count 30 --json >recv-$port.jsonl 2>recv-$port.log & echo \$! >recv-$port.pid'"
     done
 
-    make_s36_sender_script "$s_ip" "$r_ip" >"$out/sender.sh"
+    make_s36_sender_script "$s_local" "$r_ip" >"$out/sender.sh"
     scp -q "$out/sender.sh" "$s_ssh:$srun/sender.sh"
     ssh "$s_ssh" "$s_sudo bash $srun/sender.sh"
 
@@ -413,11 +422,14 @@ run_s36() {
 # and answers with 6 RES datagrams carrying exactly that token.
 run_s14() {
     local name="$1" s_ssh="$2" s_ip="$3" s_if="$4" s_dir="$5" s_sudo="$6" \
-        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}"
+        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}" \
+        s_local="${12:-$3}" r_local="${13:-$8}"
     local srun="$s_dir/run-$SCENARIO-$name" rrun="$r_dir/run-$SCENARIO-$name"
-    local fwd="udp and src host $s_ip and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
-    local rev="udp and src host $r_ip and dst host $s_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
-    local reflector="udp and src host $r_ip and dst host $s_ip"
+    local fwd_eg="udp and src host $s_local and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local fwd_in="udp and src host $s_ip and dst host $r_local and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local rev_eg="udp and src host $r_local and dst host $s_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local rev_in="udp and src host $r_ip and dst host $s_local and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local reflector="udp and src host $r_local and dst host $s_ip"
     local out="$RUN_ROOT/$name" tok
     mkdir -p "$out"
     echo "== $SCENARIO $name: REQ $s_ip -> $r_ip, RES zurueck =="
@@ -426,12 +438,12 @@ run_s14() {
     ssh "$s_ssh" "$s_sudo rm -rf $srun && mkdir -p $srun"
 
     # Phase 1: REQ leg plus reflector capture on the REQ receiver's egress.
-    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" p1-ingress.pcap "$fwd"
+    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" p1-ingress.pcap "$fwd_in"
     start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" p1-reflector.pcap "$reflector"
-    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" p1-egress.pcap "$fwd"
+    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" p1-egress.pcap "$fwd_eg"
     canary_until_ready "$s_ssh" "$r_ip" "$r_ssh:$rrun/p1-ingress.pcap" "$s_ssh:$srun/p1-egress.pcap"
-    ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_ip --timeout-ms 0 --count 6 --json >p1-recv.jsonl 2>p1-recv.log & echo \$! >p1-recv.pid'"
-    ssh "$s_ssh" "$s_sudo bash -c 'cd $srun || exit 1; for k in 0 1 2 3 4 5; do ../udpopt-send --src $s_ip --dst $r_ip --src-port $SRC_PORT --dst-port $DST_PORT --count 1 --manifest p1-manifest.jsonl --seq-start \$k --payload-size 64 --req deadbeef --no-frag >>p1-send.log 2>&1; echo \"attempt class=t seq=\$k payload=64 rc=\$?\" >>p1-send.log; sleep 0.1; done'"
+    ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_local --timeout-ms 0 --count 6 --json >p1-recv.jsonl 2>p1-recv.log & echo \$! >p1-recv.pid'"
+    ssh "$s_ssh" "$s_sudo bash -c 'cd $srun || exit 1; for k in 0 1 2 3 4 5; do ../udpopt-send --src $s_local --dst $r_ip --src-port $SRC_PORT --dst-port $DST_PORT --count 1 --manifest p1-manifest.jsonl --seq-start \$k --payload-size 64 --req deadbeef --no-frag >>p1-send.log 2>&1; echo \"attempt class=t seq=\$k payload=64 rc=\$?\" >>p1-send.log; sleep 0.1; done'"
     poll_lines "$r_ssh" "$rrun/p1-recv.jsonl" 6
     sleep 3 # reflector window: any automatic answer would have to appear here
     ssh "$r_ssh" "$r_sudo bash -c 'kill \$(cat $rrun/p1-recv.pid) 2>/dev/null'; true"
@@ -454,11 +466,11 @@ for line in open('$rrun/p1-recv.jsonl'):
     echo "   REQ token received: $tok"
 
     # Phase 2: RES leg with swapped roles, token taken from phase 1.
-    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" p2-ingress.pcap "$rev"
-    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" p2-egress.pcap "$rev"
+    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" p2-ingress.pcap "$rev_in"
+    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" p2-egress.pcap "$rev_eg"
     canary_until_ready "$r_ssh" "$s_ip" "$s_ssh:$srun/p2-ingress.pcap" "$r_ssh:$rrun/p2-egress.pcap"
-    ssh "$s_ssh" "$s_sudo bash -c 'cd $srun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $s_ip --timeout-ms 0 --count 6 --json >p2-recv.jsonl 2>p2-recv.log & echo \$! >p2-recv.pid'"
-    ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; for k in 100 101 102 103 104 105; do ../udpopt-send --src $r_ip --dst $s_ip --src-port $SRC_PORT --dst-port $DST_PORT --count 1 --manifest p2-manifest.jsonl --seq-start \$k --payload-size 64 --res $tok --no-frag >>p2-send.log 2>&1; echo \"attempt class=t seq=\$k payload=64 rc=\$?\" >>p2-send.log; sleep 0.1; done'"
+    ssh "$s_ssh" "$s_sudo bash -c 'cd $srun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $s_local --timeout-ms 0 --count 6 --json >p2-recv.jsonl 2>p2-recv.log & echo \$! >p2-recv.pid'"
+    ssh "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; for k in 100 101 102 103 104 105; do ../udpopt-send --src $r_local --dst $s_ip --src-port $SRC_PORT --dst-port $DST_PORT --count 1 --manifest p2-manifest.jsonl --seq-start \$k --payload-size 64 --res $tok --no-frag >>p2-send.log 2>&1; echo \"attempt class=t seq=\$k payload=64 rc=\$?\" >>p2-send.log; sleep 0.1; done'"
     poll_lines "$s_ssh" "$srun/p2-recv.jsonl" 6
     ssh "$s_ssh" "$s_sudo bash -c 'kill \$(cat $srun/p2-recv.pid) 2>/dev/null'; true"
     stop_capture "$s_ssh" "$s_sudo" "$srun" p2-ingress.pcap
@@ -484,21 +496,21 @@ for line in open('$rrun/p1-recv.jsonl'):
 case "$SCENARIO" in
 s36)
     run_s36 "a-$A_NAME-to-$B_NAME" "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
-        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO"
+        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" "$MCS_LOCAL_IP" "$BLU_LOCAL_IP"
     run_s36 "b-$B_NAME-to-$A_NAME" "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
-        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO"
+        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" "$BLU_LOCAL_IP" "$MCS_LOCAL_IP"
     ;;
 s14)
     run_s14 "a-req-$B_NAME-to-$A_NAME" "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
-        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO"
+        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" "$BLU_LOCAL_IP" "$MCS_LOCAL_IP"
     run_s14 "b-req-$A_NAME-to-$B_NAME" "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
-        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO"
+        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" "$MCS_LOCAL_IP" "$BLU_LOCAL_IP"
     ;;
 *)
     run_direction "a-$A_NAME-to-$B_NAME" "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
-        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO"
+        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" "$MCS_LOCAL_IP" "$BLU_LOCAL_IP"
     run_direction "b-$B_NAME-to-$A_NAME" "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
-        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO"
+        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" "$BLU_LOCAL_IP" "$MCS_LOCAL_IP"
     ;;
 esac
 echo "done: $RUN_ROOT"

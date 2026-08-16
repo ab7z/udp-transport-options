@@ -32,6 +32,11 @@ BLU_IP=${BLU_IP:-178.254.35.195}
 BLU_IF=${BLU_IF:-venet0}
 BLU_DIR=${BLU_DIR:-/root/uoe-s00}
 BLU_SUDO=${BLU_SUDO-}
+# NAT-split endpoints (e.g. EC2 1:1 NAT): *_IP stays the wire/public address (the peer's --dst
+# and what the peer's capture sees); *_LOCAL_IP is the address on the local NIC (raw --src,
+# --own-src, and the local capture view). The defaults keep symmetric public-IP hosts unchanged.
+MCS_LOCAL_IP=${MCS_LOCAL_IP:-$MCS_IP}
+BLU_LOCAL_IP=${BLU_LOCAL_IP:-$BLU_IP}
 A_NAME=${A_NAME:-mcs}
 B_NAME=${B_NAME:-1blu}
 
@@ -263,9 +268,11 @@ EOF
 
 run_direction() {
     local name="$1" s_ssh="$2" s_ip="$3" s_if="$4" s_dir="$5" s_sudo="$6" \
-        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}"
+        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}" \
+        s_local="${12:-$3}" r_local="${13:-$8}"
     local srun="$s_dir/run-$SCENARIO-$name" rrun="$r_dir/run-$SCENARIO-$name"
-    local filter="udp and src host $s_ip and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local egfilter="udp and src host $s_local and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local infilter="udp and src host $s_ip and dst host $r_local and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
     local out="$RUN_ROOT/$name"
     mkdir -p "$out"
     echo "== $SCENARIO $name: $s_ip -> $r_ip =="
@@ -273,15 +280,15 @@ run_direction() {
     ssh -n "$r_ssh" "$r_sudo rm -rf $rrun && mkdir -p $rrun"
     ssh -n "$s_ssh" "$s_sudo rm -rf $srun && mkdir -p $srun"
 
-    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$filter"
-    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$filter"
+    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$infilter"
+    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$egfilter"
     canary_until_ready "$s_ssh" "$r_ip" "$r_ssh:$rrun/ingress.pcap" "$s_ssh:$srun/egress.pcap"
 
     local rcount="$EXPECTED"
     [ "$rcount" -eq 0 ] && rcount=100000
-    ssh -n "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_ip --timeout-ms 0 --count $rcount $RECV_EXTRA --json >recv.jsonl 2>recv.log & echo \$! >recv.pid'"
+    ssh -n "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_local --timeout-ms 0 --count $rcount $RECV_EXTRA --json >recv.jsonl 2>recv.log & echo \$! >recv.pid'"
 
-    make_sender_script "$s_ip" "$r_ip" >"$out/sender.sh"
+    make_sender_script "$s_local" "$r_ip" >"$out/sender.sh"
     scp -q "$out/sender.sh" "$s_ssh:$srun/sender.sh"
     ssh -n "$s_ssh" "$s_sudo bash $srun/sender.sh"
 
@@ -308,17 +315,19 @@ run_direction() {
 
 run_s50_direction() {
     local name="$1" s_ssh="$2" s_ip="$3" s_if="$4" s_dir="$5" s_sudo="$6" \
-        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}" dirbase="${12}"
+        r_ssh="$7" r_ip="$8" r_if="$9" r_dir="${10}" r_sudo="${11}" dirbase="${12}" \
+        s_local="${13:-$3}" r_local="${14:-$8}"
     local srun="$s_dir/run-$SCENARIO-$name" rrun="$r_dir/run-$SCENARIO-$name"
-    local filter="udp and src host $s_ip and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local egfilter="udp and src host $s_local and dst host $r_ip and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
+    local infilter="udp and src host $s_ip and dst host $r_local and ((src port $SRC_PORT and dst port $DST_PORT) or dst port $CANARY_PORT)"
     local out="$RUN_ROOT/$name"
     mkdir -p "$out"
     echo "== $SCENARIO $name: $s_ip -> $r_ip =="
 
     ssh -n "$r_ssh" "$r_sudo rm -rf $rrun && mkdir -p $rrun"
     ssh -n "$s_ssh" "$s_sudo rm -rf $srun && mkdir -p $srun"
-    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$filter"
-    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$filter"
+    start_capture "$r_ssh" "$r_sudo" "$r_if" "$rrun" ingress.pcap "$infilter"
+    start_capture "$s_ssh" "$s_sudo" "$s_if" "$srun" egress.pcap "$egfilter"
     canary_until_ready "$s_ssh" "$r_ip" "$r_ssh:$rrun/ingress.pcap" "$s_ssh:$srun/egress.pcap"
 
     rss() { # <run-index g> <tag>
@@ -332,10 +341,10 @@ run_s50_direction() {
         order=terminalsV
         [ "$g" -ge 3 ] && order=terminalsR
         echo "-- Lauf $r ($order) --"
-        ssh -n "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_ip --timeout-ms 0 --count 100000 $RECV_EXTRA --json >recv-r$g.jsonl 2>recv-r$g.log & echo \$! >recv-r$g.pid'"
+        ssh -n "$r_ssh" "$r_sudo bash -c 'cd $rrun || exit 1; nohup ../udpopt-recv --dst-port $DST_PORT --src-port $SRC_PORT --own-src $r_local --timeout-ms 0 --count 100000 $RECV_EXTRA --json >recv-r$g.jsonl 2>recv-r$g.log & echo \$! >recv-r$g.pid'"
         sleep 0.5
         rss "$g" leer
-        make_s50_script "$s_ip" "$r_ip" "$r" >"$out/s50-run$g.sh"
+        make_s50_script "$s_local" "$r_ip" "$r" >"$out/s50-run$g.sh"
         scp -q "$out/s50-run$g.sh" "$s_ssh:$srun/s50-run$g.sh"
         ssh -n "$s_ssh" "$s_sudo bash $srun/s50-run$g.sh firsts32"
         rss "$g" nach32
@@ -377,13 +386,13 @@ run_s50_direction() {
 : >"$RUN_ROOT/results.md"
 if [ "$SCENARIO" = p2s50 ]; then
     run_s50_direction "a-$A_NAME-to-$B_NAME" "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
-        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" 0
+        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" 0 "$MCS_LOCAL_IP" "$BLU_LOCAL_IP"
     run_s50_direction "b-$B_NAME-to-$A_NAME" "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
-        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" 6
+        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" 6 "$BLU_LOCAL_IP" "$MCS_LOCAL_IP"
 else
     run_direction "a-$A_NAME-to-$B_NAME" "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" \
-        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO"
+        "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" "$MCS_LOCAL_IP" "$BLU_LOCAL_IP"
     run_direction "b-$B_NAME-to-$A_NAME" "$BLU_SSH" "$BLU_IP" "$BLU_IF" "$BLU_DIR" "$BLU_SUDO" \
-        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO"
+        "$MCS_SSH" "$MCS_IP" "$MCS_IF" "$MCS_DIR" "$MCS_SUDO" "$BLU_LOCAL_IP" "$MCS_LOCAL_IP"
 fi
 echo "done: $RUN_ROOT"

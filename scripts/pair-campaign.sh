@@ -4,14 +4,16 @@
 #
 #   scripts/pair-campaign.sh <pair>
 #
-# Pairs: mcs-1blu (the driver defaults), mcs-hel, hel-1blu. One shared stamp per invocation groups
+# Pairs: mcs-1blu (the driver defaults), mcs-hel, hel-1blu, aws-mcs, aws-hel, aws-1blu. The aws
+# endpoint sits behind the EC2 1:1 NAT, so it carries a *_LOCAL_IP override (raw sends and the
+# local capture use the internal address, peers address the public one). One shared stamp groups
 # the artifacts under target/p{0,1,2}-campaign-<stamp>-<pair>/<scenario>/. A scenario failure does
 # not stop the suite: the failed scenario is flagged in the log, the run continues, and the final
 # summary line carries overall=1 (also the exit code). p2netem is intentionally not scheduled
 # (S-51 struck by decision E1, see p2-campaign.sh).
 set -uo pipefail
 
-PAIR="${1:?usage: pair-campaign.sh <mcs-1blu|mcs-hel|hel-1blu>}"
+PAIR="${1:?usage: pair-campaign.sh <mcs-1blu|mcs-hel|hel-1blu|aws-mcs|aws-hel|aws-1blu>}"
 cd "$(dirname "$0")/.." || exit 1
 
 # The helsinki endpoint (Hetzner HEL1, deployed 2026-08-15 with the uoe-s00 layout).
@@ -20,6 +22,21 @@ HEL_IP=62.238.103.75
 HEL_IF=eth0
 HEL_DIR=/home/ab/uoe-s00
 HEL_SUDO=sudo
+
+# The aws endpoint (EC2 t3.micro us-east-1a, deployed 2026-08-16 with the uoe-s00 layout).
+# NAT-split: the public IP is held by the EC2 1:1 NAT, the NIC carries only the internal one.
+AWS_SSH=ab@100.48.90.53
+AWS_IP=100.48.90.53
+AWS_LOCAL_IP=172.31.8.92
+AWS_IF=ens5
+AWS_DIR=/home/ab/uoe-s00
+AWS_SUDO=sudo
+
+export_aws_role_a() {
+    export MCS_SSH="$AWS_SSH" MCS_IP="$AWS_IP" MCS_LOCAL_IP="$AWS_LOCAL_IP" \
+        MCS_IF="$AWS_IF" MCS_DIR="$AWS_DIR" MCS_SUDO="$AWS_SUDO"
+    export A_NAME=aws
+}
 
 case "$PAIR" in
 mcs-1blu) ;; # driver defaults, no overrides
@@ -30,6 +47,21 @@ mcs-hel)
 hel-1blu)
     export MCS_SSH="$HEL_SSH" MCS_IP="$HEL_IP" MCS_IF="$HEL_IF" MCS_DIR="$HEL_DIR" MCS_SUDO="$HEL_SUDO"
     export A_NAME=hel B_NAME=1blu
+    ;;
+aws-mcs)
+    export_aws_role_a
+    export BLU_SSH=ab@46.225.188.39 BLU_IP=46.225.188.39 BLU_IF=eth0 \
+        BLU_DIR=/home/ab/uoe-s00 BLU_SUDO=sudo
+    export B_NAME=mcs
+    ;;
+aws-hel)
+    export_aws_role_a
+    export BLU_SSH="$HEL_SSH" BLU_IP="$HEL_IP" BLU_IF="$HEL_IF" BLU_DIR="$HEL_DIR" BLU_SUDO="$HEL_SUDO"
+    export B_NAME=hel
+    ;;
+aws-1blu)
+    export_aws_role_a
+    export B_NAME=1blu
     ;;
 *) echo "unknown pair: $PAIR" >&2; exit 64 ;;
 esac
