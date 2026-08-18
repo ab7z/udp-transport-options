@@ -98,6 +98,10 @@ impl<'a> Iterator for OptionsIter<'a> {
                     }
 
                     let total_len = u16::from_be_bytes([self.bytes[start + 2], self.bytes[start + 3]]) as usize;
+                    // RFC 9868 Section 10 obliges the sender to use the shortest format; it defines
+                    // no receiver disposition for an extended-length option below 255 bytes.
+                    // Treating it as an invalid length (which discards all options) is a
+                    // deliberately strict local policy of this parser, not an RFC requirement.
                     if total_len < usize::from(kind::EXTENDED_LENGTH_MARKER) {
                         return self.fail(ParseError::InvalidLength {
                             kind: raw_kind,

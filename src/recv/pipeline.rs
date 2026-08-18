@@ -190,9 +190,11 @@ enum FragmentOptionLimit {
 
 /// Processes one received IPv4 datagram according to the RFC 9868 receive order.
 ///
-/// This function is deliberately pure: malformed IP/UDP input returns a drop error, malformed or
-/// untrusted surplus contents discard only the options, and time-dependent reassembly state is driven
-/// by the caller-provided `now`.
+/// This function is deliberately pure: malformed IP/UDP input returns a drop error, and
+/// time-dependent reassembly state is driven by the caller-provided `now`. For an ordinary
+/// (non-fragment) datagram, malformed or untrusted surplus contents discard only the options while
+/// the UDP-validated user data is still delivered; UDP fragments and UNSAFE options have their own
+/// dispositions (buffering, reassembly, or dropping the fragment or reassembled user data).
 ///
 /// `cache` must be scoped to this UDP source/destination address-and-port pair. A caller serving
 /// multiple socket pairs must keep separate caches so that the per-pair RFC limits remain separate.
@@ -1393,6 +1395,35 @@ mod tests {
         assert_eq!(
             process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
             with_fragment_ocs(payload_with_bearing(b"abcdefghijk", Vec::new(), false))
+        );
+    }
+
+    #[test]
+    fn unknown_per_datagram_unsafe_after_reassembly_drops_user_data() {
+        // RFC 9868 Sec. 12: an unsupported per-datagram UNSAFE option must silently drop the
+        // reassembled user data while the datagram still counts as option-bearing.
+        let datagrams = split_fragment_datagrams(b"abcdefghij", &[0, 0, kind::UNSAFE_MIN, 2]);
+        assert_eq!(datagrams.len(), 2);
+
+        let mut cache = ReassemblyCache::new();
+        let now = Instant::now();
+        assert_eq!(
+            process_with_cache(&datagrams[0], &mut cache, now).unwrap(),
+            Delivery::Buffered
+        );
+        assert_eq!(
+            process_with_cache(&datagrams[1], &mut cache, now).unwrap(),
+            with_fragment_ocs(payload_with_reports_and_ocs(
+                b"",
+                Vec::new(),
+                true,
+                vec![report(
+                    OptionKind::Other(kind::UNSAFE_MIN),
+                    OptionStatus::Failed,
+                    OptionSource::Datagram,
+                )],
+                OcsStatus::Unused,
+            ))
         );
     }
 

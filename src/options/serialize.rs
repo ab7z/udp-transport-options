@@ -86,6 +86,12 @@ impl OptionsBuilder {
         Ok(out)
     }
 
+    /// Validates the caller-supplied options before serialization.
+    ///
+    /// Only hard MUST rules are enforced here: kind ranges, value lengths, and at most one FRAG.
+    /// The RFC 9868 Section 10 rule that ordinary options SHOULD NOT repeat is deliberately not
+    /// enforced at this layer, so tests and callers can build arbitrary wire images; the public
+    /// socket API rejects duplicate reportable options and thereby carries that SHOULD.
     fn validated_options(self) -> Result<Vec<RawOption>, SerializeError> {
         let mut seen_frag = false;
         for option in &self.options {
