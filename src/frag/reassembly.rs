@@ -287,8 +287,6 @@ pub enum AbortReason {
     Overlap,
     /// A per-datagram or global reassembly limit was exceeded.
     LimitExceeded,
-    /// The reassembly timed out.
-    Timeout,
 }
 
 #[derive(Debug)]
