@@ -14,15 +14,16 @@ The contribution is twofold and equally weighted:
    (research questions FF1 and FF2 in the thesis).
 
 The Step 17 harness is controlled and local: namespace/veth, routed, Linux NAT, and a filter
-negative control. A later external campaign at commit `7b11140` added initial Hetzner path
-observations and an ephemeral WireGuard control. The repository still has no reproducible tunnel
-lane, and the limited external observations do not complete FF2.
+negative control. External campaigns from 2026-08-10 through 2026-08-16 measured public paths.
+Sealed archives and the FF2 answer in the stated scope live in the companion thesis repository
+`../mcs-thesis-docs` (`thesis/evidence/`, chapters 6 and 7). This crate still has no committed
+tunnel lane or surplus-only rewriting middlebox.
 
-The single canonical result record for the external campaigns from 2026-08-10 and 2026-08-11 is
-[`docs/campaign-2026-08-11-bidirectional.md`](docs/campaign-2026-08-11-bidirectional.md). It combines
-the `[codex]` and `[claude]` results. Update that file in place and do not create separate
-harness-specific campaign result files. Raw pcaps, manifests, scripts, and archives remain separate
-evidence and are not replacement result documents.
+The crate-side summary of those campaigns is [`docs/evaluation.md`](docs/evaluation.md). The first
+bidirectional Hetzner run is recorded in
+[`docs/campaign-2026-08-11-bidirectional.md`](docs/campaign-2026-08-11-bidirectional.md). Do not
+create separate harness-specific campaign result files here. Raw pcaps, manifests, scripts, and
+archives remain evidence and are not replacement result documents.
 
 The work proceeds **step by step** (not one-shot), agentic with a **human in the loop**: one reviewed
 git commit per step on `main`. The authoritative plan is `docs/plan/ROADMAP.md`,

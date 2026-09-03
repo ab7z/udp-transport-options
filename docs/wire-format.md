@@ -308,11 +308,12 @@ options, UDP checksum, and OCS before transmission (RFC 9868 Sec. 11.4).
 
 On receive, a correctly framed FRAG combined with non-empty UDP user data is never used as a
 reassembly boundary: all options are ignored and the original user data is delivered. Empty-payload
-fragments are reassembled only after a trusted FRAG. Cache resource limits are per socket pair:
-`Peer` owns a cache per pair, and low-level callers must not share one `ReassemblyCache` across
-pairs because its pending-partial cap applies to the entire cache. The default timeout is clamped to
-120 seconds and expires when `elapsed >= timeout`; reclamation remains caller-driven through
-insertion/`gc`.
+fragments are reassembled only after a trusted FRAG. Cache resource limits are intended to be per
+socket pair: low-level callers must not share one `ReassemblyCache` across pairs because its
+pending-partial cap applies to the entire cache. `Peer` owns one cache per instance, but the raw
+receiver filters ports only, so distinct address pairs that share those ports share the budget
+(FR-34 partial). The default timeout is clamped to 120 seconds and expires when
+`elapsed >= timeout`; reclamation remains caller-driven through insertion/`gc`.
 
 ## 8. Maximum Datagram Size (MDS)
 

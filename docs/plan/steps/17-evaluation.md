@@ -8,8 +8,11 @@ Status: done; verified on achim (Linux)
 > surplus nor measures real external paths or diverse middleboxes; no tunnel lane is implemented.
 > At the time of this correction `eval-check.py` compared captured surplus bytes and packet counts
 > only; Step 18 upgraded it to independently validate sender-side OCS/TLV/APC/FRAG semantics and to
-> correlate receiver delivery JSON, with receiver failures fatal in `eval-run.sh`. These lanes
-> provide partial FF2 evidence, not a completed answer to FF2.
+> correlate receiver delivery JSON, with receiver failures fatal in `eval-run.sh`.
+>
+> Later note (2026-08-26): this step's DoD remains the local harness. Public-path campaigns after
+> the roadmap, sealed in `../mcs-thesis-docs/thesis/evidence/`, are the FF2 evidence the companion
+> thesis uses. They are not part of this step's scripts.
 
 ## Goal
 

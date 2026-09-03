@@ -81,24 +81,29 @@ stable (no renumbering).
 
 ### Post-roadmap external evidence
 
-An external campaign on 2026-08-10/11 used repository commit `7b11140`. Equal-size full UDP controls
-arrived intact at Hetzner over native IPv4 and IPv6. A VMware NAT/macOS VMnet boundary normalized a
-typed IPv4 datagram exactly to `IPv4 IHL + UDP Length`; bridging bypassed that local normalization,
-but one native typed IPv4 packet and one native typed IPv6 packet were not observed at Hetzner
-`eth0`. An ephemeral WireGuard-over-IPv6 control delivered the inner typed IPv4 datagram intact to
-Hetzner `wg-uoe`, including 26 surplus bytes and a valid OCS. That tunnel result proves preservation
-after decapsulation, not native RFC 9868 transit across the public path. The exact public drop point
-and broader FF2 question remain open. The campaign-only IPv6 probes do not change the crate's
-IPv4-only scope.
+The first external campaign on 2026-08-10/11 used repository commit `7b11140`. Equal-size full UDP
+controls arrived intact at Hetzner over native IPv4 and IPv6. A VMware NAT/macOS VMnet boundary
+normalized a typed IPv4 datagram exactly to `IPv4 IHL + UDP Length`; bridging bypassed that local
+normalization, but one native typed IPv4 packet and one native typed IPv6 packet were not observed
+at Hetzner `eth0`. An ephemeral WireGuard-over-IPv6 control delivered the inner typed IPv4 datagram
+intact to Hetzner `wg-uoe`, including 26 surplus bytes and a valid OCS. That tunnel result proves
+preservation after decapsulation, not native RFC 9868 transit across the public path. The
+campaign-only IPv6 probes do not change the crate's IPv4-only scope.
+
+Later campaigns (2026-08-13 through 2026-08-16) reused the Step 14 CLIs and the P0/P1/P2 drivers on
+public pairs (1blu, mcs, helsinki, AWS US, AWS AP, GCP, Telefónica hotspot). They established three
+mechanism classes: Normalizer, checksum gate, and presence dropper. The companion thesis answers
+FF2 for those observed pairs, directions, and windows. Sealed archives live in
+`../mcs-thesis-docs/thesis/evidence/`. This crate still has no committed tunnel lane or surplus-only
+rewriting middlebox; claims are not Internet-wide. See `docs/evaluation.md`.
 
 ## Top risks (Linux AF_INET raw) and mitigations
 
 - **Surplus area stripped by the local stack** (the FF2 premise): de-risked up front by the Step 0.5
   spike over a staged 1500-MTU veth link, which proves `UDP Length` < `IP Total Length` survives raw
   send -> raw recv (up to the MTU) before any TLV/OCS/FRAG work begins. Step 17 adds controlled
-  local routed/NAT/filter lanes. The later external campaign above records both preservation and
-  loss boundaries, but external-path and surplus-specific middlebox survival is not claimed
-  complete.
+  local routed/NAT/filter lanes. External campaigns recorded both preservation and loss boundaries;
+  the companion thesis answers FF2 in that stated scope.
 - **Raw recv duplicate/ICMP noise**: bind a dummy `SOCK_DGRAM` to absorb ICMP port-unreachable;
   filter own-source in userspace (Step 8).
 - **`IP_HDRINCL` field fill** (Step 0.5 Finding A: the kernel forces IP Total Length to the buffer
@@ -146,5 +151,5 @@ IPv4-only scope.
   capture showing the surplus area on the wire (the byte-level capture check itself is automated by
   the Step 10.5 wire lane).
 - Empirical: Step 17 provides the controlled netns/veth, routed, Linux NAT, and filter runbook. The
-  post-roadmap external campaign adds initial Hetzner observations and a tunnel control, with the
-  scope limits stated above; together they still do not complete FF2.
+  post-roadmap external campaigns add public-path observations (see the section above). The
+  companion thesis answers FF2 for the observed pairs, directions, and windows.

@@ -118,8 +118,10 @@ remote run directory (binaries land in its `bin/`). Set `VM_UBUNTU_SERVER_TARGET
 matching the remote `uname -m`; it defaults to `aarch64-unknown-linux-musl`. The host needs
 passwordless `sudo` and `rsync`, nothing else.
 
-See [`docs/evaluation.md`](docs/evaluation.md) for the FF2/P2 verdict taxonomy, capture artifacts,
+See [`docs/evaluation.md`](docs/evaluation.md) for the verdict taxonomy, capture artifacts,
 offload notes, and Wireshark/tshark interpretation limits. The reproducible repository lanes cover
-namespace/veth, routing, Linux NAT, and a filter negative control. A separate external campaign at
-commit `7b11140` added initial Hetzner path observations and an ephemeral WireGuard control. It found
-both survival and loss boundaries, but it does not complete FF2.
+namespace/veth, routing, Linux NAT, and a filter negative control. External campaigns from
+2026-08-10 through 2026-08-16 measured public paths; sealed archives live in the companion thesis
+repository [`mcs-thesis-docs`](https://github.com/ab7z/mcs-thesis-docs) under `thesis/evidence/`.
+The thesis answers FF2 for the observed pairs, directions, and windows. This crate still has no
+committed tunnel lane or surplus-only rewriting middlebox.

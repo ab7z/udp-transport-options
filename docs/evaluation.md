@@ -123,8 +123,8 @@ surplus. Such a result is an encapsulation/MTU control only.
 The `filter` topology drops the complete experiment port range. It is a negative control for the
 capture/verdict machinery, not a surplus-specific filtering experiment. None of the current lanes
 intentionally strips or rewrites only the surplus area. The veth/router/NAT/filter results establish
-reproducible behavior for those local Linux topologies. The external campaign below adds one path,
-but diverse external paths and middleboxes remain FF2 work.
+reproducible behavior for those local Linux topologies. External public-path campaigns are summarized
+below; they are not committed, turnkey lanes of this runbook.
 
 ## External Campaign: 2026-08-10/11
 
@@ -158,9 +158,36 @@ a valid OCS. This proves that encapsulation can deliver a non-empty surplus area
 after decapsulation. It does not prove that the public path carried native RFC 9868 UDP, because the
 on-path devices saw WireGuard traffic instead of the inner datagram.
 
-These observations provide useful FF2 boundaries, but they do not explain the implementation reason
-for the VMware normalization, locate the later public drop point, or cover enough independent paths
-and middleboxes to complete FF2.
+These observations provided the first FF2 boundaries. They did not by themselves complete FF2.
+
+## Later public-path campaigns (2026-08-13 through 2026-08-16)
+
+Drivers: `scripts/p0-campaign.sh`, `scripts/p1-campaign.sh`, `scripts/p2-campaign.sh`,
+`scripts/pair-campaign.sh`, `scripts/checksumgate-cell.sh`. Binary source of the main suites:
+`d7187eb` (NAT-split support `9d6c5bd`). Sealed archives and the thesis write-up live in
+`../mcs-thesis-docs/thesis/evidence/` and thesis chapters 6 and 7.
+
+Measured pairs included 1blu-mcs, mcs-helsinki, helsinki-1blu, aws-mcs, aws-hel, aws-1blu, GCP
+us-east1 against mcs/1blu, six AWS AP regions, and a Telefónica iPhone-hotspot path (NAT and
+bridged). The P0/P1/P2 suite ran on the six full host pairs (18 driver scenarios; S-51 was
+deliberately dropped).
+
+Three mechanism classes showed up:
+
+- **Normalizer:** VMware NAT/VMnet rewrote `IPv4 Total Length` to `IHL + UDP Length` and could
+  deliver empty 28-byte shells for atomic FRAG datagrams.
+- **Checksum gate:** some provider edges delivered a surplus datagram only when a legacy
+  one's-complement sum over the pseudo-header and the entire IP payload folded to `0xFFFF` (or
+  the UDP checksum was zero). RFC-correct OCS with a non-zero pad failed those edges; a
+  compensated OCS passed. Observed at Hetzner both ways and at 1blu ingress; not at Amazon.
+- **Presence dropper:** some paths dropped every datagram with `UDP Length < IP payload`,
+  independent of option content (Telefónica hotspot both ways after bridging; Google Andromeda;
+  source-dependent AP transits toward Tokyo/Seoul/Sydney).
+
+The EU cloud triangle and AWS-US transatlantic pairs preserved a well-formed surplus with a zero
+pad. The companion thesis answers FF2 for those observed pairs, directions, and windows. Claims
+are not Internet-wide. This crate still has no committed tunnel lane or surplus-only rewriting
+middlebox.
 
 ## FF1 Soll-Ist Hook
 

@@ -5,8 +5,13 @@ Status: done; full pre-PR gate (18 lanes incl. achim verify/root/wire) green on 
 ## Goal
 
 Close the concrete endpoint-conformance, public-API, documentation, and evidence gaps recorded in
-the RFC 9868 audit at `main@3551fa9`, without claiming external-path FF2 evidence that has not been
-measured.
+the RFC 9868 audit at `main@3551fa9`, without claiming external-path FF2 evidence that this step
+itself did not measure.
+
+Later note (2026-08-26): public-path campaigns after this step, sealed in the companion thesis
+repository, answer FF2 for the observed pairs, directions, and windows. `Peer` still filters the
+raw receiver by ports only, so FR-34 remains partial; that gap is documented rather than patched
+here.
 
 ## Requirements
 

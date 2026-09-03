@@ -13,11 +13,13 @@ The companion thesis asks two research questions, and the architecture is shaped
 - **FF2:** how far does the surplus area survive along real network paths, and how do NAT and filter
   devices treat datagrams that carry it?
 
-> Status note (2026-07-13): the in-scope endpoint implementation is present; the types and signatures
+> Status note (2026-08-26): the in-scope endpoint implementation is present; the types and signatures
 > below describe the current architecture, not the original bootstrap skeleton. Remaining limitations
 > are named explicitly rather than hidden behind "planned" wording. The Step 17 harness covers local,
-> controlled namespace/veth, routed, Linux NAT, and negative filter paths; it does not yet answer FF2
-> over real external paths or surplus-specific middleboxes.
+> controlled namespace/veth, routed, Linux NAT, and negative filter paths. External campaigns from
+> 2026-08-10 through 2026-08-16, sealed in the companion thesis repository, answer FF2 for the
+> observed pairs, directions, and windows. This crate still has no committed tunnel lane or
+> surplus-only rewriting middlebox.
 
 ## 1. Overview and design goals
 
@@ -262,9 +264,12 @@ validated per-fragment options, and caller-supplied timestamp. Output: a `Reasse
 (`Incomplete`, `Complete { tail, udp_length, fragment_options, fragment_option_failures,
 fragment_ocs_nonzero }`, or `Abort(reason)`). Root-free.
 
-One cache instance is scoped to one source/destination address-and-port pair. `Peer` enforces this by
-ownership; low-level callers must do the same because sharing one cache would share its pending-state
-budget across socket pairs, contrary to the Sec. 11.4 resource-isolation SHOULD NOT.
+One cache instance is intended to be scoped to one source/destination address-and-port pair.
+Low-level callers must keep a separate cache per pair because sharing one cache would share its
+pending-state budget, contrary to the Sec. 11.4 resource-isolation SHOULD NOT. `Peer` owns one cache
+per instance, but `Peer::bind` filters the raw receiver by ports only (`own_src = None`). Datagrams
+of different address pairs that share those ports therefore share the same pending-partial budget.
+This is a documented high-level API gap (FR-34 partial), not a silent enforcement.
 
 ### `recv/pipeline` (pure)
 
@@ -308,7 +313,8 @@ The two-tier public API (RFC 9868 Sec. 15 use; locked decision):
   `IdentificationGenerator`. `Peer::send()` applies the OCS through the existing serializer/send
   path whenever options are present and auto-fragments when the payload exceeds the configured
   single-datagram capacity; `Peer::recv()` reassembles transparently and returns only completed user
-  datagrams.
+  datagrams. `Peer::bind` filters the raw receiver by ports only, so the owned cache is not strictly
+  bound to one address 4-tuple (FR-34 partial).
 
 The API logic is pure orchestration; the privileged work happens inside the socket modules it drives.
 `ReceivePolicy` can require successfully processed APC/MDS/MRDS/REQ/RES options from the datagram or
@@ -593,7 +599,7 @@ pub enum ReassemblyOutcome {
     Abort(AbortReason),
 }
 
-pub enum AbortReason { Overlap, LimitExceeded, Timeout }
+pub enum AbortReason { Overlap, LimitExceeded }
 
 pub struct ReassemblyLimits {
     pub max_reassembled_size: usize, // default IPv4 MRDS 2926, including UDP header
